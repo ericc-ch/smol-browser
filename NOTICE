@@ -1,0 +1,14 @@
+smol-browser
+
+Copyright (c) 2026 smol-browser contributors
+
+This project is a fork of Obscura with substantial modifications:
+
+  Obscura
+  https://github.com/h4ckf0r0day/obscura
+  Copyright (c) Obscura contributors
+
+Both are licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes software developed by third parties. See the LICENSE
+files under vendor/ for taffy, cosmic-text, and bundled fonts.
