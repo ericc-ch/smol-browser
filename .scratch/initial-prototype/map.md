@@ -24,7 +24,7 @@ Decisions so far:
 
 Build tickets (spec: ./spec.md):
 - [10 rquickjs skeleton](./tickets/10-rquickjs-skeleton.md) — QuickJS beside V8; shim loads; Page still on V8
-- [11 sync ops](./tickets/11-sync-ops.md) — required ops as closures; createElement works
+- [11 sync ops](./tickets/11-sync-ops.md) — required ops as closures; createElement works (done)
 - [12 engine loop](./tickets/12-engine-loop-timers.md) — hand-rolled pump, timers, posted tasks
 - [13 async fetch](./tickets/13-async-fetch.md) — op_fetch_url via network thread + channel
 - [14 watchdog](./tickets/14-watchdog.md) — interrupt hung JS; can run in parallel with 13

@@ -948,8 +948,9 @@ fn op_dom(
     // inconsistent tree node degrades to a null result for that single call.
     // No per-call clone: on the happy path this is just a landing pad, so the
     // hot DOM path (querySelector/getAttribute/...) pays nothing measurable.
+    let shared = state.borrow::<SharedState>().clone();
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        op_dom_inner(state, cmd, arg1, arg2)
+        op_dom_inner(&shared, cmd, arg1, arg2)
     }))
     .unwrap_or_else(|_| {
         tracing::error!("op_dom panicked; returning null");
@@ -957,8 +958,12 @@ fn op_dom(
     })
 }
 
-fn op_dom_inner(state: &OpState, cmd: String, arg1: String, arg2: String) -> String {
-    let shared = state.borrow::<SharedState>().clone();
+pub(crate) fn op_dom_inner(
+    shared: &SharedState,
+    cmd: String,
+    arg1: String,
+    arg2: String,
+) -> String {
     {
         // Scroll offsets belong to a node at its current tree position.
         // Temporary box/style loss keeps that latent state, but DOM removal,
