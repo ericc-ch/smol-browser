@@ -14,13 +14,12 @@ impl QuickJsRuntime {
     pub fn new() -> Result<Self, String> {
         let runtime = Runtime::new().map_err(|e| e.to_string())?;
         let context = Context::full(&runtime).map_err(|e| e.to_string())?;
-        let this = Self { context };
-        this.install_stub_ops()?;
-        Ok(this)
+        Self::install_stub_ops(&context)?;
+        Ok(Self { context })
     }
 
-    fn install_stub_ops(&self) -> Result<(), String> {
-        self.context.with(|ctx| {
+    fn install_stub_ops(context: &Context) -> Result<(), String> {
+        context.with(|ctx| {
             ctx.eval::<(), _>(
                 r#"
                 globalThis.Deno = {
