@@ -22,10 +22,17 @@ Decisions so far:
 - [08 cookie persistence](./tickets/08-cookie-persistence.md) — already exists in obscura-net (persist/load to file); keep, zero work.
 - [09 accessibility tree](./tickets/09-accessibility-tree.md) — already exists as CDP Accessibility.getFullAXTree in Rust; keep, swap does not touch it.
 
+Build tickets (spec: ./spec.md):
+- [10 rquickjs skeleton](./tickets/10-rquickjs-skeleton.md) — QuickJS beside V8; shim loads; Page still on V8
+- [11 sync ops](./tickets/11-sync-ops.md) — required ops as closures; createElement works
+- [12 engine loop](./tickets/12-engine-loop-timers.md) — hand-rolled pump, timers, posted tasks
+- [13 async fetch](./tickets/13-async-fetch.md) — op_fetch_url via network thread + channel
+- [14 watchdog](./tickets/14-watchdog.md) — interrupt hung JS; can run in parallel with 13
+- [15 cutover](./tickets/15-cutover.md) — ObscuraJsRuntime is QuickJS; V8 gone
+- [16 gate](./tickets/16-gate-scoreboard.md) — obstacle course, IO re-check, size/RSS, WPT
+
 Not yet specified:
-- Swap order execution (krishn03id 8-step; ticket 04): which crate/part ports first in practice, and how the obstacle course gate is run against the swapped engine.
-- Cookie persistence, a11y, CDP, IO delta: already decided or parked (tickets 03, 08, 09).
-- Phase 2+3 (network swap to rquest, SDK shape, a11y snapshot polish): out of scope for this effort.
+- None for this effort. Phase 2+3 (rquest, SDK, CDP strip) stay out of scope.
 
 Out of scope:
 - Rendering/layout/screenshots (brief's honest menu, deferred).
