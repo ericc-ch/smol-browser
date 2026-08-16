@@ -1,13 +1,13 @@
 `--dump` formats the page output without writing JavaScript.
 
 ```bash
-obscura fetch https://example.com --dump html
-obscura fetch https://example.com --dump text
-obscura fetch https://example.com --dump markdown
-obscura fetch https://example.com --dump links
-obscura fetch https://example.com --dump assets
-obscura fetch https://example.com --dump original
-obscura fetch https://example.com --dump cookies
+tinybrowser fetch https://example.com --dump html
+tinybrowser fetch https://example.com --dump text
+tinybrowser fetch https://example.com --dump markdown
+tinybrowser fetch https://example.com --dump links
+tinybrowser fetch https://example.com --dump assets
+tinybrowser fetch https://example.com --dump original
+tinybrowser fetch https://example.com --dump cookies
 ```
 
 ## `html`
@@ -15,7 +15,7 @@ obscura fetch https://example.com --dump cookies
 Rendered HTML after JavaScript runs. Default.
 
 ```bash
-obscura fetch https://news.ycombinator.com --dump html > hn.html
+tinybrowser fetch https://news.ycombinator.com --dump html > hn.html
 ```
 
 ## `text`
@@ -23,7 +23,7 @@ obscura fetch https://news.ycombinator.com --dump html > hn.html
 Plain text. No markup.
 
 ```bash
-obscura fetch https://en.wikipedia.org/wiki/Rust_(programming_language) --dump text
+tinybrowser fetch https://en.wikipedia.org/wiki/Rust_(programming_language) --dump text
 ```
 
 ## `markdown`
@@ -31,7 +31,7 @@ obscura fetch https://en.wikipedia.org/wiki/Rust_(programming_language) --dump t
 Markdown conversion: headings, lists, links, code blocks, images.
 
 ```bash
-obscura fetch https://docs.example.com/page --dump markdown > page.md
+tinybrowser fetch https://docs.example.com/page --dump markdown > page.md
 ```
 
 ## `links`
@@ -39,7 +39,7 @@ obscura fetch https://docs.example.com/page --dump markdown > page.md
 Every `<a href>` on the page, one per line.
 
 ```bash
-obscura fetch https://example.com --dump links
+tinybrowser fetch https://example.com --dump links
 ```
 
 ## `assets`
@@ -47,7 +47,7 @@ obscura fetch https://example.com --dump links
 Every external resource (stylesheets, scripts, images, fonts, iframes), plus the URLs the page requested through `fetch()`/XHR, one JSON object per line.
 
 ```bash
-obscura fetch https://example.com --dump assets
+tinybrowser fetch https://example.com --dump assets
 ```
 
 ## `original`
@@ -55,8 +55,8 @@ obscura fetch https://example.com --dump assets
 The raw HTML the server sent, before JavaScript ran.
 
 ```bash
-obscura fetch https://my-spa.example --dump original > before.html
-obscura fetch https://my-spa.example --dump html     > after.html
+tinybrowser fetch https://my-spa.example --dump original > before.html
+tinybrowser fetch https://my-spa.example --dump html     > after.html
 diff before.html after.html
 ```
 
@@ -65,7 +65,7 @@ diff before.html after.html
 Every cookie in the jar as a JSON array, including HttpOnly cookies that `document.cookie` cannot see. Useful for capturing session tokens set by anti-bot challenges.
 
 ```bash
-obscura fetch https://example.com --dump cookies
+tinybrowser fetch https://example.com --dump cookies
 ```
 
 ## With `--wait-until`
@@ -73,12 +73,12 @@ obscura fetch https://example.com --dump cookies
 `--dump` runs after the wait condition:
 
 ```bash
-obscura fetch https://my-spa.example --wait-until load --dump markdown
+tinybrowser fetch https://my-spa.example --wait-until load --dump markdown
 ```
 
 ## Pipe and redirect
 
 ```bash
-obscura fetch https://example.com --dump markdown > example.md
-obscura fetch https://example.com --dump text --quiet | wc -w
+tinybrowser fetch https://example.com --dump markdown > example.md
+tinybrowser fetch https://example.com --dump text --quiet | wc -w
 ```

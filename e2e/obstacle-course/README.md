@@ -24,7 +24,7 @@ and records per-page latency (warmup + timed runs, min/median).
 - `manifest.json` — the stage list: file, the `--eval` check, the expected
   value, and run parameters (wait/timeout/runs/warmup).
 - `run.py` — the runner: serves this directory over a local HTTP origin and
-  drives `obscura fetch` against each stage.
+  drives `tinybrowser fetch` against each stage.
 
 ## Running
 
@@ -38,17 +38,17 @@ e2e/run.sh
 fail the process. Exit 0 means every required stage passed.
 
 ```sh
-OBSCURA_BIN=/path/to/obscura python3 run.py            # table
-OBSCURA_BIN=/path/to/obscura python3 run.py --json     # machine-readable
-OBSCURA_BIN=/path/to/obscura python3 run.py --filter react --runs 10
+TINYBROWSER_BIN=/path/to/tinybrowser python3 run.py            # table
+TINYBROWSER_BIN=/path/to/tinybrowser python3 run.py --json     # machine-readable
+TINYBROWSER_BIN=/path/to/tinybrowser python3 run.py --filter react --runs 10
 ```
 
-obscura blocks private/loopback addresses by default, so the runner passes
+tinybrowser blocks private/loopback addresses by default, so the runner passes
 `--allow-private-network` (the fixtures are served on `127.0.0.1`).
 
 ## Stages
 
-Grouped by the obscura feature they exercise (every stage is also timed):
+Grouped by the tinybrowser feature they exercise (every stage is also timed):
 
 **baseline / perf**
 | stage | exercises |
@@ -83,7 +83,7 @@ Grouped by the obscura feature they exercise (every stage is also timed):
 | spa-router | `history.pushState` client-side routing |
 | timers | `setTimeout` chain + microtask (event-loop settle) |
 
-**web-api** — the JS/DOM surface obscura implements
+**web-api** — the JS/DOM surface tinybrowser implements
 | stage | exercises |
 | ----- | --------- |
 | web-component | custom element + shadow DOM render |

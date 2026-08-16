@@ -13,7 +13,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 RUNNER = HERE / "run.py"
 
-FAKE_OBSCURA = r"""#!/usr/bin/env python3
+FAKE_TINYBROWSER = r"""#!/usr/bin/env python3
 import sys
 url = sys.argv[2]
 if "required-fail.html" in url:
@@ -39,15 +39,15 @@ def write_course(tmp, stages):
         "stages": stages,
     }
     (course / "manifest.json").write_text(json.dumps(manifest))
-    bin_path = course / "fake-obscura"
-    bin_path.write_text(FAKE_OBSCURA)
+    bin_path = course / "fake-tinybrowser"
+    bin_path.write_text(FAKE_TINYBROWSER)
     bin_path.chmod(bin_path.stat().st_mode | stat.S_IEXEC)
     return course, bin_path
 
 
 def run_course(course, bin_path):
     env = os.environ.copy()
-    env["OBSCURA_BIN"] = str(bin_path)
+    env["TINYBROWSER_BIN"] = str(bin_path)
     return subprocess.run(
         [sys.executable, str(course / "run.py"), "--json", "--runs", "1", "--warmup", "0"],
         cwd=course,

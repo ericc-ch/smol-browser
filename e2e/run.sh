@@ -2,8 +2,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-cargo build -p obscura-cli --bins --no-default-features
-export OBSCURA_BIN="${OBSCURA_BIN:-$ROOT/target/debug/obscura}"
+cargo build -p tinybrowser-cli --bins --no-default-features
+export TINYBROWSER_BIN="${TINYBROWSER_BIN:-$ROOT/target/debug/tinybrowser}"
 DRIVER="$ROOT/e2e/obstacle-course/run.py"
 
 if command -v python3 >/dev/null 2>&1; then

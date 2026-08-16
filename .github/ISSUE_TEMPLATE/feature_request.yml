@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest a capability or API for obscura
+description: Suggest a capability or API for tinybrowser
 labels: ["enhancement"]
 body:
   - type: markdown
@@ -26,7 +26,7 @@ body:
     id: problem
     attributes:
       label: Problem
-      description: What are you trying to do that obscura does not support today?
+      description: What are you trying to do that tinybrowser does not support today?
     validations:
       required: true
   - type: textarea
@@ -45,9 +45,9 @@ body:
     id: scope
     attributes:
       label: Scope
-      description: Obscura targets web scraping and AI-agent automation, with performance and stability as hard constraints.
+      description: tinybrowser targets web scraping and AI-agent automation, with performance and stability as hard constraints.
       options:
-        - label: This should not regress performance (obscura's speed and memory footprint are a hard constraint).
+        - label: This should not regress performance (tinybrowser's speed and memory footprint are a hard constraint).
           required: false
         - label: I described the expected visual output if this affects rendering.
           required: false

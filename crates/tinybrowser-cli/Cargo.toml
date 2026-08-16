@@ -1,0 +1,27 @@
+[package]
+name = "tinybrowser-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "tinybrowser"
+path = "src/main.rs"
+
+[features]
+default = []
+stealth = ["tinybrowser-core/stealth", "tinybrowser-net/stealth"]
+
+[dependencies]
+tinybrowser-core = { workspace = true }
+tinybrowser-cdp = { workspace = true }
+tinybrowser-dom = { workspace = true }
+tinybrowser-net = { workspace = true }
+tinybrowser-js = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+url = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

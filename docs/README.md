@@ -1,8 +1,8 @@
-Obscura is an open-source headless browser engine written in Rust. It runs JavaScript via V8, speaks the Chrome DevTools Protocol, and works as a drop-in replacement for headless Chrome with Puppeteer and Playwright.
+tinybrowser is an open-source headless browser engine written in Rust. It runs JavaScript via V8, speaks the Chrome DevTools Protocol, and works as a drop-in replacement for headless Chrome with Puppeteer and Playwright.
 
 ## Versus headless Chrome
 
-| Metric      | Obscura  | Headless Chrome |
+| Metric      | tinybrowser  | Headless Chrome |
 | ----------- | -------- | --------------- |
 | Memory      | 30 MB    | 200+ MB         |
 | Binary size | 70 MB    | 300+ MB         |

@@ -3,8 +3,8 @@
 ## CLI
 
 ```bash
-obscura fetch https://example.com --storage-dir ./obscura-data
-obscura fetch https://example.com --storage-dir ./obscura-data
+tinybrowser fetch https://example.com --storage-dir ./tinybrowser-data
+tinybrowser fetch https://example.com --storage-dir ./tinybrowser-data
 ```
 
 The second invocation starts with the cookies and localStorage left by the first.
@@ -12,14 +12,14 @@ The second invocation starts with the cookies and localStorage left by the first
 ## Server
 
 ```bash
-obscura serve --storage-dir ./obscura-data
+tinybrowser serve --storage-dir ./tinybrowser-data
 ```
 
-All CDP sessions read and write to the same directory. Run separate `obscura serve` processes with different `--storage-dir` paths for isolated profiles.
+All CDP sessions read and write to the same directory. Run separate `tinybrowser serve` processes with different `--storage-dir` paths for isolated profiles.
 
 ## Layout
 
-Inside `./obscura-data`:
+Inside `./tinybrowser-data`:
 
 - `cookies.json`: cookie jar in a stable format with `same_site`, `expires`, `http_only`, `secure`.
 - `localStorage/<origin>.json`: one file per origin.
@@ -27,7 +27,7 @@ Inside `./obscura-data`:
 The format is stable. Inspect with `jq`:
 
 ```bash
-jq '.[] | select(.domain == "example.com")' ./obscura-data/cookies.json
+jq '.[] | select(.domain == "example.com")' ./tinybrowser-data/cookies.json
 ```
 
 ## When state is written
@@ -39,7 +39,7 @@ jq '.[] | select(.domain == "example.com")' ./obscura-data/cookies.json
 ## Login once, scrape many
 
 ```bash
-obscura serve --storage-dir ./session-1
+tinybrowser serve --storage-dir ./session-1
 ```
 
 Drive a login flow once via Puppeteer or Playwright. Stop the server. Subsequent runs against the same `--storage-dir` start logged in.
@@ -47,12 +47,12 @@ Drive a login flow once via Puppeteer or Playwright. Stop the server. Subsequent
 ## Multiple identities
 
 ```bash
-obscura serve --port 9222 --storage-dir ./identity-a
-obscura serve --port 9223 --storage-dir ./identity-b
+tinybrowser serve --port 9222 --storage-dir ./identity-a
+tinybrowser serve --port 9223 --storage-dir ./identity-b
 ```
 
 ## Clear state
 
 ```bash
-rm -rf ./obscura-data
+rm -rf ./tinybrowser-data
 ```

@@ -1,4 +1,4 @@
-## `obscura`
+## `tinybrowser`
 
 Top-level flags apply to every subcommand.
 
@@ -16,7 +16,7 @@ Top-level flags apply to every subcommand.
 -V, --version                Version
 ```
 
-## `obscura fetch <URL>`
+## `tinybrowser fetch <URL>`
 
 Load a URL and print its content or an evaluated expression.
 
@@ -43,7 +43,7 @@ default and may be combined with `--eval`; the expression runs before capture,
 which is useful for scrolling or preparing page state. It is not available in
 `--file` batch mode.
 
-When `--wait` is omitted, Obscura drives timers and async work until the page
+When `--wait` is omitted, tinybrowser drives timers and async work until the page
 becomes quiescent, with a five-second ceiling. Supplying `--wait N` instead
 requests a fixed `N`-second delay. `--timeout` separately bounds navigation.
 
@@ -59,7 +59,7 @@ requests a fixed `N`-second delay. `--timeout` separately bounds navigation.
 | `original` | Raw HTTP response body (binary-safe, bypasses the engine) |
 | `cookies`  | All cookies in the jar as a JSON array, including HttpOnly cookies invisible to `document.cookie` |
 
-## `obscura serve`
+## `tinybrowser serve`
 
 Run the CDP server. Puppeteer and Playwright connect over WebSocket.
 
@@ -79,7 +79,7 @@ Run the CDP server. Puppeteer and Playwright connect over WebSocket.
 
 Default endpoint is `ws://127.0.0.1:9222`.
 
-## `obscura scrape [URLS]...`
+## `tinybrowser scrape [URLS]...`
 
 Run a JS expression across many URLs in parallel.
 
@@ -100,14 +100,14 @@ Run a JS expression across many URLs in parallel.
 Read URLs from stdin with `-`:
 
 ```bash
-cat urls.txt | obscura scrape - --eval "document.title" --concurrency 20
+cat urls.txt | tinybrowser scrape - --eval "document.title" --concurrency 20
 ```
 
-Requires `obscura-worker` next to `obscura` in `PATH`.
+Requires `tinybrowser-worker` next to `tinybrowser` in `PATH`.
 
-## `obscura mcp`
+## `tinybrowser mcp`
 
-Run obscura as an MCP server.
+Run tinybrowser as an MCP server.
 
 ```
     --http                   HTTP transport instead of stdio
@@ -120,7 +120,7 @@ Run obscura as an MCP server.
 -v, --verbose                Enable info logging
 ```
 
-`--host` only applies with `--http`. The default `127.0.0.1` keeps the server loopback-only; set `0.0.0.0` to bind all interfaces (for example a Docker Compose sidecar) and pair it with `OBSCURA_MCP_ALLOWED_ORIGINS`.
+`--host` only applies with `--http`. The default `127.0.0.1` keeps the server loopback-only; set `0.0.0.0` to bind all interfaces (for example a Docker Compose sidecar) and pair it with `TINYBROWSER_MCP_ALLOWED_ORIGINS`.
 
 Default transport is stdio. See [Use the MCP server](Use-the-MCP-server.md).
 

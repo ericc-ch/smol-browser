@@ -1,10 +1,10 @@
-The `obscura` crate embeds the engine in a Rust program with a `Browser` / `Page` / `Element` API plus a cookie store, no CDP round-trips. It builds V8 from source, so it is a git dependency rather than a crates.io release.
+The `tinybrowser-lib` crate embeds the engine in a Rust program with a `Browser` / `Page` / `Element` API plus a cookie store, no CDP round-trips. It builds V8 from source, so it is a git dependency rather than a crates.io release.
 
 ## Add the dependency
 
 ```toml
 [dependencies]
-obscura = { git = "https://github.com/h4ckf0r0day/obscura" }
+tinybrowser-lib = { git = "https://github.com/h4ckf0r0day/obscura" }
 tokio = { version = "1", features = ["rt", "macros"] }
 anyhow = "1"
 ```
@@ -12,13 +12,13 @@ anyhow = "1"
 The first build compiles V8 from source, so it is slow and needs the same build tools as [Build from source](Build-from-source.md). Pin a tag for reproducible builds:
 
 ```toml
-obscura = { git = "https://github.com/h4ckf0r0day/obscura", tag = "v0.1.7" }
+tinybrowser-lib = { git = "https://github.com/h4ckf0r0day/obscura", tag = "v0.1.7" }
 ```
 
 ## Quickstart
 
 ```rust
-use obscura::Browser;
+use tinybrowser_lib::Browser;
 use std::time::Duration;
 
 #[tokio::main]
@@ -72,7 +72,7 @@ The interception API observes, blocks, mocks, and rewrites the requests a page m
 `on_request` and `on_response` fire for every request and response (navigation and JS `fetch()`/XHR) and are non-blocking. `on_response` is the main path for capturing the JSON an SPA loads asynchronously. Both return a stable id; pass it to `off_request` / `off_response` to detach the callback when a crawl phase is done. Callbacks are scoped to the page that registered them: they never fire for another page's requests and are dropped with the page.
 
 ```rust
-use obscura::{Browser, ResourceType};
+use tinybrowser_lib::{Browser, ResourceType};
 use std::sync::Arc;
 
 let browser = Browser::new()?;
@@ -93,7 +93,7 @@ page.settle(2000).await;   // let in-page fetch() calls resolve
 `enable_interception()` returns a channel of every JS `fetch()`/XHR request. Resolve each through its `resolver` to pass, block, mock, or rewrite it.
 
 ```rust
-use obscura::{Browser, InterceptResolution};
+use tinybrowser_lib::{Browser, InterceptResolution};
 
 let mut page = browser.new_page().await?;
 let mut rx = page.enable_interception();

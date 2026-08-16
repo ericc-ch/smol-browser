@@ -5,7 +5,7 @@ known cross-thread delivery bug fixed; 5 consecutive green full-suite runs
 (+ 1 stress run) on this 4-core machine.
 
 Notes:
-- AGENTS.md verify: workspace nextest (exclude obscura-render) + `e2e/run.sh`.
+- AGENTS.md verify: workspace nextest + `e2e/run.sh`.
 - 4-core box; `--test-threads 8` oversubscription surfaced 3 flakes (kept as stress probe).
 - Code-conventions skill: tests through public boundaries; assert observable behavior, not implementation timing.
 - No "seam" jargon; no fake-clock engine surgery unless a case needs it.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Obscura obstacle course runner.
+"""tinybrowser obstacle course runner.
 
-Serves obstacle-course/ over a local HTTP origin and drives `obscura fetch`
+Serves obstacle-course/ over a local HTTP origin and drives `tinybrowser fetch`
 against each fixture, reporting per-stage correctness + latency (min/median over
 timed runs). It is a feature + speed showcase: stages span extraction (--dump),
 the JS/DOM/Web-API surface (--eval), scraping/stealth, charset decoding, and
@@ -15,9 +15,9 @@ Stage types (manifest.json):
 `expected_fail: true` still runs the stage and prints PASS/FAIL. It does not
 fail the process. Exit 0 means every required stage passed.
 
-obscura blocks loopback by default, so fetches pass --allow-private-network.
+tinybrowser blocks loopback by default, so fetches pass --allow-private-network.
 
-Usage: OBSCURA_BIN=/path/to/obscura python3 run.py [--json] [--filter X] [--runs N]
+Usage: TINYBROWSER_BIN=/path/to/tinybrowser python3 run.py [--json] [--filter X] [--runs N]
 """
 import argparse, json, os, socket, statistics, subprocess, sys, threading, time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -29,12 +29,12 @@ def free_port():
     s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
 
 
-def run_fetch(obscura_bin, url, cmd_args, wait_secs, timeout_secs):
-    """One `obscura fetch`; returns (wall_ms, stdout_str_or_None)."""
+def run_fetch(tinybrowser_bin, url, cmd_args, wait_secs, timeout_secs):
+    """One `tinybrowser fetch`; returns (wall_ms, stdout_str_or_None)."""
     t0 = time.time()
     try:
         proc = subprocess.run(
-            [obscura_bin, "fetch", url, "--allow-private-network", "--quiet",
+            [tinybrowser_bin, "fetch", url, "--allow-private-network", "--quiet",
              "--timeout", str(timeout_secs), "--wait", str(wait_secs)] + cmd_args,
             capture_output=True, text=True, timeout=timeout_secs + 15,
         )
@@ -80,7 +80,7 @@ def main():
     ap.add_argument("--filter", help="only stages whose name or category contains this")
     args = ap.parse_args()
 
-    obscura_bin = os.environ.get("OBSCURA_BIN", "obscura")
+    tinybrowser_bin = os.environ.get("TINYBROWSER_BIN", "tinybrowser")
     manifest = json.load(open(os.path.join(HERE, "manifest.json")))
     runs = args.runs if args.runs is not None else manifest.get("runs", 5)
     warmup = args.warmup if args.warmup is not None else manifest.get("warmup", 1)
@@ -106,7 +106,7 @@ def main():
     results, ok_count = [], 0
     if not args.json:
         print(f"obstacle course: {len(stages)} stages, {runs} runs (warmup {warmup}), "
-              f"wait {wait_secs}s\n  bin: {obscura_bin}\n")
+              f"wait {wait_secs}s\n  bin: {tinybrowser_bin}\n")
         print(f"{'stage':<18}{'cat':<12}{'result':<7}{'min ms':>8}{'med ms':>8}   detail")
         print("-" * 86)
 
@@ -115,10 +115,10 @@ def main():
         url = f"{base}/{st['file']}"
         cargs = stage_args(st)
         for _ in range(warmup):
-            run_fetch(obscura_bin, url, cargs, wait_secs, timeout_secs)
+            run_fetch(tinybrowser_bin, url, cargs, wait_secs, timeout_secs)
         times, last = [], None
         for _ in range(runs):
-            wall, out = run_fetch(obscura_bin, url, cargs, wait_secs, timeout_secs)
+            wall, out = run_fetch(tinybrowser_bin, url, cargs, wait_secs, timeout_secs)
             times.append(wall); last = out
         passed, detail = check_result(st, last)
         expected_fail = bool(st.get("expected_fail"))

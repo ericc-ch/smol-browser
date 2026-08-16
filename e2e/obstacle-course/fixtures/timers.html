@@ -5,7 +5,7 @@
   <div id="out">pending</div>
   <!-- Deferred content via a setTimeout chain + a microtask. Exercises the
        post-load event-loop settle (Page::settle / the --wait window): a scraper
-       that reads at the load event would miss this; obscura must pump the loop. -->
+       that reads at the load event would miss this; tinybrowser must pump the loop. -->
   <script>
     (function () {
       var steps = [];

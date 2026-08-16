@@ -9,8 +9,8 @@ cargo nextest run --release --features render --no-fail-fast
 Crate-scoped:
 
 ```bash
-cargo nextest run --release --features render -p obscura-cdp
-cargo nextest run --release --features render -p obscura-browser
+cargo nextest run --release --features render -p tinybrowser-cdp
+cargo nextest run --release --features render -p tinybrowser-core
 ```
 
 By name:
@@ -25,14 +25,14 @@ release mode; debug builds are not a fidelity or performance gate.
 
 ### CDP parity tests
 
-`crates/obscura-cdp/tests/cdp_*.rs` exercise CDP methods end-to-end with a real `dispatch` call and an in-process HTTP server.
+`crates/tinybrowser-cdp/tests/cdp_*.rs` exercise CDP methods end-to-end with a real `dispatch` call and an in-process HTTP server.
 
 Pattern:
 
 ```rust
 #[tokio::test(flavor = "current_thread")]
 async fn my_test() {
-    std::env::set_var("OBSCURA_ALLOW_PRIVATE_NETWORK", "1");
+    std::env::set_var("TINYBROWSER_ALLOW_PRIVATE_NETWORK", "1");
     let url = serve_once().await;
     let mut ctx = CdpContext::new();
     let page_id = ctx.create_page();
@@ -49,19 +49,19 @@ async fn my_test() {
 ## Logging
 
 ```bash
-RUST_LOG=obscura=info  obscura serve
-RUST_LOG=obscura=debug obscura serve
-RUST_LOG=obscura_cdp=trace,obscura_browser=debug obscura serve
+RUST_LOG=tinybrowser=info  tinybrowser serve
+RUST_LOG=tinybrowser=debug tinybrowser serve
+RUST_LOG=tinybrowser_cdp=trace,tinybrowser_core=debug tinybrowser serve
 ```
 
 Logs go to stderr.
 
-`--verbose` on any subcommand is equivalent to `RUST_LOG=obscura=info`.
+`--verbose` on any subcommand is equivalent to `RUST_LOG=tinybrowser=info`.
 
 ## Driving the CDP server manually
 
 ```bash
-obscura serve --port 9222 --verbose
+tinybrowser serve --port 9222 --verbose
 ```
 
 In another shell:
@@ -80,11 +80,11 @@ Useful for reproducing what Puppeteer or Playwright is doing without their abstr
 
 ### `Target.createTarget timed out`
 
-Lock contention in the dispatcher. Should not happen on current main. If it does, run with `RUST_LOG=obscura_cdp=trace`, look for handlers that hold `v8_lock` across long awaits.
+Lock contention in the dispatcher. Should not happen on current main. If it does, run with `RUST_LOG=tinybrowser_cdp=trace`, look for handlers that hold `v8_lock` across long awaits.
 
 ### `page.goto()` returns `null` from Puppeteer
 
-Means `Network.requestWillBeSent` for the main document did not arrive with `requestId == loaderId`. Check `do_navigate` in `crates/obscura-cdp/src/domains/page.rs`.
+Means `Network.requestWillBeSent` for the main document did not arrive with `requestId == loaderId`. Check `do_navigate` in `crates/tinybrowser-cdp/src/domains/page.rs`.
 
 ### `Cannot find context with specified id`
 
@@ -96,7 +96,7 @@ Two pages tried to use V8 concurrently. The `v8_lock` was bypassed, or a handler
 
 ### Test hangs
 
-A handler is awaiting something that never resolves. Run with `RUST_LOG=obscura=trace` and check the last log line before the hang.
+A handler is awaiting something that never resolves. Run with `RUST_LOG=tinybrowser=trace` and check the last log line before the hang.
 
 ## Reproducing user bug reports
 
@@ -111,9 +111,9 @@ real-site suite at both the top and bottom of pages:
 
 ```bash
 RUN_ROOT="$(mktemp -d)"
-OBSCURA_BIN=./target/release/obscura render-repros/run.sh "$RUN_ROOT/fixtures"
-OBSCURA_BIN=./target/release/obscura render-repros/representative-suite/run.sh "$RUN_ROOT/top"
-OBSCURA_BIN=./target/release/obscura render-repros/representative-suite/run.sh "$RUN_ROOT/bottom" bottom
+TINYBROWSER_BIN=./target/release/tinybrowser render-repros/run.sh "$RUN_ROOT/fixtures"
+TINYBROWSER_BIN=./target/release/tinybrowser render-repros/representative-suite/run.sh "$RUN_ROOT/top"
+TINYBROWSER_BIN=./target/release/tinybrowser render-repros/representative-suite/run.sh "$RUN_ROOT/bottom" bottom
 ```
 
 Set `BASELINE_BIN` or `CHROMIUM_BIN` when producing paired captures. Keep the
@@ -129,21 +129,21 @@ CPU with `perf` and a flamegraph:
 
 ```bash
 cargo build --release --features render
-perf record -F 99 -g -- ./target/release/obscura fetch https://heavy-spa.example
+perf record -F 99 -g -- ./target/release/tinybrowser fetch https://heavy-spa.example
 perf script | flamegraph.pl > flame.svg
 ```
 
 Memory with heaptrack:
 
 ```bash
-heaptrack ./target/release/obscura serve
+heaptrack ./target/release/tinybrowser serve
 ```
 
 Tokio task inspection:
 
 ```bash
 RUSTFLAGS="--cfg tokio_unstable" cargo build --release --features render
-./target/release/obscura serve
+./target/release/tinybrowser serve
 # in another shell
 tokio-console
 ```

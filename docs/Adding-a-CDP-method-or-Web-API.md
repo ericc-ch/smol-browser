@@ -6,10 +6,10 @@ Worked example: `MyDomain.doThing` that takes `{ name }` and returns `{ ok }`.
 
 ### 1. Add the handler
 
-Create or edit a file under `crates/obscura-cdp/src/domains/`:
+Create or edit a file under `crates/tinybrowser-cdp/src/domains/`:
 
 ```rust
-// crates/obscura-cdp/src/domains/my_domain.rs
+// crates/tinybrowser-cdp/src/domains/my_domain.rs
 use serde_json::{json, Value};
 use crate::dispatch::CdpContext;
 
@@ -30,7 +30,7 @@ pub async fn do_thing(
 
 ### 2. Register in the dispatcher
 
-In `crates/obscura-cdp/src/dispatch.rs`, add a match arm:
+In `crates/tinybrowser-cdp/src/dispatch.rs`, add a match arm:
 
 ```rust
 "MyDomain.doThing" => domains::my_domain::do_thing(&req.params, ctx, &req.session_id).await,
@@ -38,11 +38,11 @@ In `crates/obscura-cdp/src/dispatch.rs`, add a match arm:
 
 ### 3. Test it
 
-`crates/obscura-cdp/tests/cdp_my_domain.rs`:
+`crates/tinybrowser-cdp/tests/cdp_my_domain.rs`:
 
 ```rust
-use obscura_cdp::dispatch::{dispatch, CdpContext};
-use obscura_cdp::types::CdpRequest;
+use tinybrowser_cdp::dispatch::{dispatch, CdpContext};
+use tinybrowser_cdp::types::CdpRequest;
 use serde_json::json;
 
 #[tokio::test(flavor = "current_thread")]
@@ -63,7 +63,7 @@ async fn my_domain_do_thing_returns_ok() {
 Run:
 
 ```bash
-cargo nextest run --release --features render -p obscura-cdp my_domain
+cargo nextest run --release --features render -p tinybrowser-cdp my_domain
 ```
 
 ## Adding a Web API
@@ -72,7 +72,7 @@ Worked example: `crypto.subtle.digest`, real implementation backed by a Rust has
 
 ### 1. Add the Rust op
 
-In `crates/obscura-js/src/ops.rs`:
+In `crates/tinybrowser-js/src/ops.rs`:
 
 ```rust
 #[op2]
@@ -104,7 +104,7 @@ ops: std::borrow::Cow::Owned(vec![
 
 ### 3. Add the JS shim
 
-In `crates/obscura-js/js/bootstrap.js`:
+In `crates/tinybrowser-js/js/bootstrap.js`:
 
 ```js
 globalThis.crypto = globalThis.crypto || {};
@@ -121,7 +121,7 @@ globalThis.crypto.subtle.digest = function digest(algorithm, data) {
 
 ### 4. Add a dependency if needed
 
-`crates/obscura-js/Cargo.toml`:
+`crates/tinybrowser-js/Cargo.toml`:
 
 ```toml
 sha1 = "0.10"
@@ -132,7 +132,7 @@ sha2 = "0.10"
 
 ```bash
 cargo build --release --features render
-./target/release/obscura fetch https://example.com --eval "
+./target/release/tinybrowser fetch https://example.com --eval "
   crypto.subtle.digest('SHA-256', new TextEncoder().encode('hi'))
     .then(buf => Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join(''))
 "
@@ -148,7 +148,7 @@ cargo build --release --features render
 
 ## Worked examples in the tree
 
-- CDP method with intercept: `crates/obscura-cdp/src/domains/page.rs` `do_navigate`.
+- CDP method with intercept: `crates/tinybrowser-cdp/src/domains/page.rs` `do_navigate`.
 - Web API with op + JS shim: `crypto.subtle.digest` (above).
 - Web API in pure JS (no op): `DOMParser` in `bootstrap.js`.
 - Web API with async event firing: `WebSocket`, `IntersectionObserver` in `bootstrap.js`.

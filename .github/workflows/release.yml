@@ -19,16 +19,16 @@ jobs:
             # common LTS servers with glibc 2.35 instead of requiring the
             # newer glibc shipped by ubuntu-latest.
             os: ubuntu-22.04
-            name: obscura-x86_64-linux
+            name: tinybrowser-x86_64-linux
           - target: aarch64-unknown-linux-gnu
             # Native build on GitHub's ARM runner.
             os: ubuntu-22.04-arm
-            name: obscura-aarch64-linux
+            name: tinybrowser-aarch64-linux
           - target: aarch64-apple-darwin
             os: macos-latest
-            name: obscura-aarch64-macos
+            name: tinybrowser-aarch64-macos
           - target: x86_64-apple-darwin
-            # Must run on a native Intel runner. obscura-js bakes a V8 startup
+            # Must run on a native Intel runner. tinybrowser-js bakes a V8 startup
             # snapshot at build time, and that snapshot is architecture specific.
             # macos-latest is Apple Silicon, so building x86_64 there embeds an
             # arm64 snapshot into the Intel binary and V8 crashes deserializing
@@ -36,10 +36,10 @@ jobs:
             # image (available until Aug 2027); there is no cross-build that
             # produces a correct snapshot.
             os: macos-15-intel
-            name: obscura-x86_64-macos
+            name: tinybrowser-x86_64-macos
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            name: obscura-x86_64-windows
+            name: tinybrowser-x86_64-windows
 
     runs-on: ${{ matrix.os }}
 
@@ -75,24 +75,24 @@ jobs:
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} -p obscura-cli --bins --no-default-features
+        run: cargo build --release --target ${{ matrix.target }} -p tinybrowser-cli --bins --no-default-features
 
       - name: Stage release binary
         shell: bash
         run: |
           BIN_DIR=target/${{ matrix.target }}/release
           mkdir -p dist/default
-          cp "$BIN_DIR"/obscura* dist/default/
+          cp "$BIN_DIR"/tinybrowser* dist/default/
 
       - name: Build stealth release binary
-        run: cargo build --release --target ${{ matrix.target }} -p obscura-cli --bins --no-default-features --features stealth
+        run: cargo build --release --target ${{ matrix.target }} -p tinybrowser-cli --bins --no-default-features --features stealth
 
       - name: Stage stealth release binary
         shell: bash
         run: |
           BIN_DIR=target/${{ matrix.target }}/release
           mkdir -p dist/stealth
-          cp "$BIN_DIR"/obscura* dist/stealth/
+          cp "$BIN_DIR"/tinybrowser* dist/stealth/
 
       - name: Smoke test release binaries (V8 snapshot)
         # Run the V8 path once so a release never ships a binary that crashes at
@@ -102,7 +102,7 @@ jobs:
         shell: bash
         run: |
           for VARIANT in default stealth; do
-            BIN=dist/$VARIANT/obscura
+            BIN=dist/$VARIANT/tinybrowser
             [ -f "$BIN.exe" ] && BIN="$BIN.exe"
             test -x "$BIN"
             "$BIN" fetch "data:text/html,<title>ok</title>" --eval "1+1"
@@ -112,15 +112,15 @@ jobs:
         if: runner.os != 'Windows'
         working-directory: dist
         run: |
-          tar czf ../${{ matrix.name }}.tar.gz -C default obscura
-          tar czf ../${{ matrix.name }}-stealth.tar.gz -C stealth obscura
+          tar czf ../${{ matrix.name }}.tar.gz -C default tinybrowser
+          tar czf ../${{ matrix.name }}-stealth.tar.gz -C stealth tinybrowser
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         working-directory: dist
         run: |
-          7z a ../${{ matrix.name }}.zip ./default/obscura.exe
-          7z a ../${{ matrix.name }}-stealth.zip ./stealth/obscura.exe
+          7z a ../${{ matrix.name }}.zip ./default/tinybrowser.exe
+          7z a ../${{ matrix.name }}-stealth.zip ./stealth/tinybrowser.exe
 
       - name: Upload
         uses: softprops/action-gh-release@v2

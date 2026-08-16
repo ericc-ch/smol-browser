@@ -1,22 +1,22 @@
-<h2 align="center">Obscura</h2>
+<h2 align="center">tinybrowser</h2>
 <p align="center">
   <strong>The open-source headless browser for AI agents and web scraping.</strong><br>
   Lightweight, stealthy, and built in Rust.
 </p>
 <h3 align="center">Native rendering is here. No Chromium required. 🎉 </h3>
 <p align="center">
-  Capture screenshots, screencast live pages, and export PDFs directly with Obscura.
+  Capture screenshots, screencast live pages, and export PDFs directly with tinybrowser.
 </p>
 
 ---
 
-Obscura is a headless browser engine written in Rust, built for web scraping and AI agent automation. It runs real JavaScript via V8, supports the Chrome DevTools Protocol, and acts as a drop-in replacement for headless Chrome with Puppeteer and Playwright.
+tinybrowser is a headless browser engine written in Rust, built for web scraping and AI agent automation. It runs real JavaScript via V8, supports the Chrome DevTools Protocol, and acts as a drop-in replacement for headless Chrome with Puppeteer and Playwright.
 
-### Why Obscura over headless Chrome?
+### Why tinybrowser over headless Chrome?
 
 Designed for automation at scale, not desktop browsing.
 
-| Metric       | Obscura      | Headless Chrome |
+| Metric       | tinybrowser      | Headless Chrome |
 |--------------|--------------|------------------|
 | Memory       | **30 MB**    | 200+ MB          |
 | Binary size  | **70 MB**    | 300+ MB          |
@@ -34,13 +34,13 @@ Grab the latest binary from [Releases](https://github.com/h4ckf0r0day/obscura/re
 
 ```bash
 # Linux x86_64
-curl -LO https://github.com/h4ckf0r0day/obscura/releases/latest/download/obscura-x86_64-linux.tar.gz
-tar xzf obscura-x86_64-linux.tar.gz
-./obscura fetch https://example.com --eval "document.title"
+curl -LO https://github.com/h4ckf0r0day/obscura/releases/latest/download/tinybrowser-x86_64-linux.tar.gz
+tar xzf tinybrowser-x86_64-linux.tar.gz
+./tinybrowser fetch https://example.com --eval "document.title"
 
 # Linux ARM64 (aarch64)
-curl -LO https://github.com/h4ckf0r0day/obscura/releases/latest/download/obscura-aarch64-linux.tar.gz
-tar xzf obscura-aarch64-linux.tar.gz
+curl -LO https://github.com/h4ckf0r0day/obscura/releases/latest/download/tinybrowser-aarch64-linux.tar.gz
+tar xzf tinybrowser-aarch64-linux.tar.gz
 
 # Arch Linux (AUR)
 yay -S obscura-browser
@@ -49,19 +49,19 @@ yay -S obscura-browser
 nix-env -iA nixpkgs.obscura
 
 # macOS Apple Silicon
-curl -LO https://github.com/h4ckf0r0day/obscura/releases/latest/download/obscura-aarch64-macos.tar.gz
-tar xzf obscura-aarch64-macos.tar.gz
+curl -LO https://github.com/h4ckf0r0day/obscura/releases/latest/download/tinybrowser-aarch64-macos.tar.gz
+tar xzf tinybrowser-aarch64-macos.tar.gz
 
 # macOS Intel
-curl -LO https://github.com/h4ckf0r0day/obscura/releases/latest/download/obscura-x86_64-macos.tar.gz
-tar xzf obscura-x86_64-macos.tar.gz
+curl -LO https://github.com/h4ckf0r0day/obscura/releases/latest/download/tinybrowser-x86_64-macos.tar.gz
+tar xzf tinybrowser-x86_64-macos.tar.gz
 
 # Windows
 Download the `.zip` from the releases page and extract it manually.
 ```
 
 No Chrome, no Node.js, no dependencies. Release archives include both
-`obscura` and `obscura-worker`; keep them in the same directory for the
+`tinybrowser` and `tinybrowser-worker`; keep them in the same directory for the
 parallel `scrape` command.
 
 | Archive suffix | Rendering | Stealth transport |
@@ -77,7 +77,7 @@ usable on common LTS servers with glibc 2.35+.
 ### Docker
 
 ```bash
-docker run -d --name obscura -p 127.0.0.1:9222:9222 h4ckf0r0day/obscura
+docker run -d --name tinybrowser -p 127.0.0.1:9222:9222 h4ckf0r0day/obscura
 ```
 
 Image on [Docker Hub](https://hub.docker.com/r/h4ckf0r0day/obscura). Multi-stage build on `distroless/cc`, no shell, no package manager, ~57 MB compressed.
@@ -86,19 +86,19 @@ Image on [Docker Hub](https://hub.docker.com/r/h4ckf0r0day/obscura). Multi-stage
 
 ```bash
 git clone https://github.com/h4ckf0r0day/obscura.git
-cd obscura
+cd tinybrowser
 
 # Rendering
-cargo build --release -p obscura-cli --bins --features render
+cargo build --release -p tinybrowser-cli --bins --features render
 
 # Rendering and stealth
-cargo build --release -p obscura-cli --bins --features render,stealth
+cargo build --release -p tinybrowser-cli --bins --features render,stealth
 
 # No rendering
-cargo build --release -p obscura-cli --bins --no-default-features
+cargo build --release -p tinybrowser-cli --bins --no-default-features
 
 # No rendering, with stealth
-cargo build --release -p obscura-cli --bins --no-default-features --features stealth
+cargo build --release -p tinybrowser-cli --bins --no-default-features --features stealth
 ```
 
 Requires Rust 1.75+ ([rustup.rs](https://rustup.rs)). First build takes ~5 min (V8 compiles from source, cached after).
@@ -118,38 +118,38 @@ wreq/BoringSSL and therefore needs the additional build tools above.
 
 ```bash
 # Get the page title
-obscura fetch https://example.com --eval "document.title"
+tinybrowser fetch https://example.com --eval "document.title"
 
 # Extract all links
-obscura fetch https://example.com --dump links
+tinybrowser fetch https://example.com --dump links
 
 # Render JavaScript and dump HTML
-obscura fetch https://news.ycombinator.com --dump html
+tinybrowser fetch https://news.ycombinator.com --dump html
 
 # Write dump or eval output to a file
-obscura fetch https://example.com --dump text --output page.txt
+tinybrowser fetch https://example.com --dump text --output page.txt
 
 # Stream the raw response body verbatim (binary-safe; bypasses the JS/DOM layer).
 # Use this for images, JSON, JS, CSS, or any non-HTML resource.
-obscura fetch https://picsum.photos/200/300 --dump original > photo.jpg
+tinybrowser fetch https://picsum.photos/200/300 --dump original > photo.jpg
 
 # List every sub-resource URL the page would fetch (NDJSON; one record per asset)
-obscura fetch https://example.com --dump assets
+tinybrowser fetch https://example.com --dump assets
 
 # Fetch through an HTTP or SOCKS proxy
-obscura --proxy socks5://127.0.0.1:1080 fetch https://example.com --dump text
+tinybrowser --proxy socks5://127.0.0.1:1080 fetch https://example.com --dump text
 
 # Wait for dynamic content
-obscura fetch https://example.com --wait-until networkidle0
+tinybrowser fetch https://example.com --wait-until networkidle0
 
 # Bound navigation time for slow or broken pages
-obscura fetch https://example.com --timeout 10
+tinybrowser fetch https://example.com --timeout 10
 
 # Capture the settled page as PNG
-obscura fetch https://example.com --screenshot page.png
+tinybrowser fetch https://example.com --screenshot page.png
 
 # The screenshot flag also has a short form
-obscura fetch https://example.com -s page.png
+tinybrowser fetch https://example.com -s page.png
 ```
 
 ## Rendering
@@ -178,25 +178,25 @@ platform font rasterization may differ from Chromium. The existing
 ### Start the CDP server
 
 ```bash
-obscura serve --port 9222
+tinybrowser serve --port 9222
 
 # With stealth mode (anti-detection + tracker blocking)
-obscura serve --port 9222 --stealth
+tinybrowser serve --port 9222 --stealth
 ```
 
 ### Scrape in parallel
 
 ```bash
-obscura scrape url1 url2 url3 ... \
+tinybrowser scrape url1 url2 url3 ... \
   --concurrency 25 \
   --eval "document.querySelector('h1').textContent" \
   --format json
 
 # Suppress scrape progress on stderr for script-friendly output
-obscura scrape https://example.com --quiet --format json
+tinybrowser scrape https://example.com --quiet --format json
 
 # Scrape workers inherit the global proxy
-obscura --proxy http://127.0.0.1:8080 scrape https://example.com https://news.ycombinator.com
+tinybrowser --proxy http://127.0.0.1:8080 scrape https://example.com https://news.ycombinator.com
 ```
 
 ## Puppeteer / Playwright
@@ -255,14 +255,14 @@ await page.evaluate(() => {
   document.querySelector('#password').value = 'admin';
   document.querySelector('form').submit();
 });
-// Obscura handles the POST, follows the 302 redirect, maintains cookies
+// tinybrowser handles the POST, follows the 302 redirect, maintains cookies
 ```
 
 ## Benchmarks
 
 Page load:
 
-| Page | Obscura | Chrome |
+| Page | tinybrowser | Chrome |
 |------|---------|--------|
 | Static HTML | **51 ms** | ~500 ms |
 | JS + XHR + fetch | **84 ms** | ~800 ms |
@@ -293,7 +293,7 @@ MCP functionality.
 
 ## CDP API
 
-Obscura implements the Chrome DevTools Protocol for Puppeteer/Playwright compatibility.
+tinybrowser implements the Chrome DevTools Protocol for Puppeteer/Playwright compatibility.
 
 | Domain | Methods |
 |--------|---------|
@@ -308,26 +308,26 @@ Obscura implements the Chrome DevTools Protocol for Puppeteer/Playwright compati
 | **Input** | dispatchMouseEvent, dispatchKeyEvent |
 | **LP** | getMarkdown (DOM-to-Markdown conversion) |
 
-To download a large resource without one giant `Network.getResponseBody` blob, call `Fetch.takeResponseBodyAsStream` then read it in chunks with `IO.read` / `IO.close`. Response bodies over the cache limit (`OBSCURA_NETWORK_BODY_BUFFER_BYTES`, default 2 MiB) are not retained, so raise that limit when you intend to stream large downloads.
+To download a large resource without one giant `Network.getResponseBody` blob, call `Fetch.takeResponseBodyAsStream` then read it in chunks with `IO.read` / `IO.close`. Response bodies over the cache limit (`TINYBROWSER_NETWORK_BODY_BUFFER_BYTES`, default 2 MiB) are not retained, so raise that limit when you intend to stream large downloads.
 ## CLI Reference
 
 ### Tuning V8
 
-Obscura embeds V8 directly. Use `--v8-flags` to pass raw flags through to V8, same syntax as Chromium's `--js-flags` and Node's command-line flags. Most common use is raising the heap cap to fix `JavaScript heap out of memory` on JS-heavy pages:
+tinybrowser embeds V8 directly. Use `--v8-flags` to pass raw flags through to V8, same syntax as Chromium's `--js-flags` and Node's command-line flags. Most common use is raising the heap cap to fix `JavaScript heap out of memory` on JS-heavy pages:
 
 ```bash
-obscura --v8-flags "--max-old-space-size=4096" fetch <url>
+tinybrowser --v8-flags "--max-old-space-size=4096" fetch <url>
 ```
 
 ### Heavy SPAs (script execution budget)
 
-Obscura caps the page's script-execution phase so one slow or hung page cannot stall a worker. The default budget is 30s; pages that finish sooner return immediately, so the cap only affects pages that keep running. A very heavy React/Vue/Angular SPA on a slow network can need more time to boot before it fires its data requests. Raise the budget with `OBSCURA_SCRIPT_DEADLINE_MS` (milliseconds), and pair it with a matching navigation timeout in your CDP client:
+tinybrowser caps the page's script-execution phase so one slow or hung page cannot stall a worker. The default budget is 30s; pages that finish sooner return immediately, so the cap only affects pages that keep running. A very heavy React/Vue/Angular SPA on a slow network can need more time to boot before it fires its data requests. Raise the budget with `TINYBROWSER_SCRIPT_DEADLINE_MS` (milliseconds), and pair it with a matching navigation timeout in your CDP client:
 
 ```bash
-OBSCURA_SCRIPT_DEADLINE_MS=60000 obscura serve --port 9222
+TINYBROWSER_SCRIPT_DEADLINE_MS=60000 tinybrowser serve --port 9222
 ```
 
-### `obscura serve`
+### `tinybrowser serve`
 
 Start a CDP WebSocket server.
 
@@ -339,7 +339,7 @@ Start a CDP WebSocket server.
 | `--workers` | `1` | Number of parallel worker processes |
 | `--obey-robots` | off | Respect robots.txt |
 
-### `obscura fetch <URL>`
+### `tinybrowser fetch <URL>`
 
 Fetch and render a single page.
 
@@ -357,7 +357,7 @@ Fetch and render a single page.
 | `--quiet` | off | Suppress banner |
 | `--proxy` | — | Inherited global HTTP/SOCKS5 proxy URL |
 
-### `obscura scrape <URL...>`
+### `tinybrowser scrape <URL...>`
 
 Scrape multiple URLs in parallel with worker processes.
 
@@ -371,20 +371,20 @@ Scrape multiple URLs in parallel with worker processes.
 
 ## MCP (Model Context Protocol)
 
-Obscura ships an MCP server that exposes browser automation tools to AI agents (Claude Desktop, Cursor, etc.).
+tinybrowser ships an MCP server that exposes browser automation tools to AI agents (Claude Desktop, Cursor, etc.).
 
 ### Start
 
 **stdio** (default) — for Claude Desktop and MCP clients that launch a subprocess:
 
 ```bash
-obscura mcp
+tinybrowser mcp
 ```
 
 **HTTP** — for clients that connect over the network:
 
 ```bash
-obscura mcp --http --port 8080
+tinybrowser mcp --http --port 8080
 # endpoint: http://127.0.0.1:8080/mcp
 ```
 
@@ -401,8 +401,8 @@ Optional flags (both transports):
 ```json
 {
   "mcpServers": {
-    "obscura": {
-      "command": "obscura",
+    "tinybrowser": {
+      "command": "tinybrowser",
       "args": ["mcp"]
     }
   }
@@ -433,7 +433,7 @@ streaming `Page.startScreencast` protocol.
 
 ## Integrations
 
-- **[Hermes agent plugin](https://github.com/SGavrl/hermes-plugin-obscura)**: run [Hermes](https://github.com/NousResearch/hermes-agent) agent browser tasks on Obscura. The plugin spawns `obscura serve` per session (or connects to an already running server) and drives it over CDP, with optional `--stealth`.
+- **[Hermes agent plugin](https://github.com/SGavrl/hermes-plugin-obscura)**: run [Hermes](https://github.com/NousResearch/hermes-agent) agent browser tasks on tinybrowser. The plugin spawns `tinybrowser serve` per session (or connects to an already running server) and drives it over CDP, with optional `--stealth`.
 
 ## License
 

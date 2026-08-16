@@ -1,5 +1,5 @@
 name: Bug report
-description: Report a problem with obscura
+description: Report a problem with tinybrowser
 labels: ["bug"]
 body:
   - type: markdown
@@ -20,7 +20,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: obscura version or commit
+      label: tinybrowser version or commit
       placeholder: "e.g. v0.1.3 or commit a8358cc"
     validations:
       required: true
@@ -34,11 +34,11 @@ body:
   - type: dropdown
     id: surface
     attributes:
-      label: How are you using obscura?
+      label: How are you using tinybrowser?
       options:
         - CLI (fetch / serve / scrape / mcp)
         - CDP server with Puppeteer or Playwright
-        - Embedded Rust library (obscura crate)
+        - Embedded Rust library (tinybrowser-lib crate)
         - Other
     validations:
       required: true
@@ -86,7 +86,7 @@ body:
       label: Reproduction
       description: A URL, an `--eval` snippet, or a short CDP sequence. Multi-statement `--eval` that starts with `const` returns null, so wrap it in an IIFE.
       placeholder: |
-        obscura fetch https://example.com --eval "(function(){ return document.title; })()"
+        tinybrowser fetch https://example.com --eval "(function(){ return document.title; })()"
     validations:
       required: true
   - type: textarea
@@ -118,7 +118,7 @@ body:
       label: Does headless Chrome behave the same?
       description: Anti-bot, CAPTCHA, and login walls block headless Chrome too from a datacenter IP, so those are not engine bugs.
       options:
-        - "No: headless Chrome renders or behaves correctly and obscura does not"
+        - "No: headless Chrome renders or behaves correctly and tinybrowser does not"
         - "Yes: headless Chrome has the same problem"
         - "I did not check"
     validations:

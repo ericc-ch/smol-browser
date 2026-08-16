@@ -1,5 +1,5 @@
 {
-  "description": "Obscura obstacle course: a feature + speed showcase. Stages span frameworks (React/Preact/Vue), capability (async render, SPA routing, timers), the web-API surface (URL/TextDecoder/FileAPI/Range/Selection/custom elements/dialog/input), extraction (--dump text/markdown/links/html), and scraping/stealth (fingerprint/cookies/charset decoding). Each asserts the JS-rendered DOM or CLI output matches an expected value and records per-page latency; the runner exits non-zero on any mismatch.",
+  "description": "tinybrowser obstacle course: a feature + speed showcase. Stages span frameworks (React/Preact/Vue), capability (async render, SPA routing, timers), the web-API surface (URL/TextDecoder/FileAPI/Range/Selection/custom elements/dialog/input), extraction (--dump text/markdown/links/html), and scraping/stealth (fingerprint/cookies/charset decoding). Each asserts the JS-rendered DOM or CLI output matches an expected value and records per-page latency; the runner exits non-zero on any mismatch.",
   "wait_secs": 3,
   "timeout_secs": 20,
   "warmup": 1,
@@ -63,7 +63,7 @@
       "type": "eval",
       "check": "JSON.stringify(String(window.__obstacle||''))",
       "expect": "esm:mod:10:55:10",
-      "desc": "ES modules / code-splitting: <script type=module> statically imports ../modules/util.js (PREFIX + sum(range(5))=10) and does a runtime dynamic import() of ../modules/lazy.js, a code-split chunk that itself imports util.js (lazy.fib(10)=55, lazy.total([0..4])=10). Proves obscura runs module scripts, resolves nested static+dynamic module graphs, and settles on the async chunk load."
+      "desc": "ES modules / code-splitting: <script type=module> statically imports ../modules/util.js (PREFIX + sum(range(5))=10) and does a runtime dynamic import() of ../modules/lazy.js, a code-split chunk that itself imports util.js (lazy.fib(10)=55, lazy.total([0..4])=10). Proves tinybrowser runs module scripts, resolves nested static+dynamic module graphs, and settles on the async chunk load."
     },
     {
       "name": "observer-intersection",
@@ -250,7 +250,7 @@
       "mode": "text",
       "expect_contains": [
         "Headless Browsing for Reliable Scraping",
-        "Obscura runs real JavaScript so the extracted DOM matches what a user would see.",
+        "tinybrowser runs real JavaScript so the extracted DOM matches what a user would see.",
         "Readability extraction keeps the main article body and discards surrounding chrome."
       ],
       "expect_excludes": [
@@ -332,7 +332,7 @@
       "type": "eval",
       "check": "JSON.stringify(String(window.__obstacle||''))",
       "expect": "sjis:こんにちは世界",
-      "desc": "charset meta-sniff: page stored as raw Shift_JIS bytes with <meta charset=shift_jis>; obscura decodes the body to correct Japanese text"
+      "desc": "charset meta-sniff: page stored as raw Shift_JIS bytes with <meta charset=shift_jis>; tinybrowser decodes the body to correct Japanese text"
     }
   ]
 }

@@ -1,4 +1,4 @@
-# smol-browser Domain Terms
+# tinybrowser Domain Terms
 
 ## Terms
 
@@ -17,13 +17,13 @@ The seam between an agent's code and the browser process. CDP over WebSocket, on
 _Avoid_: the SDK boundary, JSON-RPC over stdio
 
 **the swap**:
-Replacing v8/deno_core with quickjs-ng/rquickjs inside obscura-js while keeping the shim unmodified.
+Replacing v8/deno_core with quickjs-ng/rquickjs inside tinybrowser-js while keeping the shim unmodified.
 
 **the spike**:
 A throwaway prototype that proves the risky parts of the swap before committing weeks to it.
 
 **the obstacle course**:
-The 33-stage end-to-end suite. It drives `obscura fetch` against local fixtures and checks results. It is the daily gate (`e2e/run.sh`).
+The 33-stage end-to-end suite. It drives `tinybrowser fetch` against local fixtures and checks results. It is the daily gate (`e2e/run.sh`).
 
 **the gate**:
 The pass condition for the swap: obstacle course results at or above the baseline, with the IO stage re-verified.
