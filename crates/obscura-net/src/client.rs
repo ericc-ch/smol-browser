@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use std::net::{IpAddr, SocketAddr};
@@ -451,10 +451,15 @@ pub type ResponseCallback = Arc<dyn Fn(&RequestInfo, &Response) + Send + Sync>;
 /// requests and dies with its page. The HTTP client itself stays
 /// callback-free; page-driven fetches pass the page's registry in. Ids keep
 /// the `u64` shape #416 established on `Page::on_request`/`on_response`.
+///
+/// `alive` is the page-lifetime tombstone: `Page::drop` clears it, so an
+/// in-flight fetch task still holding the `Arc` after the page is dropped
+/// stops delivering (issue #408 delivery-after-drop race).
 pub struct CallbackRegistry {
     on_request: RwLock<Vec<(u64, RequestCallback)>>,
     on_response: RwLock<Vec<(u64, ResponseCallback)>>,
     id_counter: std::sync::atomic::AtomicU64,
+    alive: AtomicBool,
 }
 
 impl CallbackRegistry {
@@ -463,6 +468,7 @@ impl CallbackRegistry {
             on_request: RwLock::new(Vec::new()),
             on_response: RwLock::new(Vec::new()),
             id_counter: std::sync::atomic::AtomicU64::new(1),
+            alive: AtomicBool::new(true),
         }
     }
 
@@ -528,14 +534,32 @@ impl CallbackRegistry {
         !self.on_response.read().await.is_empty()
     }
 
+    /// Tombstone the registry: the owning page is gone, so callbacks must stop
+    /// firing even for fetch tasks that outlive it. Idempotent.
+    pub fn kill(&self) {
+        self.alive.store(false, Ordering::SeqCst);
+    }
+
     pub async fn fire_request(&self, info: &RequestInfo) {
+        if !self.alive.load(Ordering::SeqCst) {
+            return;
+        }
         for (_, cb) in self.on_request.read().await.iter() {
+            if !self.alive.load(Ordering::SeqCst) {
+                return;
+            }
             cb(info);
         }
     }
 
     pub async fn fire_response(&self, info: &RequestInfo, resp: &Response) {
+        if !self.alive.load(Ordering::SeqCst) {
+            return;
+        }
         for (_, cb) in self.on_response.read().await.iter() {
+            if !self.alive.load(Ordering::SeqCst) {
+                return;
+            }
             cb(info, resp);
         }
     }

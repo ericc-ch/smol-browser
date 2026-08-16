@@ -289,6 +289,15 @@ pub struct Page {
     pub stealth_client: Option<Arc<StealthHttpClient>>,
 }
 
+impl Drop for Page {
+    fn drop(&mut self) {
+        // Tombstone the callback registry so in-flight fetch tasks holding a
+        // second Arc handle stop delivering on_request/on_response after the
+        // page is gone (issue #408 delivery-after-drop race).
+        self.callbacks.kill();
+    }
+}
+
 const MAX_STYLESHEET_IMPORT_DEPTH: u8 = 4;
 const MAX_STYLESHEET_RESOURCES: usize = 128;
 const DEFAULT_NAVIGATION_TIMEOUT_MS: u64 = 30_000;
