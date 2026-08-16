@@ -1,9 +1,9 @@
-//! Shared per-command V8 watchdog for the CDP server.
+//! Shared per-command JS watchdog for the CDP server.
 //!
-//! One long-lived watchdog thread bounds every in-flight V8 command with a
-//! deadline, instead of spawning and joining a thread per command (which adds
-//! ~240us per command on the hot dispatch path). `arm` and `disarm` are a mutex
-//! plus a condvar notify, in the low microseconds.
+//! One long-lived watchdog thread bounds every in-flight QuickJS command with
+//! a deadline, instead of spawning and joining a thread per command (which
+//! adds ~240us per command on the hot dispatch path). `arm` and `disarm` are a
+//! mutex plus a condvar notify, in the low microseconds.
 //!
 //! With the thread-per-connection server (issue #430) several connections can
 //! have a command armed at the same time (one isolate per connection, each on
