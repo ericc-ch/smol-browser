@@ -1603,7 +1603,7 @@ impl Page {
                 .map(|script| script.nid.to_string())
                 .collect::<Vec<_>>()
                 .join(",");
-            let _ = js.execute_script(
+            let _ = js.execute_script_no_checkpoint(
                 "<parser-scripts>",
                 &format!("globalThis.__markParserScripts([{}]);", ids),
             );
@@ -1759,7 +1759,7 @@ impl Page {
         // Scripts that check readyState === 'loading' will register DOMContentLoaded
         // listeners instead of calling their callback immediately.
         if let Some(js) = &mut self.js {
-            let _ = js.execute_script(
+            let _ = js.execute_script_no_checkpoint(
                 "<ready-state>",
                 "globalThis.__documentReadyState__ = 'loading';",
             );
@@ -1773,7 +1773,7 @@ impl Page {
         let preload_sources = self.preload_scripts.clone();
         if let Some(js) = &mut self.js {
             for source in &preload_sources {
-                if let Err(e) = js.execute_script_guarded("<preload>", source.as_str()) {
+                if let Err(e) = js.execute_script_guarded_no_checkpoint("<preload>", source.as_str()) {
                     tracing::debug!("Preload script error: {}", e);
                 }
             }
@@ -1880,14 +1880,14 @@ impl Page {
                             false,
                         );
                         if let Some(js) = &mut page.js {
-                            let _ = js.execute_script(
+                            let _ = js.execute_script_no_checkpoint(
                                 "<current-script>",
                                 &format!("globalThis.__currentScriptNid={};", script.nid),
                             );
-                            if let Err(error) = js.execute_script_guarded(&execution_url, &code) {
+                            if let Err(error) = js.execute_script_guarded_no_checkpoint(&execution_url, &code) {
                                 tracing::warn!("Script error ({}): {}", execution_url, error);
                             }
-                            let _ = js.execute_script(
+                            let _ = js.execute_script_no_checkpoint(
                                 "<current-script>",
                                 "globalThis.__currentScriptNid=0;",
                             );
@@ -1895,17 +1895,17 @@ impl Page {
                     }
                 } else if !script.inline.is_empty() {
                     if let Some(js) = &mut page.js {
-                        let _ = js.execute_script(
+                        let _ = js.execute_script_no_checkpoint(
                             "<current-script>",
                             &format!("globalThis.__currentScriptNid={};", script.nid),
                         );
                         if let Err(error) =
-                            js.execute_script_guarded(&script.base_url, &script.inline)
+                            js.execute_script_guarded_no_checkpoint(&script.base_url, &script.inline)
                         {
                             tracing::warn!("Inline script error: {}", error);
                         }
                         let _ = js
-                            .execute_script("<current-script>", "globalThis.__currentScriptNid=0;");
+                            .execute_script_no_checkpoint("<current-script>", "globalThis.__currentScriptNid=0;");
                     }
                 }
             };
@@ -1942,6 +1942,20 @@ impl Page {
                     } else {
                         let fetched_script = fetched.remove(&index);
                         execute_classic(self, script, fetched_script);
+                        // Resolve import() against the maps registered so far,
+                        // before a later parser import map can apply. Skip the
+                        // last parser script so a trailing dynamic import stays
+                        // post-load work (QuickJS loads modules synchronously).
+                        if all_scripts[index + 1..].iter().any(|next| {
+                            matches!(
+                                next.kind,
+                                ScriptKind::Classic | ScriptKind::Module | ScriptKind::ImportMap
+                            )
+                        }) {
+                            if let Some(js) = &mut self.js {
+                                let _ = js.drain_pending_jobs();
+                            }
+                        }
                     }
                 }
                 ScriptKind::Module => {
@@ -2098,7 +2112,7 @@ impl Page {
         // They still gate DOMContentLoaded, but observe the browser's
         // `interactive` readyState while they execute.
         if let Some(js) = &mut self.js {
-            let _ = js.execute_script(
+            let _ = js.execute_script_no_checkpoint(
                 "<ready-state-interactive>",
                 "globalThis.__documentReadyState__ = 'interactive';",
             );
@@ -2174,7 +2188,7 @@ impl Page {
             // dynamic script elements do not gate it. They do remain in the
             // document's load-event delay set, including scripts inserted by
             // a DOMContentLoaded listener.
-            let _ = js.execute_script(
+            let _ = js.execute_script_no_checkpoint(
                 "<dom-content-loaded>",
                 "try { document.dispatchEvent(new Event('DOMContentLoaded', {bubbles:false,cancelable:false})); } catch(e) {}\n\
                  try { window.dispatchEvent(new Event('DOMContentLoaded', {bubbles:false,cancelable:false})); } catch(e) {}",
@@ -2191,7 +2205,7 @@ impl Page {
             // readyState becomes complete before the load event. A script
             // inserted by an onload handler is therefore post-load work and
             // remains pending until an explicit caller settle/wait.
-            let _ = js.execute_script(
+            let _ = js.execute_script_no_checkpoint(
                 "<load-event>",
                 "globalThis.__documentReadyState__ = 'complete';\n\
                  if (typeof window.onload === 'function') { try { window.onload(); } catch(e) {} }\n\
@@ -2720,7 +2734,7 @@ impl Page {
                 if let Some(js) = &mut self.js {
                     let _ = tokio::time::timeout(
                         tokio::time::Duration::from_millis(50),
-                        js.run_event_loop(),
+                        js.run_load_delaying_event_loop_tick(),
                     )
                     .await;
                 } else {
@@ -4423,7 +4437,7 @@ mod tests {
                 .unwrap()
                 .evaluate("globalThis.__runs")
                 .unwrap(),
-            serde_json::json!(32.0),
+            serde_json::json!(32),
             "a cached response must still execute for every script element",
         );
         assert_eq!(script_requests.load(Ordering::SeqCst), 1);
@@ -4452,7 +4466,7 @@ mod tests {
                 .unwrap()
                 .evaluate("globalThis.__runs")
                 .unwrap(),
-            serde_json::json!(24.0),
+            serde_json::json!(24),
         );
         assert_eq!(script_requests.load(Ordering::SeqCst), 24);
     }
@@ -4951,7 +4965,7 @@ mod tests {
                     "globalThis.__lifecycleOrder.filter(value => value === 'window-onload').length",
                 )
                 .unwrap(),
-            serde_json::json!(1.0),
+            serde_json::json!(1),
             "window.onload must fire exactly once",
         );
     }

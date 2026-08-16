@@ -14,13 +14,9 @@ stealth = ["obscura-net/stealth"]
 # rasterizes screenshots. Off by default so the scraping build stays lean.
 render = ["dep:obscura-render", "obscura-render/paint"]
 
-[build-dependencies]
-deno_core = "0.350"
-
 [dependencies]
 obscura-dom = { workspace = true }
 obscura-net = { workspace = true }
-deno_core = "0.350"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -50,5 +46,5 @@ hkdf = "0.12"
 # CSPRNG for getRandomValues / randomUUID (replaces Math.random).
 getrandom = "0.2"
 obscura-render = { workspace = true, optional = true }
-# QuickJS-ng via the safe Rust wrapper. Lives beside deno_core/V8 until cutover.
-rquickjs = "0.12.2"
+# QuickJS-ng via the safe Rust wrapper. `loader` is the ES-module resolver/loader hook.
+rquickjs = { version = "0.12.2", features = ["loader"] }

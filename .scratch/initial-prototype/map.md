@@ -7,6 +7,7 @@ Notes:
 - Pinned at baseline-pin (6750d7d); never pull past it.
 - Build on this machine only; ignore brief's companion-box and ~/throwaway layout. This machine's layout: ~/projects (benchmark at ../obscura-benchmark).
 - Decision style: spike first, then the swap. Gate = existing test suite (obstacle course 33/33, WPT at phase boundaries). No picking 5 new target sites.
+- Gate policy (2026-08-16): skip the release binary build, obstacle course, WPT phase runs, and size/RSS scoreboard per slice; the V8 path is deleted at cutover (15), so keeping it release-green per slice is sunk cost. Per-slice gate is now `cargo nextest run -p obscura-js --features render` in dev (validates the logic both engines share) plus the quickjs tests. Full release gates (obstacle course 32/33+, WPT, scoreboard) run once at 16 after V8 is gone.
 - Keep CDP entirely for now; revisit at Phase 2/3 when the SDK exists.
 - Long-term stretch (out of scope for v1): sub-5MB binary; <1MB only if networking moves to a sidecar process. Embeddable Rust library API + C ABI.
 - Per AGENTS.md: test with `cargo nextest`, panic-safe ops, keep robustness invariants.

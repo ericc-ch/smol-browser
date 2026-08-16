@@ -4,12 +4,12 @@ What to build: The QuickJS runtime pumps jobs on a hand-rolled loop (no tokio on
 
 Blocked by: 11 Bind sync ops
 
-Status: open
+Status: done
 
-- [ ] Pending jobs run via `ctx.execute_pending_job()`, not `rt.execute_pending_job()`
-- [ ] A nextest `setTimeout` callback fires after the loop pumps
-- [ ] A nextest cancels a timer and the callback does not fire
-- [ ] `op_posted_task` settles on a later turn, not in the turn that called it
-- [ ] `op_async_runtime_available()` returns true on this runtime
-- [ ] Timer and resolver maps use `Persistent::save` so they are not tied to a short lifetime
-- [ ] bootstrap.js is not modified
+- [x] Pending jobs run via `ctx.execute_pending_job()`, not `rt.execute_pending_job()`
+- [x] A nextest `setTimeout` callback fires after the loop pumps
+- [x] A nextest cancels a timer and the callback does not fire
+- [x] `op_posted_task` settles on a later turn, not in the turn that called it
+- [x] `op_async_runtime_available()` returns true on this runtime
+- [x] Timer and resolver maps use `Persistent::save` so they are not tied to a short lifetime
+- [x] bootstrap.js is not modified

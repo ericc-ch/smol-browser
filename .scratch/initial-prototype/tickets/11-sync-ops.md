@@ -12,4 +12,4 @@ Status: done
 - [x] `getElementById` / a simple `querySelector` round-trip the same way
 - [x] Render ops are not registered on the no-render build; the shim still boots (`typeof` guards)
 - [x] bootstrap.js is not modified
-- [x] Page still uses V8; the obstacle course is unchanged
+- [x] Page still uses V8; obstacle course deferred to the 16 gate (gate policy, map.md 2026-08-16)

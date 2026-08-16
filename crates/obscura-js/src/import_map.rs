@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use deno_core::ModuleSpecifier;
+use url::Url;
 
 #[derive(Default)]
 pub(crate) struct ImportMap {
@@ -18,13 +18,13 @@ struct ResolvedModule {
 
 #[derive(Default)]
 struct SpecifierMap {
-    entries: HashMap<String, Option<ModuleSpecifier>>,
+    entries: HashMap<String, Option<Url>>,
     prefixes: Vec<String>,
 }
 
 impl ImportMap {
     pub(crate) fn parse(input: &str, base_url: &str) -> Result<Self, String> {
-        let base = ModuleSpecifier::parse(base_url)
+        let base = Url::parse(base_url)
             .map_err(|e| format!("Invalid import map base URL {}: {}", base_url, e))?;
         let parsed: serde_json::Value =
             serde_json::from_str(input).map_err(|e| format!("Invalid import map JSON: {}", e))?;
@@ -121,8 +121,8 @@ impl ImportMap {
     pub(crate) fn resolve(
         &mut self,
         specifier: &str,
-        referrer: &ModuleSpecifier,
-    ) -> Result<ModuleSpecifier, String> {
+        referrer: &Url,
+    ) -> Result<Url, String> {
         let as_url = resolve_url_like(specifier, referrer);
         let normalized = as_url
             .as_ref()
@@ -159,7 +159,7 @@ impl ImportMap {
         &mut self,
         referrer: String,
         specifier: String,
-        as_url: Option<&ModuleSpecifier>,
+        as_url: Option<&Url>,
     ) {
         let resolution = ResolvedModule {
             referrer,
@@ -173,7 +173,7 @@ impl ImportMap {
 }
 
 impl SpecifierMap {
-    fn parse(object: &serde_json::Map<String, serde_json::Value>, base: &ModuleSpecifier) -> Self {
+    fn parse(object: &serde_json::Map<String, serde_json::Value>, base: &Url) -> Self {
         let mut entries = HashMap::with_capacity(object.len());
         let mut prefixes = Vec::new();
         for (key, value) in object {
@@ -217,8 +217,8 @@ impl SpecifierMap {
     fn resolve_match(
         &self,
         normalized: &str,
-        as_url: Option<&ModuleSpecifier>,
-    ) -> Result<Option<ModuleSpecifier>, String> {
+        as_url: Option<&Url>,
+    ) -> Result<Option<Url>, String> {
         if let Some(address) = self.entries.get(normalized) {
             return address.clone().map(Some).ok_or_else(|| {
                 format!(
@@ -266,7 +266,7 @@ impl SpecifierMap {
     }
 }
 
-fn normalize_key(key: &str, base: &ModuleSpecifier) -> Option<String> {
+fn normalize_key(key: &str, base: &Url) -> Option<String> {
     if key.is_empty() {
         return None;
     }
@@ -277,11 +277,11 @@ fn normalize_key(key: &str, base: &ModuleSpecifier) -> Option<String> {
     )
 }
 
-fn resolve_url_like(specifier: &str, base: &ModuleSpecifier) -> Option<ModuleSpecifier> {
+fn resolve_url_like(specifier: &str, base: &Url) -> Option<Url> {
     if specifier.starts_with('/') || specifier.starts_with("./") || specifier.starts_with("../") {
         base.join(specifier).ok()
     } else {
-        ModuleSpecifier::parse(specifier).ok()
+        Url::parse(specifier).ok()
     }
 }
 
@@ -289,7 +289,7 @@ fn scope_applies(scope_prefix: &str, referrer: &str) -> bool {
     scope_prefix == referrer || (scope_prefix.ends_with('/') && referrer.starts_with(scope_prefix))
 }
 
-fn is_special_url(url: &ModuleSpecifier) -> bool {
+fn is_special_url(url: &Url) -> bool {
     matches!(
         url.scheme(),
         "ftp" | "file" | "http" | "https" | "ws" | "wss"
@@ -314,7 +314,7 @@ mod tests {
         )
         .unwrap();
         let referrer =
-            deno_core::ModuleSpecifier::parse("https://example.test/app/main.js").unwrap();
+            url::Url::parse("https://example.test/app/main.js").unwrap();
 
         assert_eq!(
             map.resolve("pkg", &referrer).unwrap().as_str(),
@@ -352,7 +352,7 @@ mod tests {
         .unwrap();
 
         let nested =
-            deno_core::ModuleSpecifier::parse("https://example.test/feature/nested/main.js")
+            url::Url::parse("https://example.test/feature/nested/main.js")
                 .unwrap();
         assert_eq!(
             map.resolve("shared", &nested).unwrap().as_str(),
@@ -372,7 +372,7 @@ mod tests {
         )
         .unwrap();
         let referrer =
-            deno_core::ModuleSpecifier::parse("https://example.test/app/main.js").unwrap();
+            url::Url::parse("https://example.test/app/main.js").unwrap();
 
         assert_eq!(
             map.resolve("fixed", &referrer).unwrap().as_str(),
@@ -400,7 +400,7 @@ mod tests {
     fn later_prefix_rules_cannot_capture_an_already_resolved_specifier() {
         let mut map = ImportMap::default();
         let referrer =
-            deno_core::ModuleSpecifier::parse("https://example.test/app/main.js").unwrap();
+            url::Url::parse("https://example.test/app/main.js").unwrap();
         assert_eq!(
             map.resolve("./pkg/item.js", &referrer).unwrap().as_str(),
             "https://example.test/app/pkg/item.js",
@@ -432,7 +432,7 @@ mod tests {
         )
         .unwrap();
         let referrer =
-            deno_core::ModuleSpecifier::parse("https://example.test/app/feature/main.js").unwrap();
+            url::Url::parse("https://example.test/app/feature/main.js").unwrap();
         assert_eq!(
             map.resolve("pkg", &referrer).unwrap().as_str(),
             "https://example.test/scoped.js",

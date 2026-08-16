@@ -1,19 +1,18 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
-use deno_core::{JsRuntime, RuntimeOptions};
 use obscura_dom::{DomTree, NodeId};
 
-/// Re-exported so other crates (obscura-browser, obscura-cdp) can name the V8
-/// isolate handle without taking a direct dependency on deno_core.
-pub use deno_core::v8::IsolateHandle;
+/// Cloneable handle the CDP watchdog uses to interrupt hung JavaScript.
+/// QuickJS interrupt flag; same method names as the old V8 isolate handle.
+pub use crate::quickjs::QuickJsIsolateHandle as IsolateHandle;
 
 use crate::import_map::ImportMap;
-use crate::module_loader::{ModuleLoadActivity, ObscuraModuleLoader};
+use crate::module_loader::ModuleLoadActivity;
+use crate::quickjs::{spawn_quickjs_watchdog, QuickJsRuntime, QuickJsWatchdogToken};
 #[cfg(all(test, feature = "render"))]
 use crate::ops::ensure_prepared_render;
-use crate::ops::{build_extension, node_is_script, ObscuraState, StoredNetworkResponseBody};
+use crate::ops::{node_is_script, StoredNetworkResponseBody};
 #[cfg(feature = "render")]
 use crate::ops::{
     begin_animation_task, clamp_scroll_offset, document_base_url, ensure_resolved_scroll,
@@ -35,20 +34,6 @@ impl obscura_render::CanvasSurfaceSource for RuntimeCanvasSurfaceSource<'_> {
         )
     }
 }
-
-static SNAPSHOT: &[u8] = include_bytes!(env!("OBSCURA_SNAPSHOT_PATH"));
-
-/// Serializes V8 isolate construction across OS threads. The thread-per-
-/// connection server (issue #430) builds isolates on many threads. The main
-/// thread already warms up V8 once before any connection thread starts (see the
-/// `ObscuraJsRuntime::new` warmup in `obscura-cdp` server startup), which is
-/// what actually prevents the `InitializeBuiltinJSDispatchTable` segfault of a
-/// first isolate built off the main thread. This lock is defense-in-depth: it
-/// keeps two connections from running V8's isolate setup concurrently in case
-/// any residual first-time process init races. Construction is rare and fast, so
-/// serializing it costs nothing measurable; isolate *execution* stays fully
-/// parallel, each isolate on its own thread with no shared lock.
-static ISOLATE_CREATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const DEFAULT_CDP_AWAIT_TIMEOUT_MS: u64 = 30_000;
 
@@ -81,25 +66,20 @@ pub struct RemoteObjectInfo {
 }
 
 pub struct ObscuraJsRuntime {
-    runtime: JsRuntime,
-    state: Rc<RefCell<ObscuraState>>,
+    qjs: QuickJsRuntime,
     object_store: HashMap<String, String>,
     object_counter: u64,
-    import_map: Rc<RefCell<ImportMap>>,
     /// Loader-owned signal for pending dynamic-import graph fetches. This is
     /// intentionally separate from page fetch/XHR activity so analytics does
     /// not hold screenshot readiness open.
-    module_load_activity: std::sync::Arc<ModuleLoadActivity>,
-    /// Thread-safe handle to this runtime's V8 isolate, captured at
-    /// construction. Lets a watchdog be armed from `&self` (the CDP dispatcher
-    /// only holds `&Page` on the hot path) and is stable for the isolate's life.
-    isolate_handle: IsolateHandle,
+    module_load_activity: Arc<ModuleLoadActivity>,
 }
 
-/// A fetched and instantiated module graph whose evaluation is intentionally
-/// delayed until the HTML script scheduler reaches its post-parse turn.
+/// A fetched module graph whose evaluation is delayed until the HTML script
+/// scheduler reaches its post-parse turn.
 pub struct PreparedModule {
-    module_id: deno_core::ModuleId,
+    specifier: String,
+    source: String,
     description: String,
 }
 
@@ -108,81 +88,16 @@ fn remaining_deadline_ms(deadline: tokio::time::Instant) -> Option<u64> {
     if remaining.is_zero() {
         return None;
     }
-    // Round up so a positive sub-millisecond remainder still gets one bounded
-    // event-loop turn. The watchdog supplies the hard wall-clock boundary.
     let millis = remaining
         .as_millis()
         .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0));
     Some(millis.min(u128::from(u64::MAX)) as u64)
 }
 
-/// Handle to an armed V8 execution watchdog (see [`ObscuraJsRuntime::arm_watchdog`]).
-/// Holds the cancel channel and the watchdog thread; pass it back to
-/// `disarm_watchdog` to stop the watchdog and learn whether it fired.
-pub struct WatchdogToken {
-    pair: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
-    join: Option<std::thread::JoinHandle<()>>,
-    fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
-}
+pub type WatchdogToken = QuickJsWatchdogToken;
 
-/// Arm a V8 termination watchdog directly from an isolate handle, with no
-/// runtime borrow. The CDP dispatcher uses this to bound every command so a
-/// hung page cannot hold this connection's V8 lock forever. Pair with
-/// [`WatchdogToken::stop`]; if `stop` returns true, clear the termination flag
-/// via [`ObscuraJsRuntime::cancel_termination`] before reusing the isolate.
 pub fn spawn_watchdog(handle: IsolateHandle, budget: std::time::Duration) -> WatchdogToken {
-    let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-    let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let pair_c = pair.clone();
-    let fired_c = fired.clone();
-    let join = std::thread::spawn(move || {
-        let (lock, cvar) = &*pair_c;
-        let mut cancelled = lock.lock().unwrap();
-        let deadline = std::time::Instant::now() + budget;
-        loop {
-            // Check first: stop() may have set this (and notified into the void)
-            // before this thread even started, which happens constantly for fast
-            // CDP commands where stop() is called right after spawn. Without this
-            // top check the lost notify means we wait the full budget before
-            // noticing, and stop()'s join() blocks for that whole time.
-            if *cancelled {
-                return;
-            }
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                fired_c.store(true, std::sync::atomic::Ordering::SeqCst);
-                handle.terminate_execution();
-                return;
-            }
-            let (guard, _) = cvar.wait_timeout(cancelled, remaining).unwrap();
-            cancelled = guard;
-            if *cancelled {
-                return;
-            }
-        }
-    });
-    WatchdogToken {
-        pair,
-        join: Some(join),
-        fired,
-    }
-}
-
-impl WatchdogToken {
-    /// Stop the watchdog. Returns true if it had already fired (terminated the
-    /// isolate). The caller must then clear the termination flag via
-    /// [`ObscuraJsRuntime::cancel_termination`] before the next eval.
-    pub fn stop(mut self) -> bool {
-        {
-            let (lock, cvar) = &*self.pair;
-            *lock.lock().unwrap() = true;
-            cvar.notify_one();
-        }
-        if let Some(j) = self.join.take() {
-            let _ = j.join();
-        }
-        self.fired.load(std::sync::atomic::Ordering::SeqCst)
-    }
+    spawn_quickjs_watchdog(handle, budget)
 }
 
 // Observation deadlines are checked between browser tasks. A task which has
@@ -198,7 +113,7 @@ impl ObscuraJsRuntime {
     /// share the retained layout on pages with running animations.
     fn begin_javascript_task(&mut self) {
         #[cfg(feature = "render")]
-        begin_animation_task(&mut self.state.borrow_mut());
+        begin_animation_task(&mut self.qjs.shared_state().borrow_mut());
     }
     pub fn new() -> Self {
         Self::with_base_url("about:blank")
@@ -208,58 +123,24 @@ impl ObscuraJsRuntime {
         Self::with_base_url_and_proxy(base_url, None)
     }
 
-    /// Construct a runtime whose ES-module loader routes dynamic imports
-    /// through `proxy_url` (#139). `None` is equivalent to `with_base_url`
-    /// (direct connection).
-    pub fn with_base_url_and_proxy(base_url: &str, proxy_url: Option<String>) -> Self {
-        let state = Rc::new(RefCell::new(ObscuraState::new()));
-        let state_clone = state.clone();
-        let import_map = state.borrow().import_map.clone();
-
-        let module_loader = ObscuraModuleLoader::with_page_state(
-            base_url,
-            proxy_url,
-            &state,
-            import_map.clone(),
-        );
-        let module_load_activity = module_loader.activity();
-        let module_loader = Rc::new(module_loader);
-
-        // Build the isolate under the process-wide creation lock so two
-        // connection threads never construct isolates concurrently (#430).
-        let (runtime, isolate_handle) = {
-            let _create_guard = ISOLATE_CREATE_LOCK
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-            let mut runtime = JsRuntime::new(RuntimeOptions {
-                extensions: vec![build_extension()],
-                module_loader: Some(module_loader),
-                startup_snapshot: Some(SNAPSHOT),
-                ..Default::default()
-            });
-
-            runtime.op_state().borrow_mut().put(state_clone);
-
-            runtime
-                .execute_script(
-                    "<obscura:init>",
-                    "globalThis.__obscura_objects = {}; globalThis.__obscura_oid = 0;".to_string(),
-                )
-                .expect("init should not fail");
-
-            let isolate_handle = runtime.v8_isolate().thread_safe_handle();
-            (runtime, isolate_handle)
-        };
-
+    /// Construct a runtime. `proxy_url` is kept so Page can keep calling this
+    /// ctor; the ES-module loader and `op_fetch_url` honour the proxy on the
+    /// HTTP client installed later via [`Self::set_http_client`].
+    pub fn with_base_url_and_proxy(base_url: &str, _proxy_url: Option<String>) -> Self {
+        let mut qjs = QuickJsRuntime::new().expect("QuickJS runtime constructs");
+        qjs.load_shim().expect("shim loads");
+        qjs.set_url(base_url);
+        qjs.execute_script(
+            "<obscura:init>",
+            "globalThis.__obscura_objects = {}; globalThis.__obscura_oid = 0;",
+        )
+        .expect("init should not fail");
+        let module_load_activity = qjs.module_load_activity();
         ObscuraJsRuntime {
-            runtime,
-            state,
+            qjs,
             object_store: HashMap::new(),
             object_counter: 0,
-            import_map,
             module_load_activity,
-            isolate_handle,
         }
     }
 
@@ -268,7 +149,10 @@ impl ObscuraJsRuntime {
     /// rules remain available, matching Chromium's multiple-map model.
     pub fn add_import_map(&self, source: &str, base_url: &str) -> Result<(), String> {
         let map = ImportMap::parse(source, base_url)?;
-        self.import_map
+        self.qjs
+            .shared_state()
+            .borrow()
+            .import_map
             .try_borrow_mut()
             .map_err(|_| "Import map is already borrowed".to_string())?
             .merge(map);
@@ -276,28 +160,28 @@ impl ObscuraJsRuntime {
     }
 
     pub fn set_cookie_jar(&self, jar: std::sync::Arc<obscura_net::CookieJar>) {
-        self.state.borrow_mut().cookie_jar = Some(jar);
+        self.qjs.shared_state().borrow_mut().cookie_jar = Some(jar);
     }
 
     pub fn set_http_client(&self, client: std::sync::Arc<obscura_net::ObscuraHttpClient>) {
-        self.state.borrow_mut().http_client = Some(client);
+        self.qjs.shared_state().borrow_mut().http_client = Some(client);
     }
 
     /// Install the owning page's passive on_request/on_response callback
     /// registry so scripted fetch()/XHR observation is page-scoped (issue #408).
     pub fn set_callbacks(&self, callbacks: std::sync::Arc<obscura_net::CallbackRegistry>) {
-        self.state.borrow_mut().callbacks = Some(callbacks);
+        self.qjs.shared_state().borrow_mut().callbacks = Some(callbacks);
     }
 
     /// Install the stealth (wreq) HTTP client so scripted fetch()/XHR is routed
     /// through it in stealth mode (see op_fetch_url / stealth_fetch_all).
     #[cfg(feature = "stealth")]
     pub fn set_stealth_client(&self, client: std::sync::Arc<obscura_net::StealthHttpClient>) {
-        self.state.borrow_mut().stealth_client = Some(client);
+        self.qjs.shared_state().borrow_mut().stealth_client = Some(client);
     }
 
     pub fn set_dom(&self, dom: DomTree) {
-        let mut gs = self.state.borrow_mut();
+        let mut gs = self.qjs.shared_state().borrow_mut();
         gs.dom = Some(dom);
         gs.document_generation = gs.document_generation.wrapping_add(1);
         gs.activity_generation = 0;
@@ -326,7 +210,7 @@ impl ObscuraJsRuntime {
     }
 
     pub fn set_url(&self, url: &str) {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.qjs.shared_state().borrow_mut();
         if state.url != url {
             state.url = url.to_string();
             #[cfg(feature = "render")]
@@ -345,11 +229,11 @@ impl ObscuraJsRuntime {
     /// `document.characterSet` and the `<a>`/`<area>` URL query encoding
     /// override for legacy-charset documents.
     pub fn set_encoding(&self, encoding: &str) {
-        self.state.borrow_mut().encoding = encoding.to_string();
+        self.qjs.shared_state().borrow_mut().encoding = encoding.to_string();
     }
 
     pub fn set_title(&self, title: &str) {
-        self.state.borrow_mut().title = title.to_string();
+        self.qjs.shared_state().borrow_mut().title = title.to_string();
     }
 
     /// Set the source document URL exposed as `document.referrer`. Navigation
@@ -357,23 +241,23 @@ impl ObscuraJsRuntime {
     /// navigations and document-initiated navigations have different
     /// referrer semantics.
     pub fn set_referrer(&self, referrer: &str) {
-        self.state.borrow_mut().referrer = referrer.to_string();
+        self.qjs.shared_state().borrow_mut().referrer = referrer.to_string();
     }
 
     pub fn set_blocked_urls(&self, patterns: Vec<String>) {
-        self.state.borrow_mut().blocked_urls = patterns;
+        self.qjs.shared_state().borrow_mut().blocked_urls = patterns;
     }
 
     pub fn take_pending_navigation(&self) -> Option<(String, String, String)> {
-        self.state.borrow_mut().pending_navigation.take()
+        self.qjs.shared_state().borrow_mut().pending_navigation.take()
     }
 
     pub fn take_pending_binding_calls(&self) -> Vec<(String, String)> {
-        std::mem::take(&mut self.state.borrow_mut().pending_binding_calls)
+        std::mem::take(&mut self.qjs.shared_state().borrow_mut().pending_binding_calls)
     }
 
     pub fn get_network_response_body(&self, request_id: &str) -> Option<StoredNetworkResponseBody> {
-        self.state
+        self.qjs.shared_state()
             .borrow()
             .network_response_bodies
             .get(request_id)
@@ -381,7 +265,7 @@ impl ObscuraJsRuntime {
     }
 
     pub fn clear_network_response_bodies(&self) {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.qjs.shared_state().borrow_mut();
         state.network_response_bodies.clear();
         state.network_response_body_order.clear();
     }
@@ -395,18 +279,18 @@ impl ObscuraJsRuntime {
         &self,
         tx: tokio::sync::mpsc::UnboundedSender<crate::ops::InterceptedRequest>,
     ) {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.qjs.shared_state().borrow_mut();
         state.intercept_tx = Some(tx);
     }
 
     pub fn set_intercept_enabled(&self, enabled: bool) {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.qjs.shared_state().borrow_mut();
         state.intercept_enabled = enabled;
     }
 
     pub fn set_user_agent(&mut self, ua: &str) {
         let escaped = ua.replace('\\', "\\\\").replace('\'', "\\'");
-        let _ = self.runtime.execute_script(
+        let _ = self.qjs.execute_script(
             "<set-ua>",
             format!("globalThis.__obscura_ua = '{}';", escaped),
         );
@@ -416,7 +300,7 @@ impl ObscuraJsRuntime {
         let p = platform.replace('\'', "\\'");
         let uap = ua_platform.replace('\'', "\\'");
         let uapv = ua_platform_version.replace('\'', "\\'");
-        let _ = self.runtime.execute_script(
+        let _ = self.qjs.execute_script(
             "<set-platform>",
             format!(
                 "globalThis.__obscura_platform='{}';globalThis.__obscura_ua_platform='{}';globalThis.__obscura_ua_platform_version='{}';",
@@ -426,7 +310,7 @@ impl ObscuraJsRuntime {
     }
 
     pub fn set_stealth(&mut self, enabled: bool) {
-        let _ = self.runtime.execute_script(
+        let _ = self.qjs.execute_script(
             "<set-stealth>",
             format!("globalThis.__obscura_stealth = {};", enabled),
         );
@@ -441,7 +325,7 @@ impl ObscuraJsRuntime {
         }
         #[cfg(feature = "render")]
         {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.qjs.shared_state().borrow_mut();
             let viewport = (width as f32, height as f32);
             if state.viewport != viewport {
                 state.viewport = viewport;
@@ -450,7 +334,7 @@ impl ObscuraJsRuntime {
                 state.resolved_scroll = None;
             }
         }
-        let _ = self.runtime.execute_script(
+        let _ = self.qjs.execute_script(
             "<set-viewport>",
             format!(
                 "globalThis.__obscura_viewport_w={width};\
@@ -490,13 +374,13 @@ impl ObscuraJsRuntime {
                 "globalThis.__obscura_set_screen_override(null,null,{emulated});"
             ),
         };
-        let _ = self.runtime.execute_script("<set-screen-size>", script);
+        let _ = self.qjs.execute_script("<set-screen-size>", script);
     }
 
     /// Current clamped root scroll offset shared by CSSOM geometry and paint.
     #[cfg(feature = "render")]
     pub fn scroll_offset(&self) -> (f32, f32) {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.qjs.shared_state().borrow_mut();
         let requested = state.scroll_offset;
         clamp_scroll_offset(&mut state, requested)
     }
@@ -518,7 +402,7 @@ impl ObscuraJsRuntime {
         if !sample.time.milliseconds.is_finite() || sample.time.milliseconds < 0.0 {
             return false;
         }
-        let mut state = self.state.borrow_mut();
+        let mut state = self.qjs.shared_state().borrow_mut();
         if state.animation_sample != sample {
             let forward_document_sample =
                 sample.mode == obscura_render::AnimationSampleMode::DocumentTime
@@ -551,7 +435,7 @@ impl ObscuraJsRuntime {
         &self,
         media: obscura_render::CssMediaType,
     ) -> obscura_render::CssMediaType {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.qjs.shared_state().borrow_mut();
         let previous = state.render_media;
         if previous != media {
             state.render_media = media;
@@ -563,12 +447,12 @@ impl ObscuraJsRuntime {
 
     #[cfg(feature = "render")]
     pub fn animation_sample_time(&self) -> obscura_render::AnimationSampleTime {
-        self.state.borrow().animation_sample.time
+        self.qjs.shared_state().borrow().animation_sample.time
     }
 
     #[cfg(feature = "render")]
     pub fn live_animation_sample(&self) -> obscura_render::AnimationSample {
-        let state = self.state.borrow();
+        let state = self.qjs.shared_state().borrow();
         obscura_render::AnimationSample::document(
             (state.animation_timeline_origin.elapsed().as_secs_f64() * 1_000.0)
                 .min(f64::from(f32::MAX)) as f32,
@@ -577,7 +461,7 @@ impl ObscuraJsRuntime {
 
     #[cfg(feature = "render")]
     pub fn reset_animation_timeline(&self) {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.qjs.shared_state().borrow_mut();
         state.animation_timeline_origin = std::time::Instant::now();
         state.animation_timeline = obscura_render::AnimationTimelineState::default();
         state.animation_sample = obscura_render::AnimationSample::default();
@@ -591,7 +475,7 @@ impl ObscuraJsRuntime {
     /// static pages on every compositor tick.
     #[cfg(feature = "render")]
     pub fn prepared_has_active_css_animations(&self) -> bool {
-        self.state
+        self.qjs.shared_state()
             .borrow()
             .prepared_render
             .as_ref()
@@ -621,7 +505,7 @@ impl ObscuraJsRuntime {
         base_url: Option<&str>,
         surface_color: [u8; 4],
     ) -> Option<Vec<u8>> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.qjs.shared_state().borrow_mut();
         let effective_base = document_base_url(&state);
         if viewport != state.viewport || base_url != effective_base.as_deref() {
             return None;
@@ -666,7 +550,7 @@ impl ObscuraJsRuntime {
         region: obscura_render::CaptureRegion,
         surface_color: [u8; 4],
     ) -> Result<Vec<u8>, obscura_render::CaptureError> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.qjs.shared_state().borrow_mut();
         with_sync_render_loading_disabled(&mut state, |state| {
             ensure_resolved_scroll(state).ok_or(obscura_render::CaptureError::PaintFailed)?;
             let ObscuraState {
@@ -704,7 +588,7 @@ impl ObscuraJsRuntime {
         region: obscura_render::CaptureRegion,
         paint_backgrounds: bool,
     ) -> Result<Vec<u8>, obscura_render::CaptureError> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.qjs.shared_state().borrow_mut();
         with_sync_render_loading_disabled(&mut state, |state| {
             ensure_resolved_scroll(state).ok_or(obscura_render::CaptureError::PaintFailed)?;
             let ObscuraState {
@@ -745,7 +629,7 @@ impl ObscuraJsRuntime {
         root_scroll: (f32, f32),
         paint_backgrounds: bool,
     ) -> Result<Vec<u8>, obscura_render::CaptureError> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.qjs.shared_state().borrow_mut();
         with_sync_render_loading_disabled(&mut state, |state| {
             ensure_resolved_scroll(state).ok_or(obscura_render::CaptureError::PaintFailed)?;
             let ObscuraState {
@@ -788,7 +672,7 @@ impl ObscuraJsRuntime {
     /// this to paginate document-space captures from the same geometry.
     #[cfg(feature = "render")]
     pub fn prepared_content_size(&self) -> Option<(f32, f32)> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.qjs.shared_state().borrow_mut();
         with_sync_render_loading_disabled(&mut state, |state| {
             ensure_resolved_scroll(state)?;
             state
@@ -804,7 +688,7 @@ impl ObscuraJsRuntime {
     /// transport before synchronous layout or paint observes the cache.
     #[cfg(feature = "render")]
     pub fn pending_render_image_urls(&self) -> Vec<(String, crate::ops::ImageRequestProfile)> {
-        let state = self.state.borrow();
+        let state = self.qjs.shared_state().borrow();
         let base_url = document_base_url(&state);
         let Some(dom) = state.dom.as_ref() else {
             return Vec::new();
@@ -860,7 +744,7 @@ impl ObscuraJsRuntime {
     /// retained layout/scroll.
     #[cfg(feature = "render")]
     pub fn seed_render_resource(&mut self, url: String, bytes: Option<Vec<u8>>) {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.qjs.shared_state().borrow_mut();
         match bytes {
             Some(bytes) => {
                 state.render_resources.seed(url, bytes);
@@ -877,7 +761,7 @@ impl ObscuraJsRuntime {
         profile: crate::ops::ImageRequestProfile,
         bytes: Option<Vec<u8>>,
     ) {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.qjs.shared_state().borrow_mut();
         match bytes {
             Some(bytes) if obscura_render::image_intrinsic_dimensions(&bytes).is_some() => {
                 let needs_geometry = match (&state.prepared_render, &state.dom) {
@@ -898,7 +782,7 @@ impl ObscuraJsRuntime {
 
     #[cfg(feature = "render")]
     pub fn render_resource_is_known(&self, url: &str) -> bool {
-        self.state.borrow().render_resources.has_live_outcome(url)
+        self.qjs.shared_state().borrow().render_resources.has_live_outcome(url)
     }
 
     #[cfg(feature = "render")]
@@ -907,7 +791,7 @@ impl ObscuraJsRuntime {
         url: &str,
         profile: crate::ops::ImageRequestProfile,
     ) -> bool {
-        self.state
+        self.qjs.shared_state()
             .borrow()
             .render_resources
             .has_live_image_outcome(url, profile)
@@ -916,7 +800,7 @@ impl ObscuraJsRuntime {
     /// Run __obscura_init() after all per-page properties (UA, platform, stealth, etc.)
     /// have been set. Must be called once per page setup, after all set_* methods.
     pub fn run_page_init(&mut self) {
-        let _ = self.runtime.execute_script(
+        let _ = self.qjs.execute_script(
             "<obscura:page-init>",
             "globalThis.__obscura_init();".to_string(),
         );
@@ -926,7 +810,7 @@ impl ObscuraJsRuntime {
     /// values are injected as numeric globals the bootstrap reads; when unset it
     /// keeps the built-in default. Callers validate the range before calling.
     pub fn set_geolocation(&mut self, latitude: f64, longitude: f64) {
-        let _ = self.runtime.execute_script(
+        let _ = self.qjs.execute_script(
             "<set-geo>",
             format!(
                 "globalThis.__obscura_geo_lat={};globalThis.__obscura_geo_lon={};",
@@ -937,12 +821,7 @@ impl ObscuraJsRuntime {
 
     pub fn evaluate(&mut self, expression: &str) -> Result<serde_json::Value, String> {
         self.begin_javascript_task();
-        let wrapped = Self::wrap_expression(expression);
-        let result = self
-            .runtime
-            .execute_script("<eval>", wrapped)
-            .map_err(|e| format!("JS error: {}", e))?;
-        self.v8_to_json(result)
+        self.qjs.evaluate(expression)
     }
 
     pub async fn evaluate_for_cdp(
@@ -976,8 +855,8 @@ impl ObscuraJsRuntime {
         self.object_counter += 1;
         let oid = self.make_oid(self.object_counter);
 
-        // Same trailing-semicolon trim as wrap_expression — Playwright's
-        // utility-script eval ends with `})();`, and `({expr})` would
+        // Same trailing-semicolon trim as QuickJsRuntime::wrap_expression —
+        // Playwright's utility-script eval ends with `})();`, and `({expr})` would
         // otherwise become `(...;)` which is a parse-time SyntaxError.
         let cleaned_expr = expression
             .trim()
@@ -1024,21 +903,18 @@ impl ObscuraJsRuntime {
             )
         };
 
-        let result = self
-            .runtime
-            .execute_script("<eval-remote>", meta_code)
-            .map_err(|e| format!("JS error: {}", e))?;
-
         let meta_str = if await_promise {
+            self.qjs
+                .execute_script("<eval-remote>", &meta_code)
+                .map_err(|e| format!("JS error: {}", e))?;
             let __t0 = std::time::Instant::now();
             let sentinel = format!("globalThis.__obscura_done_{done_counter} === true");
             let settled = self
                 .resolve_promises_until(
                     |rt| {
-                        rt.runtime
-                            .execute_script("<done?>", sentinel.clone())
+                        rt.qjs
+                            .evaluate(&sentinel)
                             .ok()
-                            .and_then(|v| rt.v8_to_json(v).ok())
                             .and_then(|j| j.as_bool())
                             .unwrap_or(false)
                     },
@@ -1064,27 +940,28 @@ impl ObscuraJsRuntime {
                 );
             }
             let rejected = self
-                .runtime
-                .execute_script(
-                    "<readRejected>",
-                    "globalThis.__obscura_await_rejected".to_string(),
-                )
+                .qjs
+                .evaluate("globalThis.__obscura_await_rejected")
                 .map_err(|e| format!("JS error: {}", e))?;
-            if self.v8_to_json(rejected)?.as_bool().unwrap_or(false) {
-                let err = self.runtime.execute_script("<readError>", format!("String(globalThis.__obscura_objects['{0}'] && (globalThis.__obscura_objects['{0}'].message || globalThis.__obscura_objects['{0}']))", oid))
-                    .map_err(|e| format!("JS error: {}", e))?;
+            if rejected.as_bool().unwrap_or(false) {
+                let err = self.qjs.evaluate(&format!(
+                    "String(globalThis.__obscura_objects['{0}'] && (globalThis.__obscura_objects['{0}'].message || globalThis.__obscura_objects['{0}']))",
+                    oid
+                ))
+                .map_err(|e| format!("JS error: {}", e))?;
                 return Err(format!(
                     "Promise rejected: {}",
-                    self.v8_to_json(err)?.as_str().unwrap_or("")
+                    err.as_str().unwrap_or("")
                 ));
             }
-            self.runtime
-                .execute_script("<readMeta>", "globalThis.__obscura_await_meta".to_string())
+            self.qjs
+                .evaluate("globalThis.__obscura_await_meta")
                 .map_err(|e| format!("JS error: {}", e))?
         } else {
-            result
+            self.qjs
+                .evaluate(&meta_code)
+                .map_err(|e| format!("JS error: {}", e))?
         };
-        let meta_str = self.v8_to_json(meta_str)?;
         let meta_json = if let serde_json::Value::String(s) = &meta_str {
             serde_json::from_str(s).unwrap_or(meta_str)
         } else {
@@ -1096,14 +973,10 @@ impl ObscuraJsRuntime {
         );
 
         if await_promise && return_by_value {
-            let read = self
-                .runtime
-                .execute_script(
-                    "<readResult>",
-                    format!("globalThis.__obscura_objects['{}']", oid),
-                )
+            let json_val = self
+                .qjs
+                .evaluate(&format!("globalThis.__obscura_objects['{}']", oid))
                 .map_err(|e| format!("JS error: {}", e))?;
-            let json_val = self.v8_to_json(read)?;
             return Ok(Self::info_from_json(&json_val));
         }
 
@@ -1176,7 +1049,7 @@ impl ObscuraJsRuntime {
                 done_counter = done_counter,
             );
 
-            self.runtime
+            self.qjs
                 .execute_script("<callFnAsync>", code)
                 .map_err(|e| format!("JS error: {}", e))?;
 
@@ -1185,10 +1058,9 @@ impl ObscuraJsRuntime {
             let settled = self
                 .resolve_promises_until(
                     |rt| {
-                        rt.runtime
-                            .execute_script("<done?>", sentinel.clone())
+                        rt.qjs
+                            .evaluate(&sentinel)
                             .ok()
-                            .and_then(|v| rt.v8_to_json(v).ok())
                             .and_then(|j| j.as_bool())
                             .unwrap_or(false)
                     },
@@ -1215,22 +1087,17 @@ impl ObscuraJsRuntime {
             }
 
             if return_by_value {
-                let read = self
-                    .runtime
-                    .execute_script(
-                        "<readResult>",
-                        format!("globalThis.__obscura_objects['{}']", oid),
-                    )
+                let json_val = self
+                    .qjs
+                    .evaluate(&format!("globalThis.__obscura_objects['{}']", oid))
                     .map_err(|e| format!("JS error: {}", e))?;
-                let json_val = self.v8_to_json(read)?;
                 return Ok(Self::info_from_json(&json_val));
             }
 
-            let meta_result = self
-                .runtime
-                .execute_script("<readMeta>", "globalThis.__obscura_await_meta".to_string())
+            let meta_str = self
+                .qjs
+                .evaluate("globalThis.__obscura_await_meta")
                 .map_err(|e| format!("JS error: {}", e))?;
-            let meta_str = self.v8_to_json(meta_result)?;
             let meta_json = if let serde_json::Value::String(s) = &meta_str {
                 serde_json::from_str(s).unwrap_or(meta_str.clone())
             } else {
@@ -1256,11 +1123,10 @@ impl ObscuraJsRuntime {
                 this_expr = this_expr,
                 args = args_list,
             );
-            let result = self
-                .runtime
-                .execute_script("<callFnByValue>", code)
+            let json_val = self
+                .qjs
+                .evaluate(&code)
                 .map_err(|e| format!("JS error: {}", e))?;
-            let json_val = self.v8_to_json(result)?;
             return Ok(Self::info_from_json(&json_val));
         }
 
@@ -1280,11 +1146,10 @@ impl ObscuraJsRuntime {
             oid = oid,
             meta_fn = Self::meta_extract_js("__result"),
         );
-        let result = self
-            .runtime
-            .execute_script("<callFnRemote>", code)
+        let meta_str = self
+            .qjs
+            .evaluate(&code)
             .map_err(|e| format!("JS error: {}", e))?;
-        let meta_str = self.v8_to_json(result)?;
         let meta_json = if let serde_json::Value::String(s) = &meta_str {
             serde_json::from_str(s).unwrap_or(meta_str.clone())
         } else {
@@ -1320,7 +1185,7 @@ impl ObscuraJsRuntime {
             "globalThis.__obscura_objects['{}'] = ({});",
             oid, js_expression,
         );
-        self.runtime
+        self.qjs
             .execute_script("<store>", code)
             .map_err(|e| format!("Store error: {}", e))?;
         self.object_store.insert(
@@ -1347,11 +1212,10 @@ impl ObscuraJsRuntime {
             oid = oid,
             meta_fn = Self::meta_extract_js("__result"),
         );
-        let result = self
-            .runtime
-            .execute_script("<store-meta>", code)
+        let meta_str = self
+            .qjs
+            .evaluate(&code)
             .map_err(|e| format!("Store error: {}", e))?;
-        let meta_str = self.v8_to_json(result)?;
         let meta_json = if let serde_json::Value::String(s) = &meta_str {
             serde_json::from_str(s).unwrap_or(meta_str.clone())
         } else {
@@ -1367,12 +1231,12 @@ impl ObscuraJsRuntime {
     pub fn release_object(&mut self, object_id: &str) {
         if self.object_store.remove(object_id).is_some() {
             let code = format!("delete globalThis.__obscura_objects['{}'];", object_id,);
-            let _ = self.runtime.execute_script("<release>", code);
+            let _ = self.qjs.execute_script("<release>", code);
         }
     }
 
     pub fn release_object_group(&mut self) {
-        let _ = self.runtime.execute_script(
+        let _ = self.qjs.execute_script(
             "<releaseGroup>",
             "globalThis.__obscura_objects = {};".to_string(),
         );
@@ -1393,85 +1257,65 @@ impl ObscuraJsRuntime {
     pub async fn prepare_module(
         &mut self,
         url: &str,
-        budget_ms: u64,
+        _budget_ms: u64,
     ) -> Result<PreparedModule, String> {
-        let budget = tokio::time::Duration::from_millis(budget_ms);
-        let specifier = deno_core::ModuleSpecifier::parse(url)
-            .map_err(|e| format!("Invalid module URL {}: {}", url, e))?;
-
-        // Bound the recursive import-graph fetch. deno_core fetches the graph
-        // concurrently through the one page-scoped module loader. Loading the
-        // entry from that loader too is important: cookies, configured request
-        // headers, redirects, interception, and callbacks must not change at
-        // the first import edge.
-        // The caller sizes the budget: short for enhancement modules on an
-        // already-rendered page, full for an unmounted SPA shell (#205).
-        let module_id = match tokio::time::timeout(
-            budget,
-            self.runtime.load_side_es_module(&specifier),
-        )
-        .await
-        {
-            Ok(Ok(id)) => id,
-            Ok(Err(e)) => return Err(format!("Module load error: {}", e)),
-            Err(_) => {
-                return Err(format!(
-                    "Module graph load timed out after {}ms: {}",
-                    budget_ms, url
-                ));
-            }
-        };
-
-        // Return as soon as the module finishes evaluating rather than waiting
-        // for the loop to go fully idle: a page timer (setInterval) keeps the
-        // loop busy forever and would otherwise burn the whole budget (#374).
+        let source = self.fetch_module_source(url)?;
         Ok(PreparedModule {
-            module_id,
+            specifier: url.to_string(),
+            source,
             description: format!("Module {}", url),
         })
     }
 
-    /// Drive a just-started module evaluation to completion, or up to
-    /// `budget_ms`. Returns as soon as the module finishes rather than waiting
-    /// for the event loop to go idle: a page timer (setInterval) keeps the loop
-    /// busy forever and would otherwise burn the whole budget, abandoning a
-    /// module that had already evaluated (issue #374).
-    ///
-    /// A module eval error or timeout is returned to the page lifecycle. The
-    /// caller may continue rendering, but must not report a failed module as
-    /// successfully loaded. An event-loop error is propagated out of the
-    /// select and handled the same way.
-    async fn drive_module_eval(
+    fn fetch_module_source(&mut self, url: &str) -> Result<String, String> {
+        self.qjs.fetch_module_source(url)
+    }
+
+    pub async fn prepare_inline_module(
         &mut self,
-        module_id: deno_core::ModuleId,
-        budget_ms: u64,
-        what: &str,
-    ) -> Result<(), String> {
-        self.begin_javascript_task();
-        let budget = tokio::time::Duration::from_millis(budget_ms);
-        let result = self.runtime.mod_evaluate(module_id);
-        tokio::pin!(result);
-
-        let outcome = tokio::time::timeout(budget, async {
-            let event_loop = self
-                .runtime
-                .run_event_loop(deno_core::PollEventLoopOptions::default());
-            tokio::pin!(event_loop);
-            tokio::select! {
-                biased;
-                e = &mut event_loop => { e?; (&mut result).await }
-                r = &mut result => r,
-            }
+        code: &str,
+        base_url: &str,
+        _budget_ms: u64,
+    ) -> Result<PreparedModule, String> {
+        Ok(PreparedModule {
+            specifier: base_url.to_string(),
+            source: code.to_string(),
+            description: "Inline module".to_string(),
         })
-        .await;
+    }
 
-        match outcome {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(format!("{} eval error: {}", what, e)),
-            Err(_) => Err(format!(
+    pub async fn evaluate_prepared_module(
+        &mut self,
+        prepared: PreparedModule,
+        budget_ms: u64,
+    ) -> Result<(), String> {
+        let PreparedModule {
+            specifier,
+            source,
+            description,
+        } = prepared;
+        let watchdog = self.arm_watchdog(std::time::Duration::from_millis(budget_ms));
+        let import_meta = (description == "Inline module").then_some(specifier.as_str());
+        let result = self
+            .qjs
+            .eval_module(&specifier, &source, import_meta, budget_ms);
+        let watchdog_fired = self.disarm_watchdog(watchdog);
+        if watchdog_fired || result.as_ref().is_err_and(|err| err == "timeout") {
+            Err(format!(
                 "{} evaluation timed out after {}ms",
-                what, budget_ms
-            )),
+                description, budget_ms
+            ))
+        } else {
+            match result {
+                Ok(()) => Ok(()),
+                Err(err) if err.starts_with("load:") => {
+                    Err(format!("{} load error: {}", description, err.trim_start_matches("load:").trim()))
+                }
+                Err(err) if err.starts_with("eval:") => {
+                    Err(format!("{} eval error: {}", description, err.trim_start_matches("eval:").trim()))
+                }
+                Err(err) => Err(format!("{}: {err}", description)),
+            }
         }
     }
 
@@ -1494,132 +1338,18 @@ impl ObscuraJsRuntime {
         self.evaluate_prepared_module(prepared, remaining_ms).await
     }
 
-    pub async fn prepare_inline_module(
-        &mut self,
-        code: &str,
-        base_url: &str,
-        budget_ms: u64,
-    ) -> Result<PreparedModule, String> {
-        let budget = tokio::time::Duration::from_millis(budget_ms);
-        // Inline modules use the document base URL as their module URL. This is
-        // observable through import.meta.url and is also the referrer used for
-        // relative imports and import-map scope matching. deno_core permits
-        // multiple side modules with this name; the returned ModuleId keeps
-        // each prepared module distinct until its scheduled evaluation.
-        let specifier = deno_core::ModuleSpecifier::parse(base_url)
-            .unwrap_or_else(|_| deno_core::ModuleSpecifier::parse("about:blank").unwrap());
-
-        let module_id = match tokio::time::timeout(
-            budget,
-            self.runtime.load_side_es_module_from_code(
-                &specifier,
-                deno_core::ModuleCodeString::from(code.to_string()),
-            ),
-        )
-        .await
-        {
-            Ok(Ok(id)) => id,
-            Ok(Err(e)) => return Err(format!("Inline module load error: {}", e)),
-            Err(_) => {
-                return Err(format!(
-                    "Inline module graph load timed out after {}ms",
-                    budget_ms
-                ));
-            }
-        };
-
-        // Return as soon as the module finishes evaluating rather than waiting
-        // for idle: Vite's HMR / React-Refresh client installs a setInterval that
-        // keeps the loop busy forever, and waiting for idle burned the whole
-        // budget on this preamble module and starved the module that mounts the
-        // app, leaving #root empty (issue #374).
-        Ok(PreparedModule {
-            module_id,
-            description: "Inline module".to_string(),
-        })
-    }
-
-    pub async fn evaluate_prepared_module(
-        &mut self,
-        prepared: PreparedModule,
-        budget_ms: u64,
-    ) -> Result<(), String> {
-        let PreparedModule {
-            module_id,
-            description,
-        } = prepared;
-        // Tokio timeouts cannot run while synchronous top-level module work
-        // pins the runtime thread in V8. Pair the async timeout with a hard V8
-        // watchdog so this budget is a real wall-clock ceiling for both forms
-        // of evaluation.
-        let watchdog = self.arm_watchdog(std::time::Duration::from_millis(budget_ms));
-        let result = self
-            .drive_module_eval(module_id, budget_ms, &description)
-            .await;
-        let watchdog_fired = self.disarm_watchdog(watchdog);
-        if watchdog_fired {
-            Err(format!(
-                "{} evaluation timed out after {}ms",
-                description, budget_ms
-            ))
-        } else {
-            result
-        }
-    }
-
     fn execute_classic_script(&mut self, name: &str, source: &str) -> Result<(), String> {
         self.begin_javascript_task();
-        // JsRuntime::execute_script in deno_core 0.350 restricts `name` to a
-        // &'static str. Browser script URLs are runtime data, and V8 uses this
-        // origin as import()'s referrer, so compile in the runtime's main
-        // context directly instead of substituting the fixed "<script>" name.
-        let scope = &mut self.runtime.handle_scope();
-        let source = deno_core::v8::String::new(scope, source)
-            .ok_or_else(|| "JS error: source allocation failed".to_string())?;
-        let name = deno_core::v8::String::new(scope, name)
-            .ok_or_else(|| "JS error: script URL allocation failed".to_string())?;
-        let origin = deno_core::v8::ScriptOrigin::new(
-            scope,
-            name.into(),
-            0,
-            0,
-            false,
-            0,
-            None,
-            false,
-            false,
-            false,
-            None,
-        );
-        let scope = &mut deno_core::v8::TryCatch::new(scope);
-        let script = deno_core::v8::Script::compile(scope, source, Some(&origin));
-        let Some(script) = script else {
-            if scope.is_execution_terminating() {
-                scope.cancel_terminate_execution();
-                return Err("JS error: Uncaught Error: execution terminated".to_string());
-            }
-            return match scope.exception() {
-                Some(exception) => {
-                    let error = deno_core::error::JsError::from_v8_exception(scope, exception);
-                    Err(format!("JS error: {error}"))
-                }
-                None => Err("JS error: script compilation failed without an exception".to_string()),
-            };
-        };
-        if script.run(scope).is_none() {
-            if scope.is_execution_terminating() {
-                scope.cancel_terminate_execution();
-                return Err("JS error: Uncaught Error: execution terminated".to_string());
-            }
-            return match scope.exception() {
-                Some(exception) => {
-                    let error = deno_core::error::JsError::from_v8_exception(scope, exception);
-                    Err(format!("JS error: {error}"))
-                }
-                None => Err("JS error: script execution failed without an exception".to_string()),
-            };
-        }
-        Ok(())
+        self.qjs.execute_script(name, source)?;
+        self.qjs.drain_pending_jobs()
+    }
+
+    /// Parser/lifecycle scripts must not drain `import()` jobs: the QuickJS
+    /// module loader fetches synchronously, so a checkpoint would turn a
+    /// dynamic import into an implicit navigation settle.
+    pub fn execute_script_no_checkpoint(&mut self, name: &str, source: &str) -> Result<(), String> {
+        self.begin_javascript_task();
+        self.qjs.execute_script(name, source)
     }
 
     pub fn execute_script(&mut self, name: &str, source: &str) -> Result<(), String> {
@@ -1627,11 +1357,21 @@ impl ObscuraJsRuntime {
     }
 
     pub fn execute_script_guarded(&mut self, name: &str, source: &str) -> Result<(), String> {
-        if source.len() < 10_000 {
-            self.execute_script(name, source)
-        } else {
-            self.execute_script_with_timeout(name, source, std::time::Duration::from_secs(5))
-        }
+        let result = self.qjs.execute_script_guarded(name, source);
+        let _ = self.qjs.drain_pending_jobs();
+        result
+    }
+
+    pub fn execute_script_guarded_no_checkpoint(
+        &mut self,
+        name: &str,
+        source: &str,
+    ) -> Result<(), String> {
+        self.qjs.execute_script_guarded(name, source)
+    }
+
+    pub fn drain_pending_jobs(&mut self) -> Result<(), String> {
+        self.qjs.drain_pending_jobs()
     }
 
     pub fn execute_script_with_timeout(
@@ -1643,46 +1383,13 @@ impl ObscuraJsRuntime {
         if timeout.is_zero() {
             return self.execute_classic_script(name, source);
         }
-
-        let isolate_handle = self.runtime.v8_isolate().thread_safe_handle();
-
-        let pair = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
-        let pair_clone = pair.clone();
-
-        let watchdog = std::thread::spawn(move || {
-            let (lock, cvar) = &*pair_clone;
-            let mut cancelled = lock.lock().unwrap();
-            let deadline = std::time::Instant::now() + timeout;
-
-            loop {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    isolate_handle.terminate_execution();
-                    return;
-                }
-
-                let result = cvar.wait_timeout(cancelled, remaining).unwrap();
-                cancelled = result.0;
-                if *cancelled {
-                    return;
-                }
-            }
-        });
-
+        let token = self.arm_watchdog(timeout);
         let result = self.execute_classic_script(name, source);
-
-        {
-            let (lock, cvar) = &*pair;
-            let mut cancelled = lock.lock().unwrap();
-            *cancelled = true;
-            cvar.notify_one();
-        }
-        let _ = watchdog.join();
-
+        let fired = self.disarm_watchdog(token);
         match result {
             Ok(()) => Ok(()),
             Err(msg) => {
-                if msg.contains("Uncaught Error: execution terminated") {
+                if fired || msg.contains("interrupted") || msg.contains("execution terminated") {
                     tracing::warn!("Script killed after {}s timeout", timeout.as_secs());
                     Ok(())
                 } else {
@@ -1694,19 +1401,7 @@ impl ObscuraJsRuntime {
 
     pub async fn run_event_loop(&mut self) -> Result<(), String> {
         self.begin_javascript_task();
-        // A browser performs a microtask checkpoint at the end of each task.
-        // deno_core's event loop may return immediately when no async op is
-        // pending, leaving an already-resolved Promise continuation stranded
-        // (document.fonts.load(...).then(...), framework post-render hooks,
-        // and hydration follow-ups all rely on this boundary).
-        self.runtime.v8_isolate().perform_microtask_checkpoint();
-        let result = self
-            .runtime
-            .run_event_loop(deno_core::PollEventLoopOptions::default())
-            .await
-            .map_err(|e| format!("Event loop error: {}", e));
-        self.runtime.v8_isolate().perform_microtask_checkpoint();
-        result
+        self.run_cooperative_event_loop_tick().await.map(|_| ())
     }
 
     /// Whether the serialized dynamic-script queue is still fetching or
@@ -1719,12 +1414,6 @@ impl ObscuraJsRuntime {
             .ok()
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
-        // A short tail bridges the parser/evaluator hand-off between one
-        // fetched module and the next dependency. It is below the lifecycle's
-        // existing 500ms fast-settle floor, so static entry graphs pay no new
-        // latency while lazy import graphs remain observable. deno_core's
-        // dynamic-module evaluation/TLA counters are private; the event-loop
-        // pump itself remains responsible for that non-fetch portion.
         pending_dom_script
             || self
                 .module_load_activity
@@ -1748,11 +1437,11 @@ impl ObscuraJsRuntime {
     /// detached-tree construction and no-op writes, which cannot affect a
     /// screenshot or DOM dump.
     pub fn activity_generation(&self) -> u64 {
-        self.state.borrow().activity_generation
+        self.qjs.shared_state().borrow().activity_generation
     }
 
     fn has_pending_network_requests(&self) -> bool {
-        let state = self.state.borrow();
+        let state = self.qjs.shared_state().borrow();
         state
             .page_in_flight
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -1766,97 +1455,64 @@ impl ObscuraJsRuntime {
         .filter(|delay| *delay >= 0.0)
     }
 
-    /// Arm a hard wall-clock backstop on synchronous V8 work. A page stuck in a
-    /// synchronous loop or a microtask storm pins the OS thread inside V8, so
+    /// Arm a hard wall-clock backstop on synchronous JavaScript. A page stuck
+    /// in a tight loop pins the OS thread inside QuickJS, so
     /// `tokio::time::timeout` (which can only cancel at await points) never
-    /// fires. This spawns a watchdog thread that terminates the isolate once
-    /// `budget` elapses, forcing V8 to throw an uncatchable error and hand
-    /// control back. Always balance with [`Self::disarm_watchdog`].
+    /// fires. This spawns a watchdog thread that sets the isolate interrupt
+    /// flag once `budget` elapses, forcing QuickJS to throw and hand control
+    /// back. Always balance with [`Self::disarm_watchdog`].
     pub fn arm_watchdog(&mut self, budget: std::time::Duration) -> WatchdogToken {
-        spawn_watchdog(self.runtime.v8_isolate().thread_safe_handle(), budget)
+        self.qjs.arm_watchdog(budget)
     }
 
     /// Stop a watchdog armed by [`Self::arm_watchdog`]. If it had already fired
-    /// (terminated the isolate), clear V8's termination flag so the isolate is
+    /// (terminated the isolate), clear the interrupt flag so the isolate is
     /// usable again, and return `true`.
     pub fn disarm_watchdog(&mut self, token: WatchdogToken) -> bool {
-        let fired = token.stop();
-        if fired {
-            self.runtime.v8_isolate().cancel_terminate_execution();
-            tracing::warn!("V8 watchdog fired: terminated a synchronous overrun");
-        }
-        fired
+        self.qjs.disarm_watchdog(token)
     }
 
-    /// This runtime's V8 isolate handle (captured at construction, stable for
+    /// This runtime's interrupt handle (captured at construction, stable for
     /// the isolate's life). Lets the CDP dispatcher arm a per-command watchdog
     /// from `&self`.
     pub fn isolate_handle(&self) -> IsolateHandle {
-        self.isolate_handle.clone()
+        self.qjs.isolate_handle()
     }
 
-    /// Clear V8's termination flag after a watchdog armed externally (via the
+    /// Clear the interrupt flag after a watchdog armed externally (via the
     /// isolate handle) fired, so the isolate is usable for the next command.
-    /// No-op when the isolate is not terminating.
     pub fn cancel_termination(&mut self) {
-        self.runtime.v8_isolate().cancel_terminate_execution();
+        self.qjs.cancel_termination();
     }
 
     /// Drive the event loop for at most `budget_ms`, bounded against BOTH async
-    /// idle (Tokio deadline) and synchronous hangs (V8 watchdog). The deadline
-    /// is observed between browser tasks; a task already running there gets a
-    /// five-second completion allowance plus a 500ms scheduling margin before
-    /// the watchdog terminates it. A well-behaved page returns as soon as the
+    /// idle (Tokio deadline) and synchronous hangs (QuickJS interrupt). The
+    /// deadline is observed between browser tasks; a task already running there
+    /// gets a five-second completion allowance plus a 500ms scheduling margin
+    /// before the interrupt fires. A well-behaved page returns as soon as the
     /// loop goes idle.
     pub async fn run_event_loop_bounded(&mut self, budget_ms: u64) -> Result<(), String> {
         if budget_ms == 0 {
             return self.run_event_loop().await;
         }
-        let budget = std::time::Duration::from_millis(budget_ms);
-        let deadline = tokio::time::Instant::now() + budget;
-        // A capture/readiness deadline is observed only between browser tasks.
-        // Chromium does not terminate the JavaScript task which happens to be
-        // active when a screenshot delay expires; the capture waits for that
-        // task boundary. Keep a separate long-task floor so short compositor
-        // slices and explicit waits do not kill legitimate framework work,
-        // while an actually unyielding task remains bounded.
-        // One watchdog for the complete pump avoids spawning a native thread
-        // per cooperative task. Adding the floor after the observation budget
-        // guarantees that even a task beginning just before `deadline` gets
-        // the same bounded completion allowance.
-        let synchronous_budget = budget
-            .saturating_add(std::time::Duration::from_millis(SYNCHRONOUS_TASK_FLOOR_MS));
-        let token =
-            self.arm_watchdog(synchronous_budget
-                + std::time::Duration::from_millis(WATCHDOG_SCHEDULING_MARGIN_MS));
-        let result = loop {
-            if tokio::time::Instant::now() >= deadline {
-                break Ok(());
-            }
-
-            match tokio::time::timeout_at(deadline, self.run_cooperative_event_loop_tick()).await {
-                Ok(Ok(true)) => break Ok(()),
-                Ok(Ok(false)) => {
-                    // End-of-task microtasks belong to this turn, but work
-                    // queued from them belongs to a subsequent cooperative
-                    // turn. Yield so the wall deadline remains observable even
-                    // when every turn immediately schedules another one.
-                    self.runtime.v8_isolate().perform_microtask_checkpoint();
-                    tokio::task::yield_now().await;
-                }
-                Ok(Err(error)) => break Err(error),
-                Err(_) => break Ok(()),
-            }
-        };
+        self.begin_javascript_task();
+        let token = self.arm_watchdog(
+            std::time::Duration::from_millis(budget_ms)
+                + std::time::Duration::from_millis(SYNCHRONOUS_TASK_FLOOR_MS)
+                + std::time::Duration::from_millis(WATCHDOG_SCHEDULING_MARGIN_MS),
+        );
+        let result = self.qjs.run_event_loop_bounded(budget_ms);
         let fired = self.disarm_watchdog(token);
         match result {
-            Err(error) if fired || error.contains("execution terminated") => Ok(()),
+            Err(error) if fired || error.contains("interrupted") || error.contains("execution terminated") => {
+                Ok(())
+            }
             other => other,
         }
     }
 
-    /// Drive page tasks for a fixed observation interval without asking
-    /// deno_core's run-to-idle future to own that entire interval.
+    /// Drive page tasks for a fixed observation interval without a run-to-idle
+    /// pump owning that entire interval.
     ///
     /// Modern schedulers commonly keep the event loop continuously ready with
     /// animation frames, zero-delay tasks, or streaming work. A single
@@ -1872,120 +1528,58 @@ impl ObscuraJsRuntime {
         self.run_event_loop_bounded(budget_ms).await
     }
 
-    /// Drive one deno_core event-loop tick at a time. When the first tick
-    /// parks, process one more tick after its registered waker fires, then
-    /// yield back to the embedder even if that tick schedules more work.
-    ///
-    /// `JsRuntime::run_event_loop()` is a run-to-idle future. When a page keeps
-    /// it continuously ready (zero-delay schedulers, streaming traffic, or a
-    /// framework work queue), Tokio never regains control to observe a timeout
-    /// or our readiness policy. This future deliberately turns the wake for a
-    /// second tick into a return to the caller. If no work is immediately
-    /// ready, it remains parked on deno_core's real I/O/timer waker, so the
-    /// adaptive settle loop does not poll at a fixed frequency.
+    /// Drive one cooperative event-loop tick. When work is due, pump it; when
+    /// the next wait is a timer or fetch, sleep until that instant, then pump
+    /// again. Yields even if that tick schedules more work so Tokio can observe
+    /// timeouts and readiness policy.
     async fn run_cooperative_event_loop_tick(&mut self) -> Result<bool, String> {
         self.begin_javascript_task();
-        self.runtime.v8_isolate().perform_microtask_checkpoint();
-        let mut waiting_for_wake = false;
-        std::future::poll_fn(|cx| {
-            let tick = self
-                .runtime
-                .poll_event_loop(cx, deno_core::PollEventLoopOptions::default());
-            match tick {
-                std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(true)),
-                std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(format!(
-                    "Event loop error: {error}"
-                ))),
-                std::task::Poll::Pending if waiting_for_wake => {
-                    std::task::Poll::Ready(Ok(false))
-                }
-                std::task::Poll::Pending => {
-                    waiting_for_wake = true;
-                    std::task::Poll::Pending
-                }
+        let _ = self.qjs.pump_ready()?;
+        if self.qjs.is_idle() {
+            return Ok(true);
+        }
+        if let Some(deadline) = self.qjs.next_wait_instant() {
+            let wait = deadline.saturating_duration_since(std::time::Instant::now());
+            if !wait.is_zero() {
+                tokio::time::sleep(wait).await;
             }
-        })
-        .await
+            let _ = self.qjs.pump_ready()?;
+        }
+        Ok(self.qjs.is_idle())
     }
 
     /// Drive one browser task while allowing the future to remain parked on
-    /// deno_core's real timer/network waker. This is the long-lived browser
-    /// server counterpart to bounded screenshot settling: the owner selects
-    /// this future alongside incoming protocol commands, so a page continues
-    /// to make progress while the automation client is idle without polling at
-    /// a fixed frequency.
+    /// the next timer or fetch. This is the long-lived browser server
+    /// counterpart to bounded screenshot settling: the owner selects this
+    /// future alongside incoming protocol commands, so a page continues to make
+    /// progress while the automation client is idle without polling at a fixed
+    /// frequency.
     ///
-    /// The shared CDP watchdog is armed only around synchronous V8 entry. It is
-    /// deliberately disarmed while `Poll::Pending`; a legitimate distant timer
-    /// must not look like a hung JavaScript task merely because the runtime is
-    /// asleep waiting for it.
+    /// The shared CDP watchdog is armed only around synchronous JavaScript.
+    /// It is deliberately disarmed while `Poll::Pending`; a legitimate distant
+    /// timer must not look like a hung JavaScript task merely because the
+    /// runtime is asleep waiting for it.
     #[doc(hidden)]
     pub async fn run_autonomous_event_loop_turn(&mut self) -> Result<bool, String> {
-        const AUTONOMOUS_TASK_WATCHDOG_MS: u64 =
-            SYNCHRONOUS_TASK_FLOOR_MS + WATCHDOG_SCHEDULING_MARGIN_MS;
-
-        self.begin_javascript_task();
-
-        let checkpoint_watchdog = crate::cdp_watchdog::arm(
-            self.isolate_handle(),
-            std::time::Duration::from_millis(AUTONOMOUS_TASK_WATCHDOG_MS),
-        );
-        self.runtime.v8_isolate().perform_microtask_checkpoint();
-        if crate::cdp_watchdog::disarm(checkpoint_watchdog) {
-            self.cancel_termination();
-            return Err("autonomous microtask checkpoint exceeded its task budget".into());
-        }
-
-        let isolate_handle = self.isolate_handle();
-        let mut waiting_for_wake = false;
-        std::future::poll_fn(|cx| {
-            let watchdog = crate::cdp_watchdog::arm(
-                isolate_handle.clone(),
-                std::time::Duration::from_millis(AUTONOMOUS_TASK_WATCHDOG_MS),
-            );
-            let tick = self
-                .runtime
-                .poll_event_loop(cx, deno_core::PollEventLoopOptions::default());
-            let watchdog_fired = crate::cdp_watchdog::disarm(watchdog);
-            if watchdog_fired {
-                self.runtime.v8_isolate().cancel_terminate_execution();
-                return std::task::Poll::Ready(Err(
-                    "autonomous browser task exceeded its task budget".into(),
-                ));
-            }
-            match tick {
-                std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(true)),
-                std::task::Poll::Ready(Err(error)) => std::task::Poll::Ready(Err(format!(
-                    "Event loop error: {error}"
-                ))),
-                std::task::Poll::Pending if waiting_for_wake => {
-                    std::task::Poll::Ready(Ok(false))
-                }
-                std::task::Poll::Pending => {
-                    waiting_for_wake = true;
-                    std::task::Poll::Pending
-                }
-            }
-        })
-        .await
+        self.run_cooperative_event_loop_tick().await
     }
 
     /// Drive one cooperative event-loop turn for browser lifecycle code that
     /// must re-check an external readiness predicate after every wake. The
-    /// boolean is true only when deno_core reached full idle.
+    /// boolean is true only when host queues and pending JS jobs are idle.
     #[doc(hidden)]
     pub async fn run_load_delaying_event_loop_tick(&mut self) -> Result<bool, String> {
         self.run_cooperative_event_loop_tick().await
     }
 
-    /// Pump deferred work until deno_core reports true idle, or until the page
-    /// has had no connected-document mutation, relevant request/dynamic-script
-    /// work, or near-term one-shot timeout for `quiet_ms`. Network and script
-    /// work gets a bounded post-load grace period: this retains ordinary app
-    /// hydration without allowing analytics, telemetry, or a hung endpoint to
-    /// consume the caller's complete budget. Long timers and perpetual visual
-    /// mutations are bounded separately for the same reason.
-    /// `budget_ms` remains an absolute wall-clock bound.
+    /// Pump deferred work until host queues and pending JS jobs are idle, or
+    /// until the page has had no connected-document mutation, relevant
+    /// request/dynamic-script work, or near-term one-shot timeout for
+    /// `quiet_ms`. Network and script work gets a bounded post-load grace
+    /// period: this retains ordinary app hydration without allowing analytics,
+    /// telemetry, or a hung endpoint to consume the caller's complete budget.
+    /// Long timers and perpetual visual mutations are bounded separately for
+    /// the same reason. `budget_ms` remains an absolute wall-clock bound.
     pub async fn run_event_loop_until_quiescent(
         &mut self,
         budget_ms: u64,
@@ -2067,14 +1661,10 @@ impl ObscuraJsRuntime {
                 quiet_since.map_or(deadline, |since| since + quiet)
             }
             .min(deadline);
-            // deno_core's public poll is one event-loop iteration, but an
-            // iteration may synchronously drain an arbitrarily long chain of
-            // nextTick/macrotask/microtask callbacks before returning. Tokio's
-            // deadline cannot preempt that native V8 call. Bound the individual
-            // turn beyond the readiness horizon by the same bounded task
-            // allowance as fixed waits. The observation window may expire
-            // while valid framework/layout work is running; browser capture
-            // waits for that task boundary instead of terminating it midway.
+            // One cooperative tick may still run a long chain of timers and
+            // microtasks. Tokio's deadline cannot preempt that native call.
+            // Bound the individual turn beyond the readiness horizon by the
+            // same bounded task allowance as fixed waits.
             let tick_watchdog = self.arm_watchdog(
                 policy_deadline.saturating_duration_since(now)
                     + std::time::Duration::from_millis(SYNCHRONOUS_TASK_FLOOR_MS)
@@ -2089,7 +1679,7 @@ impl ObscuraJsRuntime {
             if tick_fired {
                 break Ok(());
             }
-            self.runtime.v8_isolate().perform_microtask_checkpoint();
+            self.qjs.run_event_loop_bounded(1)?;
             match tick {
                 Ok(Ok(true)) => break Ok(()),
                 Ok(Ok(false)) | Err(_) => {}
@@ -2103,9 +1693,8 @@ impl ObscuraJsRuntime {
         }
     }
 
-    /// Like [`Self::evaluate`] but bounded by a V8 watchdog, so a `--eval`
-    /// expression that loops forever (or awaits a promise that never settles in
-    /// synchronous form) cannot hang the process.
+    /// Like [`Self::evaluate`] but bounded by the isolate watchdog, so a
+    /// `--eval` expression that loops forever cannot hang the process.
     pub fn evaluate_with_timeout(
         &mut self,
         expression: &str,
@@ -2115,16 +1704,15 @@ impl ObscuraJsRuntime {
             return self.evaluate(expression);
         }
         self.begin_javascript_task();
-        let wrapped = Self::wrap_expression(expression);
         let token = self.arm_watchdog(timeout);
-        let result = self.runtime.execute_script("<eval>", wrapped);
+        let result = self.qjs.evaluate(expression);
         let fired = self.disarm_watchdog(token);
         match result {
-            Ok(v) if !fired => self.v8_to_json(v),
+            Ok(v) if !fired => Ok(v),
             Ok(_) => Err("eval timed out".to_string()),
             Err(e) => {
                 let msg = e.to_string();
-                if fired || msg.contains("execution terminated") {
+                if fired || msg.contains("interrupted") || msg.contains("execution terminated") {
                     Err("eval timed out".to_string())
                 } else {
                     Err(format!("JS error: {}", msg))
@@ -2135,20 +1723,14 @@ impl ObscuraJsRuntime {
 
     pub async fn resolve_promises(&mut self) {
         self.begin_javascript_task();
-        // Default settle: just pump until idle or 5s.
-        let _ = tokio::time::timeout(
-            tokio::time::Duration::from_secs(5),
-            self.runtime
-                .run_event_loop(deno_core::PollEventLoopOptions::default()),
-        )
-        .await;
+        let _ = self.qjs.run_event_loop_bounded(5_000);
     }
 
     /// Pump the event loop until `done_check` returns true (e.g. an IIFE
     /// has written its result sentinel), or `max_total_ms` elapses. Returns
     /// whether the predicate completed before the deadline.
     ///
-    /// Why this exists: `run_event_loop(default)` only returns when there is
+    /// Why this exists: a run-to-idle pump only returns when there is
     /// no pending work. Page JS routinely schedules long setTimeouts
     /// (IntersectionObserver re-fires at 7s, requestIdleCallback, etc.) that
     /// the caller does not care about. With the plain timeout we waited 5s
@@ -2178,9 +1760,8 @@ impl ObscuraJsRuntime {
             // Pump for a short slice. If the loop returns idle in <tick_ms,
             // run_event_loop returns Ok and we check the predicate again.
             let _ = tokio::time::timeout(
-                tokio::time::Duration::from_millis(tick_ms),
-                self.runtime
-                    .run_event_loop(deno_core::PollEventLoopOptions::default()),
+                tokio::time::Duration::from_millis(tick_ms.max(1)),
+                self.run_cooperative_event_loop_tick(),
             )
             .await;
             // Backoff so a hung promise doesn't burn CPU. Caps at 50ms;
@@ -2191,7 +1772,7 @@ impl ObscuraJsRuntime {
         }
     }
     pub fn take_dom(&self) -> Option<DomTree> {
-        let mut state = self.state.borrow_mut();
+        let mut state = self.qjs.shared_state().borrow_mut();
         #[cfg(feature = "render")]
         {
             state.prepared_render = None;
@@ -2210,7 +1791,7 @@ impl ObscuraJsRuntime {
     /// HTML "already started" flags must travel with it rather than resetting
     /// like window-global JavaScript state.
     pub fn started_script_ids(&self) -> Vec<u32> {
-        let state = self.state.borrow();
+        let state = self.qjs.shared_state().borrow();
         let mut ids = state
             .already_started_scripts
             .borrow()
@@ -2225,7 +1806,7 @@ impl ObscuraJsRuntime {
     /// DOM.  Callers use this exclusively for the same DomTree surviving a
     /// suspend/resume cycle; normal set_dom navigation starts from an empty set.
     pub fn restore_started_script_ids(&self, ids: &[u32]) {
-        let state = self.state.borrow();
+        let state = self.qjs.shared_state().borrow();
         let Some(dom) = state.dom.as_ref() else {
             return;
         };
@@ -2239,25 +1820,25 @@ impl ObscuraJsRuntime {
     }
 
     pub fn with_dom<R>(&self, f: impl FnOnce(&DomTree) -> R) -> Option<R> {
-        let state = self.state.borrow();
+        let state = self.qjs.shared_state().borrow();
         state.dom.as_ref().map(f)
     }
 
     /// Absolute URLs the page requested via fetch()/XHR, in request order
     /// (issue #301). Backs `--dump assets`.
     pub fn fetched_urls(&self) -> Vec<String> {
-        self.state.borrow().fetched_urls.clone()
+        self.qjs.shared_state().borrow().fetched_urls.clone()
     }
 
     /// Drain the network events recorded for script-initiated requests
     /// (fetch/XHR/dynamic resource). The Page moves these into its own
     /// network_events so the CDP layer emits Network events for them (#406).
     pub fn take_js_network_events(&self) -> Vec<crate::ops::JsNetworkEvent> {
-        std::mem::take(&mut self.state.borrow_mut().js_network_events)
+        std::mem::take(&mut self.qjs.shared_state().borrow_mut().js_network_events)
     }
 
     pub fn dom_ref(&self) -> Option<std::cell::Ref<'_, Option<DomTree>>> {
-        let r = self.state.borrow();
+        let r = self.qjs.shared_state().borrow();
         if r.dom.is_some() {
             Some(std::cell::Ref::map(r, |s| &s.dom))
         } else {
@@ -2266,42 +1847,6 @@ impl ObscuraJsRuntime {
     }
     fn make_oid(&self, counter: u64) -> String {
         format!("{{\"injectedScriptId\":1,\"id\":{}}}", counter)
-    }
-
-    fn wrap_expression(expression: &str) -> String {
-        let trimmed = expression.trim();
-
-        let is_multi_statement = trimmed.starts_with("var ")
-            || trimmed.starts_with("let ")
-            || trimmed.starts_with("const ")
-            || trimmed.starts_with("if ")
-            || trimmed.starts_with("for ")
-            || trimmed.starts_with("while ")
-            || trimmed.starts_with("return ");
-
-        if is_multi_statement {
-            format!(
-                "(function() {{ try {{\n{}\n}} catch(e) {{ return null; }} }})()",
-                expression
-            )
-        } else {
-            // Strip trailing semicolons + whitespace before wrapping in
-            // `return (...);`. Playwright's utility-script expression is
-            // an IIFE that ends with `})();` — leaving the `;` in place
-            // produces `return (...;);`, a SyntaxError. The script fails
-            // to parse, the catch never fires (parse errors are not
-            // catchable), and the function silently returns `undefined`.
-            // Stripping makes the wrapped expression syntactically valid.
-            //
-            // The newline before the trailing `)` also terminates any
-            // `//# sourceURL=...` line comment the caller may have appended
-            // (Puppeteer's evaluated bundles do).
-            let cleaned = trimmed.trim_end_matches(|c: char| c == ';' || c.is_whitespace());
-            format!(
-                "(function() {{ try {{ return (\n{}\n); }} catch(e) {{ return null; }} }})()",
-                cleaned
-            )
-        }
     }
 
     fn meta_extract_js(var_name: &str) -> String {
@@ -2386,53 +1931,6 @@ impl ObscuraJsRuntime {
         }
 
         (setup_lines.join("\n"), arg_names.join(", "))
-    }
-
-    fn v8_to_json(
-        &mut self,
-        result: deno_core::v8::Global<deno_core::v8::Value>,
-    ) -> Result<serde_json::Value, String> {
-        let scope = &mut self.runtime.handle_scope();
-        let local = deno_core::v8::Local::new(scope, result);
-
-        if local.is_undefined() || local.is_null() {
-            return Ok(serde_json::Value::Null);
-        }
-        if local.is_boolean() {
-            return Ok(serde_json::Value::Bool(local.boolean_value(scope)));
-        }
-        if local.is_number() {
-            let n = local.number_value(scope).unwrap_or(0.0);
-            return Ok(serde_json::json!(n));
-        }
-        if local.is_string() {
-            let s = local.to_rust_string_lossy(scope);
-            return Ok(serde_json::Value::String(s));
-        }
-
-        let global = scope.get_current_context().global(scope);
-        let json_obj_str = deno_core::v8::String::new(scope, "JSON").unwrap();
-        if let Some(json_obj) = global.get(scope, json_obj_str.into()) {
-            if let Some(json_obj) = json_obj.to_object(scope) {
-                let stringify_str = deno_core::v8::String::new(scope, "stringify").unwrap();
-                if let Some(stringify_fn) = json_obj.get(scope, stringify_str.into()) {
-                    if let Ok(stringify_fn) =
-                        deno_core::v8::Local::<deno_core::v8::Function>::try_from(stringify_fn)
-                    {
-                        let args = [local];
-                        if let Some(result) = stringify_fn.call(scope, json_obj.into(), &args) {
-                            let json_str = result.to_rust_string_lossy(scope);
-                            if let Ok(val) = serde_json::from_str(&json_str) {
-                                return Ok(val);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let s = local.to_rust_string_lossy(scope);
-        Ok(serde_json::Value::String(s))
     }
 
     fn info_from_json(value: &serde_json::Value) -> RemoteObjectInfo {
@@ -2756,7 +2254,7 @@ mod tests {
         rt.run_event_loop_bounded(100).await.unwrap();
         assert_eq!(
             rt.evaluate("globalThis.__ticks").unwrap(),
-            serde_json::json!(2.0)
+            serde_json::json!(2)
         );
     }
 
@@ -3032,7 +2530,7 @@ mod tests {
         rt.run_event_loop_bounded(100).await.unwrap();
         assert_eq!(
             rt.evaluate("__closedPortDeliveries").unwrap(),
-            serde_json::json!(0.0)
+            serde_json::json!(0)
         );
     }
 
@@ -5068,7 +4566,7 @@ mod tests {
             None,
             true,
         ));
-        let in_flight = rt.state.borrow().page_in_flight.clone();
+        let in_flight = rt.qjs.shared_state().borrow().page_in_flight.clone();
         in_flight.store(1, std::sync::atomic::Ordering::SeqCst);
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(80));
@@ -5194,7 +4692,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn quiescent_event_loop_gives_post_grace_dom_activity_a_quiet_window() {
         let mut rt = setup_runtime("<html><body></body></html>");
-        rt.state
+        rt.qjs.shared_state()
             .borrow()
             .page_in_flight
             .store(1, std::sync::atomic::Ordering::SeqCst);
@@ -6680,7 +6178,7 @@ mod tests {
         rt.evaluate("(function(){ document.getElementById('outer').remove(); document.documentElement.getBoundingClientRect(); return true; })()")
             .expect("remove scroller");
         assert!(
-            rt.state.borrow().element_scroll_offsets.is_empty(),
+            rt.qjs.shared_state().borrow().element_scroll_offsets.is_empty(),
             "removed scroll containers must be pruned after relayout"
         );
     }
@@ -7315,7 +6813,7 @@ mod tests {
 
         let loads = std::sync::Arc::new(std::sync::Mutex::new(0usize));
         let loader_loads = std::sync::Arc::clone(&loads);
-        rt.state.borrow_mut().render_resources =
+        rt.qjs.shared_state().borrow_mut().render_resources =
             obscura_render::RenderResourceCache::with_loader(move |url: &str| {
                 assert_eq!(url, "http://example.test/assets/hero.svg");
                 *loader_loads.lock().expect("loader count") += 1;
@@ -7342,7 +6840,7 @@ mod tests {
         assert_eq!(before[1].as_f64(), Some(40.0));
         let cssom_height = before[2].as_f64().expect("scroll height") as f32;
         let (prepared_address, prepared_height) = {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             let prepared = state.prepared_render.as_ref().expect("prepared by CSSOM");
             (
                 prepared as *const obscura_render::PreparedRender as usize,
@@ -7369,7 +6867,7 @@ mod tests {
         assert_ne!(top, bottom);
         assert_eq!(bottom, bottom_repeat);
         {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             let prepared = state
                 .prepared_render
                 .as_ref()
@@ -7397,7 +6895,7 @@ mod tests {
         assert_eq!(after[1].as_f64(), Some(20.0));
         let mutated_height = after[2].as_f64().expect("mutated scroll height") as f32;
         assert_eq!(
-            rt.state
+            rt.qjs.shared_state()
                 .borrow()
                 .prepared_render
                 .as_ref()
@@ -7434,7 +6932,7 @@ mod tests {
             .screenshot_prepared((80.0, 60.0), Some("http://example.test/page"))
             .expect("prepare retained render");
         let (prepared_address, resolved_address, scroll_generation, root_offset) = {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             let prepared = state.prepared_render.as_ref().expect("prepared layout");
             let resolved = &state.resolved_scroll.as_ref().expect("resolved scroll").1;
             (
@@ -7449,7 +6947,7 @@ mod tests {
         rt.seed_render_resource(missing_url.clone(), None);
         assert!(rt.render_resource_is_known(&missing_url));
         {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             let prepared = state.prepared_render.as_ref().expect("retained layout");
             let resolved = &state.resolved_scroll.as_ref().expect("retained scroll").1;
             assert_eq!(
@@ -7473,7 +6971,7 @@ mod tests {
             "http://example.test/loaded.svg".to_string(),
             Some(br#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"/>"#.to_vec()),
         );
-        let state = rt.state.borrow();
+        let state = rt.qjs.shared_state().borrow();
         let prepared = state.prepared_render.as_ref().expect("retained style graph");
         assert_eq!(
             prepared as *const obscura_render::PreparedRender as usize,
@@ -7504,7 +7002,7 @@ mod tests {
         rt.set_dom(dom);
         rt.set_url("http://example.test/page");
         rt.set_viewport(80.0, 60.0);
-        rt.state.borrow_mut().render_resources =
+        rt.qjs.shared_state().borrow_mut().render_resources =
             obscura_render::RenderResourceCache::with_loader(|_: &str| None);
         rt.run_page_init();
 
@@ -7513,7 +7011,7 @@ mod tests {
             .expect("geometry before image arrival");
         assert_eq!(before, serde_json::json!([0, 0]));
         let prepared_address = {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             state
                 .prepared_render
                 .as_ref()
@@ -7537,7 +7035,7 @@ mod tests {
             Some(png),
         );
         {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             assert_eq!(
                 state
                     .prepared_render
@@ -7564,7 +7062,7 @@ mod tests {
             .evaluate("[hero.getBoundingClientRect().height, after.getBoundingClientRect().top]")
             .expect("geometry after image arrival");
         assert_eq!(after, serde_json::json!([3, 3]));
-        assert!(rt.state.borrow().pending_style_mutations.is_empty());
+        assert!(rt.qjs.shared_state().borrow().pending_style_mutations.is_empty());
     }
 
     #[cfg(feature = "render")]
@@ -7581,7 +7079,7 @@ mod tests {
         rt.set_dom(dom);
         rt.set_url("http://example.test/page");
         rt.set_viewport(80.0, 60.0);
-        rt.state.borrow_mut().render_resources =
+        rt.qjs.shared_state().borrow_mut().render_resources =
             obscura_render::RenderResourceCache::with_loader(|_: &str| None);
         rt.run_page_init();
 
@@ -7594,7 +7092,7 @@ mod tests {
             .screenshot_prepared((80.0, 60.0), Some("http://example.test/page"))
             .expect("capture before image arrival");
         let (prepared_address, resolved_address, activity_before) = {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             (
                 state.prepared_render.as_ref().unwrap() as *const _ as usize,
                 &state.resolved_scroll.as_ref().unwrap().1 as *const _ as usize,
@@ -7608,7 +7106,7 @@ mod tests {
             Some(two_by_three_png()),
         );
         {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             assert_eq!(
                 state.prepared_render.as_ref().unwrap() as *const _ as usize,
                 prepared_address,
@@ -7645,19 +7143,19 @@ mod tests {
         let mut rt = ObscuraJsRuntime::new();
         rt.set_dom(dom);
         rt.set_url("http://example.test/page");
-        rt.state.borrow_mut().render_resources =
+        rt.qjs.shared_state().borrow_mut().render_resources =
             obscura_render::RenderResourceCache::with_loader(|_: &str| None);
         rt.run_page_init();
         rt.evaluate("hero.getBoundingClientRect().width")
             .expect("prepare flex geometry");
-        assert!(rt.state.borrow().resolved_scroll.is_some());
+        assert!(rt.qjs.shared_state().borrow().resolved_scroll.is_some());
 
         rt.seed_render_image_resource(
             "http://example.test/flex.png".to_string(),
             crate::ops::ImageRequestProfile::NoCorsInclude,
             Some(two_by_three_png()),
         );
-        let state = rt.state.borrow();
+        let state = rt.qjs.shared_state().borrow();
         assert_eq!(
             state.pending_style_mutations,
             vec![obscura_render::RetainedStyleMutation::Resource]
@@ -7676,19 +7174,19 @@ mod tests {
         let mut rt = ObscuraJsRuntime::new();
         rt.set_dom(dom);
         rt.set_url("http://example.test/page");
-        rt.state.borrow_mut().render_resources =
+        rt.qjs.shared_state().borrow_mut().render_resources =
             obscura_render::RenderResourceCache::with_loader(|_: &str| None);
         rt.run_page_init();
         rt.evaluate("hero.getBoundingClientRect().width")
             .expect("prepare CSS replaced content");
-        assert!(rt.state.borrow().resolved_scroll.is_some());
+        assert!(rt.qjs.shared_state().borrow().resolved_scroll.is_some());
 
         rt.seed_render_image_resource(
             "http://example.test/content.png".to_string(),
             crate::ops::ImageRequestProfile::NoCorsInclude,
             Some(two_by_three_png()),
         );
-        let state = rt.state.borrow();
+        let state = rt.qjs.shared_state().borrow();
         assert_eq!(
             state.pending_style_mutations,
             vec![obscura_render::RetainedStyleMutation::Resource]
@@ -7714,7 +7212,7 @@ mod tests {
         rt.set_dom(dom);
         rt.set_url("http://example.test/page");
         rt.set_viewport(80.0, 60.0);
-        rt.state.borrow_mut().render_resources =
+        rt.qjs.shared_state().borrow_mut().render_resources =
             obscura_render::RenderResourceCache::with_loader(move |url: &str| {
                 assert_eq!(url, "http://example.test/marker.svg");
                 loader_loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -7743,7 +7241,7 @@ mod tests {
             resolved_root,
             full_height,
         ) = {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             let prepared = state.prepared_render.as_ref().expect("prepared render");
             (
                 prepared as *const obscura_render::PreparedRender as usize,
@@ -7789,7 +7287,7 @@ mod tests {
             .screenshot_prepared((80.0, 60.0), Some("http://example.test/page"))
             .expect("unchanged live screenshot");
         assert_eq!(live_after, live_before);
-        let state = rt.state.borrow();
+        let state = rt.qjs.shared_state().borrow();
         let prepared = state.prepared_render.as_ref().expect("retained render");
         assert_eq!(
             prepared as *const obscura_render::PreparedRender as usize,
@@ -7850,7 +7348,7 @@ mod tests {
             .unwrap();
         assert_eq!(registered, serde_json::json!([true, 1, true]));
         {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             assert_eq!(state.dynamic_fonts.len(), 1);
             assert!(state.prepared_render.is_some());
             assert_eq!(
@@ -7961,7 +7459,7 @@ mod tests {
                 .as_f64(),
             Some(40.0)
         );
-        assert!(rt.state.borrow().prepared_render.is_some());
+        assert!(rt.qjs.shared_state().borrow().prepared_render.is_some());
 
         // Modern frameworks build and decorate substantial detached trees.
         // None of this can affect the connected document's style or geometry.
@@ -7977,7 +7475,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            rt.state.borrow().prepared_render.is_some(),
+            rt.qjs.shared_state().borrow().prepared_render.is_some(),
             "detached subtree construction must retain connected layout"
         );
 
@@ -7992,13 +7490,13 @@ mod tests {
         )
         .unwrap();
         assert!(
-            rt.state.borrow().prepared_render.is_some(),
+            rt.qjs.shared_state().borrow().prepared_render.is_some(),
             "no-op connected attributes must retain prepared layout"
         );
 
         rt.set_viewport(200.0, 100.0);
         assert!(
-            rt.state.borrow().prepared_render.is_some(),
+            rt.qjs.shared_state().borrow().prepared_render.is_some(),
             "reapplying the current viewport must not force layout"
         );
 
@@ -8007,7 +7505,7 @@ mod tests {
         )
         .unwrap();
         {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             assert!(
                 state.prepared_render.is_some(),
                 "a retained inline-style change must keep the prior style maps until flush"
@@ -8060,8 +7558,8 @@ mod tests {
         rt.execute_script("cancel", "__animation.cancel()").unwrap();
         assert_eq!(rt.evaluate("box.style.opacity").unwrap(), serde_json::json!(".2"));
         assert_eq!(rt.evaluate("getComputedStyle(box).opacity").unwrap(), serde_json::json!("0.2"));
-        assert_eq!(rt.evaluate("box.getAnimations().length").unwrap(), serde_json::json!(0.0));
-        assert_eq!(rt.evaluate("document.getAnimations().length").unwrap(), serde_json::json!(0.0));
+        assert_eq!(rt.evaluate("box.getAnimations().length").unwrap(), serde_json::json!(0));
+        assert_eq!(rt.evaluate("document.getAnimations().length").unwrap(), serde_json::json!(0));
     }
 
     #[cfg(feature = "render")]
@@ -8138,7 +7636,7 @@ mod tests {
             .screenshot_prepared((80.0, 60.0), Some("http://example.test/page"))
             .expect("first static frame");
         let prepared_address = {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             state.prepared_render.as_ref().unwrap() as *const _ as usize
         };
 
@@ -8148,7 +7646,7 @@ mod tests {
         let second = rt
             .screenshot_prepared((80.0, 60.0), Some("http://example.test/page"))
             .expect("second static frame");
-        let state = rt.state.borrow();
+        let state = rt.qjs.shared_state().borrow();
         assert_eq!(
             state.prepared_render.as_ref().unwrap() as *const _ as usize,
             prepared_address,
@@ -8182,7 +7680,7 @@ mod tests {
 
         assert!(rt.set_animation_sample(obscura_render::AnimationSample::document(500.0)));
         assert!(
-            rt.state.borrow().prepared_render.is_some(),
+            rt.qjs.shared_state().borrow().prepared_render.is_some(),
             "a forward active sample should retain the previous style graph until flush"
         );
         let midpoint = rt
@@ -8192,7 +7690,7 @@ mod tests {
         assert!((animation_test_width(&rt, "box") - 60.0).abs() < 0.1);
         assert_ne!(initial, midpoint, "animated paint output must advance");
         assert_eq!(
-            rt.state
+            rt.qjs.shared_state()
                 .borrow()
                 .prepared_render
                 .as_ref()
@@ -8212,7 +7710,7 @@ mod tests {
             </body></html>"#,
         );
         rt.set_viewport(120.0, 40.0);
-        rt.state.borrow_mut().animation_timeline_origin = std::time::Instant::now();
+        rt.qjs.shared_state().borrow_mut().animation_timeline_origin = std::time::Instant::now();
         assert!(rt.set_animation_sample(obscura_render::AnimationSample::document(0.0)));
         rt.screenshot_prepared((120.0, 40.0), Some("http://example.com/test"))
             .expect("static frame before WAAPI registration");
@@ -8226,7 +7724,7 @@ mod tests {
         )
         .unwrap();
         {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             let box_node = state
                 .dom
                 .as_ref()
@@ -8250,14 +7748,14 @@ mod tests {
 
         assert!(rt.set_animation_sample(obscura_render::AnimationSample::document(500.0)));
         assert!(
-            rt.state.borrow().prepared_render.is_some(),
+            rt.qjs.shared_state().borrow().prepared_render.is_some(),
             "a forward WAAPI sample should preserve the prepared style graph until flush"
         );
         let midpoint = rt
             .screenshot_prepared((120.0, 40.0), Some("http://example.com/test"))
             .expect("retained WAAPI midpoint");
         let midpoint_opacity = {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             let dom = state.dom.as_ref().unwrap();
             let box_node = dom.get_element_by_id("box").unwrap();
             state.prepared_render.as_ref().unwrap().layout().styles[&box_node]
@@ -8297,7 +7795,7 @@ mod tests {
 
         rt.evaluate("__cancelAnimation.cancel()").unwrap();
         assert!(
-            rt.state.borrow().prepared_render.is_some(),
+            rt.qjs.shared_state().borrow().prepared_render.is_some(),
             "canceling one WAAPI effect must retain the previous style graph until recascade"
         );
         assert_eq!(
@@ -8330,7 +7828,7 @@ mod tests {
             .expect("completed animation frame");
         assert!(!rt.prepared_has_active_css_animations());
         let prepared_address = {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             state.prepared_render.as_ref().unwrap() as *const _ as usize
         };
 
@@ -8342,7 +7840,7 @@ mod tests {
             .expect("later completed frame");
         assert_eq!(completed, later);
         assert_eq!(
-            rt.state
+            rt.qjs.shared_state()
                 .borrow()
                 .prepared_render
                 .as_ref()
@@ -8355,7 +7853,7 @@ mod tests {
             milliseconds: 0.0,
         }));
         assert!(
-            rt.state.borrow().prepared_render.is_none(),
+            rt.qjs.shared_state().borrow().prepared_render.is_none(),
             "backward timeline seeks must invalidate the completed frame"
         );
         let initial = rt
@@ -8393,7 +7891,7 @@ mod tests {
             "an unsupported custom-property-only animation has no render damage"
         );
         let prepared_address = {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             state.prepared_render.as_ref().unwrap() as *const _ as usize
         };
         assert!(rt.set_animation_sample_time(obscura_render::AnimationSampleTime {
@@ -8404,14 +7902,14 @@ mod tests {
             .expect("later frame");
         assert_eq!(first, later);
         assert_eq!(
-            rt.state.borrow().prepared_render.as_ref().unwrap() as *const _ as usize,
+            rt.qjs.shared_state().borrow().prepared_render.as_ref().unwrap() as *const _ as usize,
             prepared_address
         );
     }
 
     #[cfg(feature = "render")]
     fn animation_test_width(rt: &ObscuraJsRuntime, id: &str) -> f32 {
-        let state = rt.state.borrow();
+        let state = rt.qjs.shared_state().borrow();
         let dom = state.dom.as_ref().unwrap();
         let node = dom.query_selector(&format!("#{id}")).unwrap().unwrap();
         match state.prepared_render.as_ref().unwrap().layout().styles[&node].width {
@@ -8446,7 +7944,7 @@ mod tests {
             .unwrap();
         assert!(animation_test_width(&rt, "box") > 95.0);
 
-        rt.state.borrow_mut().animation_timeline_origin =
+        rt.qjs.shared_state().borrow_mut().animation_timeline_origin =
             std::time::Instant::now() - std::time::Duration::from_millis(1_000);
         rt.evaluate("var box=document.getElementById('box');box.remove();document.body.appendChild(box)")
             .unwrap();
@@ -8461,15 +7959,15 @@ mod tests {
     #[test]
     fn scoped_animation_epochs_survive_later_unrelated_mutations_and_t0_capture() {
         let mut rt = animation_epoch_runtime();
-        rt.state.borrow_mut().animation_timeline_origin =
+        rt.qjs.shared_state().borrow_mut().animation_timeline_origin =
             std::time::Instant::now() - std::time::Duration::from_millis(100);
         rt.evaluate("var a=document.createElement('div');a.id='first';a.className='anim';document.body.appendChild(a)")
             .unwrap();
-        rt.state.borrow_mut().animation_timeline_origin =
+        rt.qjs.shared_state().borrow_mut().animation_timeline_origin =
             std::time::Instant::now() - std::time::Duration::from_millis(500);
         rt.evaluate("var b=document.createElement('div');b.id='second';b.className='anim';document.body.appendChild(b)")
             .unwrap();
-        rt.state.borrow_mut().animation_timeline_origin =
+        rt.qjs.shared_state().borrow_mut().animation_timeline_origin =
             std::time::Instant::now() - std::time::Duration::from_millis(600);
         rt.evaluate("document.getElementById('anchor').setAttribute('data-unrelated','yes')")
             .unwrap();
@@ -8500,7 +7998,7 @@ mod tests {
             .unwrap();
         assert!((25.0..35.0).contains(&animation_test_width(&rt, "box")));
 
-        rt.state.borrow_mut().animation_timeline_origin =
+        rt.qjs.shared_state().borrow_mut().animation_timeline_origin =
             std::time::Instant::now() - std::time::Duration::from_millis(300);
         rt.evaluate("document.getElementById('box').setAttribute('style','animation-duration:2000ms;animation-play-state:paused')")
             .unwrap();
@@ -8510,7 +8008,7 @@ mod tests {
         let held = animation_test_width(&rt, "box");
         assert!((12.0..18.0).contains(&held), "held width={held}");
 
-        rt.state.borrow_mut().animation_timeline_origin =
+        rt.qjs.shared_state().borrow_mut().animation_timeline_origin =
             std::time::Instant::now() - std::time::Duration::from_millis(800);
         rt.evaluate("document.getElementById('box').setAttribute('style','animation-duration:2000ms;animation-play-state:running')")
             .unwrap();
@@ -8662,12 +8160,12 @@ mod tests {
                 .as_f64(),
             Some(40.0)
         );
-        assert!(rt.state.borrow().prepared_render.is_some());
+        assert!(rt.qjs.shared_state().borrow().prepared_render.is_some());
 
         rt.evaluate("document.getElementById('field').setAttribute('autocomplete', 'off')")
             .unwrap();
         {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             assert!(
                 state.prepared_render.is_some(),
                 "ordinary selector attributes must retain the prepared render until flush"
@@ -8689,7 +8187,7 @@ mod tests {
             Some(90.0),
             "the retained selector invalidation must observe the new attribute value"
         );
-        assert!(rt.state.borrow().pending_style_mutations.is_empty());
+        assert!(rt.qjs.shared_state().borrow().pending_style_mutations.is_empty());
     }
 
     #[cfg(feature = "render")]
@@ -8709,14 +8207,14 @@ mod tests {
                 .as_f64(),
             Some(30.0)
         );
-        assert!(rt.state.borrow().prepared_render.is_some());
+        assert!(rt.qjs.shared_state().borrow().prepared_render.is_some());
 
         rt.evaluate(
             "document.getElementById('box').setAttributeNS(null, 'class', 'box')",
         )
         .unwrap();
         assert!(
-            rt.state.borrow().prepared_render.is_some(),
+            rt.qjs.shared_state().borrow().prepared_render.is_some(),
             "an identical null-namespace attribute must retain layout"
         );
 
@@ -8725,7 +8223,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            rt.state.borrow().prepared_render.is_none(),
+            rt.qjs.shared_state().borrow().prepared_render.is_none(),
             "a connected namespace-aware style mutation must invalidate layout"
         );
         assert_eq!(
@@ -8766,7 +8264,7 @@ mod tests {
             Some(40.0)
         );
         {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             assert_eq!(state.stylesheet_cache.miss_count(), 1);
             assert_eq!(state.stylesheet_cache.hit_count(), 0);
             assert!(state.stylesheet_cache.retained_source_bytes() > 0);
@@ -8777,7 +8275,7 @@ mod tests {
         rt.evaluate("document.getElementById('box').className = 'b'")
             .unwrap();
         {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             assert!(state.prepared_render.is_some());
             assert_eq!(state.pending_style_mutations.len(), 1);
         }
@@ -8788,7 +8286,7 @@ mod tests {
             Some(80.0)
         );
         {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             assert_eq!(state.stylesheet_cache.miss_count(), 1);
             assert_eq!(state.stylesheet_cache.hit_count(), 1);
         }
@@ -8806,7 +8304,7 @@ mod tests {
             Some(120.0)
         );
         {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             assert_eq!(state.stylesheet_cache.miss_count(), 2);
             assert_eq!(state.stylesheet_cache.hit_count(), 1);
         }
@@ -8820,7 +8318,7 @@ mod tests {
                 .as_f64(),
             Some(160.0)
         );
-        let state = rt.state.borrow();
+        let state = rt.qjs.shared_state().borrow();
         assert_eq!(state.stylesheet_cache.miss_count(), 3);
         assert_eq!(state.stylesheet_cache.hit_count(), 1);
     }
@@ -8852,7 +8350,7 @@ mod tests {
         )
         .unwrap();
         {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             assert!(state.prepared_render.is_some());
             assert!(matches!(
                 state.pending_style_mutations.as_slice(),
@@ -8867,12 +8365,12 @@ mod tests {
                 .as_f64(),
             Some(80.0)
         );
-        assert!(rt.state.borrow().pending_style_mutations.is_empty());
+        assert!(rt.qjs.shared_state().borrow().pending_style_mutations.is_empty());
 
         rt.evaluate("document.getElementById('added').style.width='65px'")
             .unwrap();
         {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             assert!(state.prepared_render.is_some());
             assert!(matches!(
                 state.pending_style_mutations.as_slice(),
@@ -8899,7 +8397,7 @@ mod tests {
         )
         .unwrap();
         {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             assert!(state.prepared_render.is_some());
             assert!(matches!(
                 state.pending_style_mutations.as_slice(),
@@ -8914,7 +8412,7 @@ mod tests {
                 .as_f64(),
             Some(40.0)
         );
-        assert!(rt.state.borrow().pending_style_mutations.is_empty());
+        assert!(rt.qjs.shared_state().borrow().pending_style_mutations.is_empty());
     }
 
     #[cfg(feature = "render")]
@@ -10932,11 +10430,11 @@ mod tests {
         // damage retains layout, while the following capture proves pixels
         // are read from the live backing immediately after the script task.
         {
-            let mut state = rt.state.borrow_mut();
+            let mut state = rt.qjs.shared_state().borrow_mut();
             ensure_resolved_scroll(&mut state).expect("initial resolved canvas scroll");
         }
         let prepared_address = {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             state.prepared_render.as_ref().unwrap() as *const _ as usize
         };
         let activity_before = rt.activity_generation();
@@ -10953,13 +10451,13 @@ mod tests {
         .expect("fill live canvas backing");
         assert!(rt.activity_generation() > activity_before);
         assert_eq!(
-            rt.state.borrow().prepared_render.as_ref().unwrap() as *const _ as usize,
+            rt.qjs.shared_state().borrow().prepared_render.as_ref().unwrap() as *const _ as usize,
             prepared_address,
             "canvas damage must not invalidate retained layout"
         );
 
         let pixmap = {
-            let mut state = rt.state.borrow_mut();
+            let mut state = rt.qjs.shared_state().borrow_mut();
             ensure_resolved_scroll(&mut state).expect("resolved canvas scroll");
             let ObscuraState {
                 dom,
@@ -11345,7 +10843,7 @@ mod tests {
         let mut rt = ObscuraJsRuntime::new();
         rt.set_dom(parse_html(html));
         rt.set_url("http://example.com/page/index.html");
-        rt.state.borrow_mut().render_resources =
+        rt.qjs.shared_state().borrow_mut().render_resources =
             obscura_render::RenderResourceCache::with_loader(loader);
         rt.run_page_init();
         rt
@@ -11475,7 +10973,7 @@ mod tests {
             "four 150ms image requests serialized: {elapsed:?}"
         );
         assert_eq!(
-            rt.state
+            rt.qjs.shared_state()
                 .borrow()
                 .page_in_flight
                 .load(std::sync::atomic::Ordering::SeqCst),
@@ -11870,7 +11368,7 @@ mod tests {
             },
         );
         {
-            let mut state = rt.state.borrow_mut();
+            let mut state = rt.qjs.shared_state().borrow_mut();
             assert!(ensure_prepared_render(&mut state).is_some());
         }
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -11910,7 +11408,7 @@ mod tests {
             },
         );
         {
-            let mut state = rt.state.borrow_mut();
+            let mut state = rt.qjs.shared_state().borrow_mut();
             let previous = state.render_resources.set_sync_loading_enabled(false);
             assert!(ensure_prepared_render(&mut state).is_some());
             state
@@ -11939,7 +11437,7 @@ mod tests {
         );
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         {
-            let state = rt.state.borrow();
+            let state = rt.qjs.shared_state().borrow();
             assert!(state.prepared_render.is_some());
             assert_eq!(
                 state.pending_style_mutations,
@@ -11950,7 +11448,7 @@ mod tests {
         // Once the successful dimensions are retained, another loading-form
         // metadata probe is only a cache hit and must preserve fresh layout.
         {
-            let mut state = rt.state.borrow_mut();
+            let mut state = rt.qjs.shared_state().borrow_mut();
             assert!(ensure_prepared_render(&mut state).is_some());
             assert!(state.prepared_render.is_some());
         }
@@ -11961,7 +11459,7 @@ mod tests {
         .unwrap();
         rt.run_event_loop_bounded(100).await.unwrap();
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert!(rt.state.borrow().prepared_render.is_some());
+        assert!(rt.qjs.shared_state().borrow().prepared_render.is_some());
 
         let missing_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let missing_loader_calls = missing_calls.clone();
@@ -15225,7 +14723,7 @@ mod tests {
                 "#,
             )
             .unwrap();
-        assert_eq!(result, serde_json::json!(1.0));
+        assert_eq!(result, serde_json::json!(1));
     }
 
     #[test]
