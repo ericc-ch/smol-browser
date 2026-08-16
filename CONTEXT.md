@@ -3,7 +3,7 @@
 ## Terms
 
 **the shim**:
-bootstrap.js, the handwritten JavaScript that makes the engine look like a browser to page code. The swap keeps it unmodified.
+bootstrap.js, the handwritten JavaScript that makes the engine look like a browser to page code.
 _Avoid_: the DOM shim, bootstrap
 
 **op**:
@@ -23,7 +23,7 @@ Replacing v8/deno_core with quickjs-ng/rquickjs inside obscura-js while keeping 
 A throwaway prototype that proves the risky parts of the swap before committing weeks to it.
 
 **the obstacle course**:
-The 33-stage test suite in the obscura-benchmark repo. It drives `obscura fetch` against local fixtures and checks results. It is the daily gate.
+The 33-stage end-to-end suite. It drives `obscura fetch` against local fixtures and checks results. It is the daily gate (`e2e/run.sh`).
 
 **the gate**:
 The pass condition for the swap: obstacle course results at or above the baseline, with the IO stage re-verified.

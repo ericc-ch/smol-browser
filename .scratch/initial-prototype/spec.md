@@ -48,4 +48,4 @@ Notes:
 - Glossary: `CONTEXT.md`. ADRs: `docs/adr/0001-hand-rolled-loop-network-thread.md`, `docs/adr/0002-in-place-engine-swap.md`, `docs/adr/0003-intl-gap-accepted.md`.
 - Decisions: `.scratch/initial-prototype/tickets/` (spike, pin, IO park, slice order, loop, crate shape, Intl, cookies, a11y).
 - Spike crate was throwaway (`/tmp/opencode/rquickjs-spike`). Do not import it. Rebuild the binding in obscura-js.
-- Planning brief: `browser-project-brief.md`. This spec is Phase 1 only.
+- Product map: `AGENTS.md`. This spec is Phase 1 only.

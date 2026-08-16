@@ -3,7 +3,7 @@
 Destination: quickjs-ng/rquickjs engine swap green on the inherited obstacle course; bootstrap.js running unmodified behind a registered Deno.core.ops; hand-rolled thread/channel loop + watchdog; CDP kept (all domains); binary size + RSS scoreboard recorded.
 
 Notes:
-- Brief: browser-project-brief.md (planning doc, untracked). Fork: ericc-ch/smol-browser, upstream h4ckf0r0day/obscura.
+- Product map: `AGENTS.md`. Fork: ericc-ch/smol-browser, upstream h4ckf0r0day/obscura.
 - Pinned at baseline-pin (6750d7d); never pull past it.
 - Build on this machine only; ignore brief's companion-box and ~/throwaway layout. This machine's layout: ~/projects (benchmark at ../obscura-benchmark).
 - Decision style: spike first, then the swap. Gate = existing test suite (obstacle course 33/33, WPT at phase boundaries). No picking 5 new target sites.
