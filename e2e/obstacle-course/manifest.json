@@ -103,6 +103,15 @@
       "desc": "requestAnimationFrame-driven DOM update: a 2-frame rAF chain advances a counter and writes the final value into the DOM after the frames run"
     },
     {
+      "name": "task-ordering",
+      "file": "fixtures/task-ordering.html",
+      "category": "modern-web",
+      "type": "eval",
+      "check": "JSON.stringify(String(window.__obstacle||''))",
+      "expect": "order:microtask,timer,task,raf1,raf2",
+      "desc": "event-loop task ordering: microtasks drain before the next task, and requestAnimationFrame callbacks run at the next rendering opportunity after queued timer tasks, batched in registration order with cancelled frames skipped"
+    },
+    {
       "name": "modern-js-lang",
       "file": "fixtures/modern-js-lang.html",
       "category": "modern-web",
@@ -176,8 +185,8 @@
       "category": "web-api",
       "type": "eval",
       "check": "JSON.stringify(String(window.__obstacle||''))",
-      "expect": "td:\u3042",
-      "desc": "TextDecoder legacy charset: new TextDecoder('shift_jis').decode([0x82,0xA0]) yields the Japanese hiragana \u3042 via the Encoding Standard index tables"
+      "expect": "td:あ",
+      "desc": "TextDecoder legacy charset: new TextDecoder('shift_jis').decode([0x82,0xA0]) yields the Japanese hiragana あ via the Encoding Standard index tables"
     },
     {
       "name": "fileapi",
@@ -322,7 +331,7 @@
       "category": "scraping",
       "type": "eval",
       "check": "JSON.stringify(String(window.__obstacle||''))",
-      "expect": "sjis:\u3053\u3093\u306b\u3061\u306f\u4e16\u754c",
+      "expect": "sjis:こんにちは世界",
       "desc": "charset meta-sniff: page stored as raw Shift_JIS bytes with <meta charset=shift_jis>; obscura decodes the body to correct Japanese text"
     }
   ]

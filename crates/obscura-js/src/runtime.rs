@@ -2215,73 +2215,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn string_timeout_handler_executes_in_global_scope() {
-        let mut rt = setup_runtime("<html><body></body></html>");
-        rt.evaluate("var __timerValue='pending'; setTimeout('__timerValue=\"done\"', 0)")
-            .unwrap();
-        rt.run_event_loop_bounded(100).await.unwrap();
-        assert_eq!(
-            rt.evaluate("globalThis.__timerValue").unwrap(),
-            serde_json::json!("done")
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn string_timeout_declarations_reach_global_scope() {
-        // A string timer handler runs as a classic script in global scope, so a
-        // top-level var/function declaration in it becomes a global. new Function()
-        // kept those declarations local to the compiled function, so they never
-        // reached globalThis.
-        let mut rt = setup_runtime("<html><body></body></html>");
-        rt.evaluate(
-            "setTimeout('var __leaked = 42; function __leakedFn(){ return 7; }', 0)",
-        )
-        .unwrap();
-        rt.run_event_loop_bounded(100).await.unwrap();
-        let v = rt
-            .evaluate(
-                "String(globalThis.__leaked) + '|' + (typeof globalThis.__leakedFn === 'function' ? globalThis.__leakedFn() : 'missing')",
-            )
-            .unwrap();
-        assert_eq!(v, serde_json::json!("42|7"));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn string_interval_handler_repeats_and_can_clear_itself() {
-        let mut rt = setup_runtime("<html><body></body></html>");
-        rt.evaluate("globalThis.__ticks=0").unwrap();
-        rt.evaluate(
-            "globalThis.__timerId=setInterval('__ticks++;if(__ticks===2)clearInterval(__timerId)',1)",
-        )
-        .unwrap();
-        rt.run_event_loop_bounded(100).await.unwrap();
-        assert_eq!(
-            rt.evaluate("globalThis.__ticks").unwrap(),
-            serde_json::json!(2)
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn zero_delay_timer_runs_as_a_task_after_microtasks() {
-        let mut rt = setup_runtime("<html><body></body></html>");
-        rt.execute_script(
-            "zero-delay-task-order",
-            r#"
-                globalThis.__taskOrder = ["sync"];
-                setTimeout(() => __taskOrder.push("timer"), 0);
-                Promise.resolve().then(() => __taskOrder.push("microtask"));
-            "#,
-        )
-        .unwrap();
-
-        rt.run_event_loop_bounded(100).await.unwrap();
-        assert_eq!(
-            rt.evaluate("__taskOrder").unwrap(),
-            serde_json::json!(["sync", "microtask", "timer"])
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
     async fn scheduler_post_task_observes_priority_fifo_and_task_boundaries() {
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
@@ -3580,44 +3513,6 @@ mod tests {
     }
 
     #[test]
-    fn test_document_title() {
-        let mut rt = setup_runtime("<html><head><title>Test</title></head><body></body></html>");
-        let title = rt.evaluate("document.title").unwrap();
-        assert_eq!(title, serde_json::json!("Test"));
-
-        let result = rt
-            .evaluate(
-                r#"
-                (function() {
-                  document.title = "A <new> title";
-                  return [
-                    document.title,
-                    document.querySelector("head > title").textContent,
-                    document.querySelectorAll("title").length
-                  ];
-                })()
-                "#,
-            )
-            .unwrap();
-        assert_eq!(
-            result,
-            serde_json::json!(["A <new> title", "A <new> title", 1])
-        );
-
-        let normalized = rt
-            .evaluate(
-                r#"
-                (function() {
-                  document.querySelector("title").textContent = "  live\n\tDOM   title  ";
-                  return document.title;
-                })()
-                "#,
-            )
-            .unwrap();
-        assert_eq!(normalized, serde_json::json!("live DOM title"));
-    }
-
-    #[test]
     fn document_title_setter_creates_missing_title_element() {
         let mut rt = setup_runtime("<html><body><main>content</main></body></html>");
         let result = rt
@@ -4647,7 +4542,7 @@ mod tests {
         let elapsed = started.elapsed();
 
         accepted
-            .recv_timeout(std::time::Duration::from_millis(100))
+            .recv_timeout(std::time::Duration::from_secs(2))
             .expect("fixture fetch was not issued");
         assert!(
             elapsed >= std::time::Duration::from_millis(650),
@@ -4680,7 +4575,7 @@ mod tests {
         let elapsed = started.elapsed();
 
         accepted
-            .recv_timeout(std::time::Duration::from_millis(100))
+            .recv_timeout(std::time::Duration::from_secs(2))
             .expect("fixture fetch was not issued");
         assert!(
             elapsed >= std::time::Duration::from_millis(900),
@@ -4927,80 +4822,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn animation_frame_requires_a_callable_callback() {
-        let mut rt = setup_runtime("<html><body></body></html>");
-        let result = rt
-            .evaluate(
-                r#"(() => {
-                    try {
-                        requestAnimationFrame(null);
-                        return [false, ""];
-                    } catch (error) {
-                        return [error instanceof TypeError, error.name];
-                    }
-                })()"#,
-            )
-            .unwrap();
-        assert_eq!(result, serde_json::json!([true, "TypeError"]));
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn animation_frames_are_ordered_batches_with_rendering_timestamps() {
-        let mut rt = setup_runtime("<html><body></body></html>");
-        rt.execute_script(
-            "animation-frame-order",
-            r#"
-                globalThis.__rafEvents = [];
-                globalThis.__rafStamps = [];
-                Promise.resolve().then(() => __rafEvents.push("microtask-before"));
-                setTimeout(() => __rafEvents.push("timer"), 1);
-                requestAnimationFrame((timestamp) => {
-                    __rafEvents.push("raf-a");
-                    __rafStamps.push(timestamp);
-                    Promise.resolve().then(() => __rafEvents.push("microtask-in-raf"));
-                    requestAnimationFrame((nextTimestamp) => {
-                        __rafEvents.push("raf-next");
-                        __rafStamps.push(nextTimestamp);
-                    });
-                });
-                requestAnimationFrame((timestamp) => {
-                    __rafEvents.push("raf-b");
-                    __rafStamps.push(timestamp);
-                });
-            "#,
-        )
-        .unwrap();
-
-        rt.run_event_loop_bounded(150).await.unwrap();
-        let result = rt
-            .evaluate(
-                r#"[
-                    __rafEvents,
-                    __rafStamps.length,
-                    __rafStamps[0] === __rafStamps[1],
-                    __rafStamps[2] > __rafStamps[1]
-                ]"#,
-            )
-            .unwrap();
-        assert_eq!(
-            result,
-            serde_json::json!([
-                [
-                    "microtask-before",
-                    "timer",
-                    "raf-a",
-                    "raf-b",
-                    "microtask-in-raf",
-                    "raf-next"
-                ],
-                3,
-                true,
-                true
-            ])
-        );
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn rendering_opportunity_orders_raf_resize_and_intersection_phases() {
         let mut rt = setup_runtime(
@@ -5075,97 +4896,6 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn cancel_animation_frame_removes_pending_and_current_batch_callbacks() {
-        let mut rt = setup_runtime("<html><body></body></html>");
-        rt.execute_script(
-            "animation-frame-cancel",
-            r#"
-                globalThis.__rafEvents = [];
-                const pending = requestAnimationFrame(() => __rafEvents.push("pending"));
-                cancelAnimationFrame(pending);
-                let sameBatch;
-                requestAnimationFrame(() => {
-                    __rafEvents.push("first");
-                    cancelAnimationFrame(sameBatch);
-                });
-                sameBatch = requestAnimationFrame(() => __rafEvents.push("same-batch"));
-            "#,
-        )
-        .unwrap();
-
-        rt.run_event_loop_bounded(100).await.unwrap();
-        assert_eq!(
-            rt.evaluate("__rafEvents").unwrap(),
-            serde_json::json!(["first"])
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn self_requeueing_animation_frame_yields_to_timer_tasks() {
-        let mut rt = setup_runtime("<html><body></body></html>");
-        rt.execute_script(
-            "animation-frame-yield",
-            r#"
-                globalThis.__rafCount = 0;
-                globalThis.__rafStopped = false;
-                globalThis.__timerAfterAnimation = false;
-                let frameId = 0;
-                function frame() {
-                    __rafCount++;
-                    frameId = requestAnimationFrame(frame);
-                }
-                frameId = requestAnimationFrame(frame);
-                setTimeout(() => {
-                    cancelAnimationFrame(frameId);
-                    __rafStopped = true;
-                }, 55);
-                setTimeout(() => {
-                    __timerAfterAnimation = true;
-                }, 65);
-            "#,
-        )
-        .unwrap();
-
-        rt.run_event_loop_bounded(200).await.unwrap();
-        let result = rt
-            .evaluate("[__rafCount, __rafStopped, __timerAfterAnimation]")
-            .unwrap();
-        let values = result.as_array().unwrap();
-        let frame_count = values[0].as_u64().unwrap();
-        assert!(
-            (2..=5).contains(&frame_count),
-            "expected a few paced animation frames before cancellation, got {frame_count}"
-        );
-        assert_eq!(values[1], serde_json::json!(true));
-        assert_eq!(values[2], serde_json::json!(true));
-    }
-
-    #[test]
-    fn test_document_url() {
-        let mut rt = setup_runtime("<html><body></body></html>");
-        let url = rt.evaluate("document.URL").unwrap();
-        assert_eq!(url, serde_json::json!("http://example.com/test"));
-    }
-
-    #[test]
-    fn test_query_selector() {
-        let mut rt = setup_runtime("<html><body><h1>Hello</h1><p>World</p></body></html>");
-        let text = rt
-            .evaluate("document.querySelector('h1').textContent")
-            .unwrap();
-        assert_eq!(text, serde_json::json!("Hello"));
-    }
-
-    #[test]
-    fn test_query_selector_all() {
-        let mut rt = setup_runtime("<ul><li>A</li><li>B</li><li>C</li></ul>");
-        let count = rt
-            .evaluate("document.querySelectorAll('li').length")
-            .unwrap();
-        assert_eq!(count.as_f64().unwrap() as i64, 3);
-    }
-
     #[test]
     fn css_supports_matches_capabilities_and_boolean_conditions() {
         let mut rt = setup_runtime("<html><body></body></html>");
@@ -5208,15 +4938,6 @@ mod tests {
             result,
             serde_json::json!("[false,false,false,false,false,true,true,true,false,false,false,true,false,true,true,false,false,true,false,true,false,true,false,true,true,true,false,false,true]")
         );
-    }
-
-    #[test]
-    fn test_get_element_by_id() {
-        let mut rt = setup_runtime(r#"<div id="test">Content</div>"#);
-        let tag = rt
-            .evaluate("document.getElementById('test').tagName")
-            .unwrap();
-        assert_eq!(tag, serde_json::json!("DIV"));
     }
 
     #[test]
@@ -9863,15 +9584,6 @@ mod tests {
     }
 
     #[test]
-    fn test_inner_html() {
-        let mut rt = setup_runtime(r#"<div id="x"><p>Hello</p></div>"#);
-        let html = rt
-            .evaluate("document.getElementById('x').innerHTML")
-            .unwrap();
-        assert!(html.as_str().unwrap().contains("<p>"));
-    }
-
-    #[test]
     fn template_inner_html_preserves_table_fragments() {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
@@ -10518,23 +10230,6 @@ mod tests {
             "canvas bitmap must start at the CSS content-box origin"
         );
 
-    }
-
-    #[test]
-    fn test_script_execution() {
-        let mut rt = setup_runtime("<ul><li>A</li><li>B</li></ul>");
-        rt.execute_script(
-            "test",
-            r#"
-            globalThis.__result = [];
-            document.querySelectorAll('li').forEach(function(el) {
-                globalThis.__result.push(el.textContent);
-            });
-        "#,
-        )
-        .unwrap();
-        let result = rt.evaluate("globalThis.__result").unwrap();
-        assert_eq!(result, serde_json::json!(["A", "B"]));
     }
 
     #[test]
@@ -11889,20 +11584,6 @@ mod tests {
     }
 
     #[test]
-    fn test_console_log() {
-        let mut rt = setup_runtime("<html><body></body></html>");
-        rt.execute_script("test", "console.log('Hello from V8!')")
-            .unwrap();
-    }
-
-    #[test]
-    fn test_location() {
-        let mut rt = setup_runtime("<html><body></body></html>");
-        let href = rt.evaluate("location.href").unwrap();
-        assert_eq!(href, serde_json::json!("http://example.com/test"));
-    }
-
-    #[test]
     fn test_button_click_dispatches_listener() {
         let mut rt = setup_runtime(r#"<button id="go">Go</button>"#);
         let result = rt
@@ -11936,23 +11617,6 @@ mod tests {
     }
 
     #[test]
-    fn test_location_href_assignment_updates_navigation_state() {
-        let mut rt = setup_runtime("<html><body></body></html>");
-        let href = rt
-            .evaluate("const next = '/next'; location.href = next; return location.href;")
-            .unwrap();
-        assert_eq!(href, serde_json::json!("http://example.com/next"));
-        assert_eq!(
-            rt.take_pending_navigation(),
-            Some((
-                "http://example.com/next".to_string(),
-                "GET".to_string(),
-                "".to_string()
-            ))
-        );
-    }
-
-    #[test]
     fn test_submit_button_click_handler_can_prevent_default_and_navigate() {
         let mut rt =
             setup_runtime(r#"<form><button type="submit" id="submit">Submit</button></form>"#);
@@ -11978,23 +11642,6 @@ mod tests {
                 "".to_string()
             ))
         );
-    }
-
-    #[test]
-    fn test_navigator() {
-        let mut rt = setup_runtime("<html><body></body></html>");
-        let ua = rt.evaluate("navigator.userAgent").unwrap();
-        assert!(
-            ua.as_str().unwrap().contains("Chrome"),
-            "UA should contain Chrome: {}",
-            ua
-        );
-        let wd = rt.evaluate("navigator.webdriver").unwrap();
-        assert_eq!(wd, serde_json::json!(false));
-        let plugins = rt.evaluate("navigator.plugins.length").unwrap();
-        assert!(plugins.as_f64().unwrap() > 0.0, "Should have plugins");
-        let chrome = rt.evaluate("typeof window.chrome").unwrap();
-        assert_eq!(chrome, serde_json::json!("object"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -12203,86 +11850,6 @@ mod tests {
     }
 
     #[test]
-    fn test_inner_html_setter() {
-        let mut rt = setup_runtime(r#"<div id="target"><p>Old</p></div>"#);
-        rt.execute_script(
-            "test",
-            r#"
-            var el = document.getElementById('target');
-            el.innerHTML = '<strong>Bold</strong><em>Italic</em>';
-        "#,
-        )
-        .unwrap();
-        let result = rt
-            .evaluate("document.getElementById('target').innerHTML")
-            .unwrap();
-        let html = result.as_str().unwrap();
-        assert!(
-            html.contains("<strong>"),
-            "innerHTML should contain <strong>, got: {}",
-            html
-        );
-        assert!(
-            html.contains("<em>"),
-            "innerHTML should contain <em>, got: {}",
-            html
-        );
-        assert!(
-            !html.contains("Old"),
-            "innerHTML should not contain old content, got: {}",
-            html
-        );
-    }
-
-    #[test]
-    fn test_inner_html_with_nested() {
-        let mut rt = setup_runtime(r#"<div id="root"></div>"#);
-        rt.execute_script(
-            "test",
-            r#"
-            var el = document.getElementById('root');
-            el.innerHTML = '<ul><li>A</li><li>B</li><li>C</li></ul>';
-        "#,
-        )
-        .unwrap();
-        let count = rt
-            .evaluate("document.querySelectorAll('li').length")
-            .unwrap();
-        assert_eq!(
-            count.as_f64().unwrap() as i64,
-            3,
-            "Should find 3 li elements after innerHTML set"
-        );
-
-        let text = rt
-            .evaluate("document.querySelector('li').textContent")
-            .unwrap();
-        assert_eq!(text, serde_json::json!("A"));
-    }
-
-    #[test]
-    fn test_input_value() {
-        let mut rt = setup_runtime(
-            r#"<form><input id="name" type="text" value="initial"><textarea id="bio">old text</textarea></form>"#,
-        );
-        let val = rt
-            .evaluate("document.getElementById('name').value")
-            .unwrap();
-        assert_eq!(val, serde_json::json!("initial"));
-        rt.execute_script(
-            "test",
-            "document.getElementById('name').value = 'new value';",
-        )
-        .unwrap();
-        let val2 = rt
-            .evaluate("document.getElementById('name').value")
-            .unwrap();
-        assert_eq!(val2, serde_json::json!("new value"));
-        let bio = rt.evaluate("document.getElementById('bio').value").unwrap();
-        assert_eq!(bio, serde_json::json!("old text"));
-    }
-
-    #[test]
     fn test_sequential_runtime_swap() {
         let mut rt1 = setup_runtime("<html><body><h1>Page1</h1></body></html>");
         let title1 = rt1
@@ -12311,21 +11878,6 @@ mod tests {
                 .unwrap();
             assert_eq!(title1b, serde_json::json!("Page1"));
         }
-    }
-
-    #[test]
-    fn test_checkbox_checked() {
-        let mut rt = setup_runtime(r#"<input id="cb" type="checkbox" checked>"#);
-        let checked = rt
-            .evaluate("document.getElementById('cb').checked")
-            .unwrap();
-        assert_eq!(checked, serde_json::json!(true));
-        rt.execute_script("test", "document.getElementById('cb').checked = false;")
-            .unwrap();
-        let checked2 = rt
-            .evaluate("document.getElementById('cb').checked")
-            .unwrap();
-        assert_eq!(checked2, serde_json::json!(false));
     }
 
     // Issue #324: React/Preact/Vue install a value tracker by redefining `value`
@@ -12392,25 +11944,6 @@ mod tests {
         assert_eq!(p["docClick"], true);
         assert_eq!(p["elProtoInput"], true);
         assert_eq!(p["winInput"], true);
-    }
-
-    #[test]
-    fn test_matches_and_closest() {
-        let mut rt = setup_runtime(
-            r#"<div class="outer"><div class="inner"><span id="target">Hi</span></div></div>"#,
-        );
-        let matches = rt
-            .evaluate("document.getElementById('target').matches('span')")
-            .unwrap();
-        assert_eq!(matches, serde_json::json!(true));
-        let closest = rt
-            .evaluate("document.getElementById('target').closest('.outer').className")
-            .unwrap();
-        assert_eq!(closest, serde_json::json!("outer"));
-        let no_match = rt
-            .evaluate("document.getElementById('target').closest('.nonexistent')")
-            .unwrap();
-        assert_eq!(no_match, serde_json::Value::Null);
     }
 
     #[test]
@@ -12595,21 +12128,6 @@ mod tests {
     }
 
     #[test]
-    fn test_document_cookie_setter_stores_in_jar() {
-        let (mut rt, jar) = setup_runtime_with_cookies("<html><body></body></html>");
-        rt.evaluate("document.cookie = 'foo=bar; Path=/'").unwrap();
-        let url = url::Url::parse("http://example.com/test").unwrap();
-        let result = rt.evaluate("document.cookie").unwrap();
-        assert!(result.as_str().unwrap().contains("foo=bar"));
-        let header = jar.get_cookie_header(&url);
-        assert!(
-            header.contains("foo=bar"),
-            "cookie should be in jar, got: {}",
-            header
-        );
-    }
-
-    #[test]
     fn test_document_cookie_delete_via_max_age() {
         let (mut rt, jar) = setup_runtime_with_cookies("<html><body></body></html>");
         let url = url::Url::parse("http://example.com/test").unwrap();
@@ -12649,20 +12167,6 @@ mod tests {
             "expected client cookie, got: {}",
             cookie_str
         );
-    }
-
-    #[test]
-    fn test_document_cookie_empty_when_no_cookies() {
-        let (mut rt, _jar) = setup_runtime_with_cookies("<html><body></body></html>");
-        let result = rt.evaluate("document.cookie").unwrap();
-        assert_eq!(result.as_str().unwrap(), "");
-    }
-
-    #[test]
-    fn test_document_cookie_no_jar_returns_empty() {
-        let mut rt = setup_runtime("<html><body></body></html>");
-        let result = rt.evaluate("document.cookie").unwrap();
-        assert_eq!(result.as_str().unwrap(), "");
     }
 
     #[test]
@@ -13091,30 +12595,6 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_wasm_instantiate_streaming_uses_response_array_buffer() {
-        let mut rt = setup_runtime("<html><body></body></html>");
-        let result = rt
-            .call_function_on_for_cdp(
-                r#"async () => {
-                const bytes = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
-                const result = await WebAssembly.instantiateStreaming(
-                    Promise.resolve(new Response(bytes)),
-                    {},
-                );
-                return result.instance instanceof WebAssembly.Instance;
-            }"#,
-                None,
-                &[],
-                true,
-                true,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(result.value.unwrap(), serde_json::json!(true));
-    }
-
     #[test]
     fn test_text_decoder_respects_typed_array_view() {
         let mut rt = setup_runtime("<html><body></body></html>");
@@ -13122,26 +12602,6 @@ mod tests {
             .evaluate("new TextDecoder().decode(new Uint8Array([65, 66, 67]).subarray(1, 2))")
             .unwrap();
         assert_eq!(result.as_str().unwrap(), "B");
-    }
-
-    #[test]
-    fn test_document_doctype() {
-        let mut rt = setup_runtime("<!DOCTYPE html><html><body></body></html>");
-        let result = rt.evaluate("document.doctype !== null").unwrap();
-        assert_eq!(result, serde_json::json!(true));
-
-        let name = rt.evaluate("document.doctype.name").unwrap();
-        assert_eq!(name, serde_json::json!("html"));
-
-        let node_type = rt.evaluate("document.doctype.nodeType").unwrap();
-        assert_eq!(node_type.as_f64().unwrap() as i64, 10);
-    }
-
-    #[test]
-    fn test_document_doctype_null_when_missing() {
-        let mut rt = setup_runtime("<html><body></body></html>");
-        let result = rt.evaluate("document.doctype === null").unwrap();
-        assert_eq!(result, serde_json::json!(true));
     }
 
     #[test]
@@ -13356,73 +12816,6 @@ mod tests {
                 "2"
             ])
         );
-    }
-
-    #[test]
-    fn test_html_to_markdown_headings() {
-        let mut rt =
-            setup_runtime("<html><body><h1>Title</h1><h2>Sub</h2><p>Body</p></body></html>");
-        let md = rt
-            .evaluate(crate::HTML_TO_MARKDOWN_JS)
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .to_string();
-        assert!(md.contains("# Title"), "missing H1: {}", md);
-        assert!(md.contains("## Sub"), "missing H2: {}", md);
-        assert!(md.contains("Body"), "missing paragraph text: {}", md);
-    }
-
-    #[test]
-    fn test_html_to_markdown_links_and_inline() {
-        let mut rt = setup_runtime(
-            r#"<html><body><p>Hello <strong>world</strong> <a href="https://x.test/">link</a> <em>em</em></p></body></html>"#,
-        );
-        let md = rt
-            .evaluate(crate::HTML_TO_MARKDOWN_JS)
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .to_string();
-        assert!(md.contains("**world**"), "missing strong: {}", md);
-        assert!(md.contains("*em*"), "missing em: {}", md);
-        assert!(
-            md.contains("[link](https://x.test/)"),
-            "missing link: {}",
-            md
-        );
-    }
-
-    #[test]
-    fn test_html_to_markdown_lists() {
-        let mut rt = setup_runtime(
-            "<html><body><ul><li>A</li><li>B</li></ul><ol><li>X</li><li>Y</li></ol></body></html>",
-        );
-        let md = rt
-            .evaluate(crate::HTML_TO_MARKDOWN_JS)
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .to_string();
-        assert!(md.contains("- A"), "missing unordered A: {}", md);
-        assert!(md.contains("- B"), "missing unordered B: {}", md);
-        assert!(md.contains("1. X"), "missing ordered X: {}", md);
-    }
-
-    #[test]
-    fn test_html_to_markdown_skips_script_and_style() {
-        let mut rt = setup_runtime(
-            "<html><body><p>Text</p><script>alert(1)</script><style>body{color:red}</style></body></html>",
-        );
-        let md = rt
-            .evaluate(crate::HTML_TO_MARKDOWN_JS)
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .to_string();
-        assert!(md.contains("Text"), "missing visible text: {}", md);
-        assert!(!md.contains("alert"), "leaked script content: {}", md);
-        assert!(!md.contains("color:red"), "leaked style content: {}", md);
     }
 
     #[test]

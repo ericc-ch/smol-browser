@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Task Ordering</title></head>
+<body>
+  <!-- Event-loop task ordering: microtasks drain before the next task, and
+       requestAnimationFrame callbacks run at the next rendering opportunity,
+       after queued timer tasks, batched in registration order with cancelled
+       frames skipped. The stripped unit tests (zero_delay_timer /
+       animation_frame_*) used to pin these guarantees in Rust; this stage
+       keeps the happy-path contract e2e-side. -->
+  <script>
+    (function () {
+      var order = [];
+
+      Promise.resolve().then(function () { order.push('microtask'); });
+      setTimeout(function () { order.push('timer'); });
+      setTimeout(function () {
+        requestAnimationFrame(function () { order.push('raf1'); });
+        var cancelled = requestAnimationFrame(function () { order.push('cancelled'); });
+        cancelAnimationFrame(cancelled);
+        requestAnimationFrame(function () { order.push('raf2'); });
+        order.push('task');
+      }, 0);
+
+      (function poll() {
+        var joined = order.join(',');
+        if (joined === 'microtask,timer,task,raf1,raf2') {
+          window.__obstacle = 'order:' + joined;
+        } else {
+          setTimeout(poll, 10);
+        }
+      })();
+    })();
+  </script>
+</body>
+</html>

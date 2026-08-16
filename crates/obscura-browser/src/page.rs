@@ -5299,14 +5299,18 @@ mod tests {
         let elapsed = started.elapsed();
 
         assert!(
-            accepted_rx
-                .recv_timeout(std::time::Duration::from_millis(100))
-                .is_ok(),
-            "ordinary fetch fixture must actually start its network request",
-        );
-        assert!(
             elapsed < std::time::Duration::from_millis(1_500),
             "ordinary fetch/XHR must retain the fast settle path; elapsed={elapsed:?}",
+        );
+        // Fixture sanity check, not the property under test. execute_scripts
+        // returns long before the accept thread runs, so give that thread a
+        // load-tolerant window: under a full workspace run the accept wake can
+        // lag far past a 100ms post-return race.
+        assert!(
+            accepted_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok(),
+            "ordinary fetch fixture must actually start its network request",
         );
         assert_eq!(
             page.js

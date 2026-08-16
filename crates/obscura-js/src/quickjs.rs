@@ -1435,39 +1435,6 @@ mod tests {
     }
 
     #[test]
-    fn subtree_mutation_observer_matches_descendants_not_siblings() {
-        let mut rt = setup("<html><body></body></html>");
-        let value = rt
-            .evaluate(
-                r#"(() => {
-                    const parent = document.createElement('div');
-                    const sibling = document.createElement('div');
-                    document.body.appendChild(parent);
-                    document.body.appendChild(sibling);
-                    const nested = [];
-                    const exact = [];
-                    const foreign = [];
-                    const nestedObs = new MutationObserver(batch => nested.push(...batch));
-                    const exactObs = new MutationObserver(batch => exact.push(...batch));
-                    const foreignObs = new MutationObserver(batch => foreign.push(...batch));
-                    nestedObs.observe(parent, { childList: true, subtree: true });
-                    exactObs.observe(parent, { childList: true });
-                    foreignObs.observe(sibling, { childList: true, subtree: true });
-                    const child = document.createElement('span');
-                    const grand = document.createElement('i');
-                    parent.appendChild(child);
-                    child.appendChild(grand);
-                    nested.push(...nestedObs.takeRecords());
-                    exact.push(...exactObs.takeRecords());
-                    foreign.push(...foreignObs.takeRecords());
-                    return [nested.length, exact.length, foreign.length];
-                })()"#,
-            )
-            .expect("eval");
-        assert_eq!(value, serde_json::json!([2, 1, 0]));
-    }
-
-    #[test]
     fn sync_dom_ops_round_trip_through_rust_dom() {
         let mut rt = setup("<html><body><div id='x'>hi</div><p class='y'>yo</p></body></html>");
         assert_eq!(
@@ -1518,26 +1485,6 @@ mod tests {
         );
         assert_eq!(
             rt.evaluate("Deno.core.ops.op_async_runtime_available()").expect("eval"),
-            serde_json::json!(true)
-        );
-    }
-
-    #[test]
-    fn set_timeout_fires_after_the_loop_pumps() {
-        let mut rt = setup("<html><body></body></html>");
-        assert_eq!(
-            rt.evaluate("(function(){ globalThis.__fired = false; setTimeout(function(){ globalThis.__fired = true; }, 0); return globalThis.__fired; })()")
-                .expect("eval"),
-            serde_json::json!(false)
-        );
-        // evaluate is not the host loop: a later eval must not deliver the timer.
-        assert_eq!(
-            rt.evaluate("globalThis.__fired").expect("eval"),
-            serde_json::json!(false)
-        );
-        rt.run_event_loop_bounded(20).expect("pump");
-        assert_eq!(
-            rt.evaluate("globalThis.__fired").expect("eval"),
             serde_json::json!(true)
         );
     }

@@ -4,4 +4,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 cargo build -p obscura-cli --bins --no-default-features
 export OBSCURA_BIN="${OBSCURA_BIN:-$ROOT/target/debug/obscura}"
-exec python3 "$ROOT/e2e/obstacle-course/run.py" --runs 1 --warmup 0 "$@"
+DRIVER="$ROOT/e2e/obstacle-course/run.py"
+
+if command -v python3 >/dev/null 2>&1; then
+  exec python3 "$DRIVER" --runs 1 --warmup 0 "$@"
+fi
+
+# Fall back to uv's managed Python when no system python3 exists.
+exec uv run --python 3.12 python3 "$DRIVER" --runs 1 --warmup 0 "$@"

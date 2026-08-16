@@ -13,8 +13,8 @@ A function page JavaScript can call that runs in Rust. Ops take strings in and r
 The seam between page JavaScript and Rust ops. Both sides live in one process; calls are direct.
 
 **Boundary B**:
-The seam between an agent's code and the browser process. Messages are JSON-RPC over stdio, one per user action.
-_Avoid_: the SDK boundary
+The seam between an agent's code and the browser process. CDP over WebSocket, one connection per browser process. We keep the inherited Chromium DevTools protocol; no bespoke SDK.
+_Avoid_: the SDK boundary, JSON-RPC over stdio
 
 **the swap**:
 Replacing v8/deno_core with quickjs-ng/rquickjs inside obscura-js while keeping the shim unmodified.
