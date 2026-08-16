@@ -5,9 +5,6 @@ edition.workspace = true
 
 [features]
 default = []
-# Enable Page.captureScreenshot via obscura-render. Propagates render to
-# obscura-browser so Page::screenshot is available.
-render = ["obscura-browser/render", "dep:image", "dep:png"]
 
 [dependencies]
 obscura-dom = { workspace = true }
@@ -25,8 +22,6 @@ anyhow = { workspace = true }
 base64 = { workspace = true }
 futures-util = "0.3"
 obscura-net = { workspace = true }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"], optional = true }
-png = { version = "0.18", optional = true }
 
 [target.'cfg(target_env = "gnu")'.dependencies]
 libc = "0.2"

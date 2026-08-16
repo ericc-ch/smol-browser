@@ -3,8 +3,7 @@ use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 use obscura_browser::{BrowserContext, Page};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command as TokioCommand;
+use tokio::io::AsyncWriteExt;
 use tokio::time::{timeout, Duration};
 
 #[derive(Parser)]
@@ -28,7 +27,7 @@ struct Args {
 
     /// Enable stealth mode (consistent browser fingerprint, and with the
     /// `stealth` build feature, TLS impersonation plus tracker blocking).
-    /// Global: applies to fetch, serve, scrape, and mcp.
+    /// Global: applies to fetch and serve.
     #[arg(long, global = true)]
     stealth: bool,
 
@@ -116,8 +115,7 @@ enum Command {
         /// Read newline-delimited URLs from a file (one per line; blank lines
         /// and lines starting with `#` are skipped). Use `-` for stdin. Enables
         /// batch mode: every URL is fetched raw (--dump original) and one JSON
-        /// status line is printed per URL. For rendered/DOM batch output use
-        /// `scrape` instead (issue #349).
+        /// status line is printed per URL.
         #[arg(long)]
         file: Option<std::path::PathBuf>,
 
@@ -155,46 +153,6 @@ enum Command {
 
         #[arg(long)]
         storage_dir: Option<std::path::PathBuf>,
-
-        /// Capture the settled page as a PNG. Requires the `render` feature.
-        #[arg(long, short = 's', value_name = "FILE", conflicts_with = "file")]
-        screenshot: Option<std::path::PathBuf>,
-    },
-
-    Scrape {
-        urls: Vec<String>,
-
-        #[arg(long, short)]
-        eval: Option<String>,
-
-        #[arg(long, default_value_t = std::num::NonZeroUsize::new(10).unwrap())]
-        concurrency: std::num::NonZeroUsize,
-
-        #[arg(long, default_value = "json")]
-        format: String,
-
-        #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
-        timeout: u64,
-
-        #[arg(long, short)]
-        quiet: bool,
-    },
-
-    Mcp {
-        #[arg(long)]
-        http: bool,
-
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-
-        #[arg(long, default_value_t = 3000)]
-        port: u16,
-
-        #[arg(long)]
-        proxy: Option<String>,
-
-        #[arg(long)]
-        user_agent: Option<String>,
     },
 }
 
@@ -251,9 +209,7 @@ fn select_log_filter(verbose: bool, quiet: bool) -> &'static str {
 fn is_quiet_command(cmd: &Option<Command>) -> bool {
     matches!(
         cmd,
-        Some(Command::Fetch { quiet: true, .. })
-            | Some(Command::Scrape { quiet: true, .. })
-            | Some(Command::Serve { quiet: true, .. })
+        Some(Command::Fetch { quiet: true, .. }) | Some(Command::Serve { quiet: true, .. })
     )
 }
 
@@ -425,21 +381,16 @@ async fn main() -> anyhow::Result<()> {
             storage_dir,
             file,
             concurrency,
-            screenshot,
         }) => {
             if let Some(file) = file {
                 if url.is_some() {
                     anyhow::bail!("Pass URLs via a positional argument or --file, not both.");
                 }
-                if screenshot.is_some() {
-                    anyhow::bail!("--screenshot is only supported for a single URL, not --file batch mode.");
-                }
-                // Batch mode is raw HTTP only. Rendering each URL through the
-                // browser/JS stack is what `scrape` is for.
+                // Batch mode is raw HTTP only.
                 match dump {
                     None | Some(DumpFormat::Original) => {}
                     Some(_) => anyhow::bail!(
-                        "batch mode (--file) only supports --dump original. Use `scrape` for rendered/DOM output."
+                        "batch mode (--file) only supports --dump original."
                     ),
                 }
                 let urls = read_urls_from_file(&file)?;
@@ -476,43 +427,8 @@ async fn main() -> anyhow::Result<()> {
                     global_proxy,
                     storage_dir,
                     args.allow_private_network,
-                    screenshot,
                 )
                 .await?;
-            }
-        }
-        Some(Command::Scrape {
-            urls,
-            eval,
-            concurrency,
-            format,
-            timeout,
-            quiet,
-        }) => {
-            run_parallel_scrape(
-                urls,
-                eval,
-                concurrency.get(),
-                &format,
-                timeout,
-                quiet,
-                global_proxy,
-                stealth,
-            )
-            .await?;
-        }
-        Some(Command::Mcp {
-            http,
-            host,
-            port,
-            proxy,
-            user_agent,
-        }) => {
-            let mcp_proxy = merge_proxy(global_proxy.clone(), proxy);
-            if http {
-                obscura_mcp::http::run(host, port, mcp_proxy, user_agent, stealth).await?;
-            } else {
-                obscura_mcp::run(mcp_proxy, user_agent, stealth).await?;
             }
         }
         None => {
@@ -686,7 +602,6 @@ async fn run_fetch(
     proxy: Option<String>,
     storage_dir: Option<std::path::PathBuf>,
     allow_private_network: bool,
-    screenshot: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
     // Whether the user explicitly passed --dump. With --eval also present this
     // decides whether we return the eval value or read the page after the
@@ -717,24 +632,6 @@ async fn run_fetch(
     // request deadline. Previously Page retained its independent 30s default,
     // so `fetch --timeout 50` could still fail after 30 seconds.
     configure_fetch_navigation_timeout(&mut page, timeout_secs);
-    // A screenshot viewport is also the navigation viewport: responsive
-    // frameworks must build the DOM for the same dimensions we later paint.
-    // Previously page JS saw a randomized screen-sized innerWidth while the
-    // screenshot used these values only at the final raster step.
-    let screenshot_viewport = screenshot.as_ref().map(|_| {
-        let width = std::env::var("OBSCURA_SHOT_W")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(1280.0);
-        let height = std::env::var("OBSCURA_SHOT_H")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .unwrap_or(720.0);
-        (width, height)
-    });
-    if let Some(viewport) = screenshot_viewport {
-        page.set_viewport(viewport);
-    }
 
     if let Some(ref ua) = user_agent {
         page.http_client.set_user_agent(ua).await;
@@ -746,43 +643,15 @@ async fn run_fetch(
         eprintln!("Fetching {}...", url_str);
     }
 
-    // The paired corpus opts into a truthful capture boundary: its read-only
-    // evaluation runs after all settle passes and the final scroll reassert,
-    // immediately before screenshot paint. Ordinary CLI evaluation retains
-    // its existing evaluate-then-settle behavior when this private variable is
-    // absent.
-    let eval_at_capture_boundary = screenshot.is_some()
-        && eval.is_some()
-        && std::env::var("OBSCURA_SHOT_EVAL_AT_CAPTURE").is_ok_and(|value| value == "1");
-    let controlled_scroll_request = screenshot.as_ref().and_then(|_| {
-        let raw_y = std::env::var("OBSCURA_SHOT_SCROLL_Y").ok()?;
-        let x = match std::env::var("OBSCURA_SHOT_SCROLL_X") {
-            Ok(raw) => raw.parse::<f64>().ok().filter(|value| value.is_finite())?,
-            Err(_) => 0.0,
-        };
-        let requested_y = if raw_y.eq_ignore_ascii_case("bottom") {
-            "document.documentElement.scrollHeight".to_string()
-        } else {
-            raw_y
-                .parse::<f64>()
-                .ok()
-                .filter(|value| value.is_finite())
-                .map(|value| value.to_string())?
-        };
-        Some((x, requested_y))
-    });
-
     // Process-level hard deadline. A synchronous hang inside a Rust op invoked
     // from page JS cannot be cancelled by tokio (there is no await to interrupt)
     // nor by the V8 watchdog (terminate_execution only unwinds JS bytecode, not
     // native Rust running beneath a V8->op call). As an absolute backstop so one
-    // fetch can never wedge the worker, a daemon thread force-exits if the whole
+    // fetch can never wedge the process, a daemon thread force-exits if the whole
     // operation overruns navigation + every configured settle pass + grace. A
     // normal fetch returns first and the process exits before this fires.
     {
-        let settle_passes = if eval_at_capture_boundary {
-            1 + u64::from(controlled_scroll_request.is_some())
-        } else if eval.is_some() && (screenshot.is_some() || selector.is_some() || dump_specified) {
+        let settle_passes = if eval.is_some() && (selector.is_some() || dump_specified) {
             2
         } else {
             1
@@ -828,230 +697,37 @@ async fn run_fetch(
     // pages stay fast.
     settle_page(&mut page, wait_secs, wait_is_fixed).await;
 
-    let mut deferred_eval_output = None;
-    let initial_controlled_scroll = if eval_at_capture_boundary {
-        controlled_scroll_request.as_ref().map(|(x, requested_y)| {
-            page.evaluate(&format!(
-                "(()=>{{\
-                 const requestedX={x},requestedY={requested_y};\
-                 const preInitial={{x:window.scrollX,y:window.scrollY}};\
-                 window.scrollTo(requestedX,requestedY);\
-                 return {{requested:{{x:requestedX,y:requestedY}},\
-                 preInitialActual:preInitial,\
-                 postInitialActual:{{x:window.scrollX,y:window.scrollY}},\
-                 initialBehavior:'authored',\
-                 initialPhase:'before-controlled-scroll-settle'}}\
-                 }})()"
-            ))
-        })
-    } else {
-        None
-    };
-    if initial_controlled_scroll.is_some() {
-        settle_page(&mut page, wait_secs, wait_is_fixed).await;
-    }
+    if let Some(ref expr) = eval {
+        // Bound the eval by the same budget as navigation so a runaway
+        // expression (infinite loop, never-settling sync work) cannot hang.
+        let result = page.evaluate_with_timeout(expr, Duration::from_secs(timeout_secs));
 
-    if !eval_at_capture_boundary {
-        if let Some(ref expr) = eval {
-            // Bound the eval by the same budget as navigation so a runaway
-            // expression (infinite loop, never-settling sync work) cannot hang.
-            let result = page.evaluate_with_timeout(expr, Duration::from_secs(timeout_secs));
-
-            // A bare --eval (no --selector, --dump, or --screenshot) returns the
-            // eval value directly, so synchronous expressions
-            // (JSON.stringify, ...) are unchanged. Screenshot captures continue
-            // below so an evaluation such as scrollTo() affects the painted
-            // viewport instead of being silently ignored.
-            if !dump_specified && selector.is_none() && screenshot.is_none() {
-                let rendered = match result {
-                    serde_json::Value::String(s) => s,
-                    serde_json::Value::Null => "null".to_string(),
-                    other => other.to_string(),
-                };
-                write_or_print(rendered, output.as_ref()).await?;
-                context.save_cookies();
-                return Ok(());
-            }
-            if screenshot.is_some() {
-                deferred_eval_output = Some(result);
-            }
-
-            // --eval combined with --selector, --dump, and/or --screenshot
-            // typically kicks off async work (a fetch promise, a timer, a scroll
-            // listener) that writes the DOM. Drive the event loop again so that
-            // work completes, then fall through to selector/capture/dump instead
-            // of returning the still-pending eval value (issue #248).
-            settle_page(&mut page, wait_secs, wait_is_fixed).await;
+        // A bare --eval (no --selector or --dump) returns the eval value
+        // directly, so synchronous expressions (JSON.stringify, ...) are
+        // unchanged.
+        if !dump_specified && selector.is_none() {
+            let rendered = match result {
+                serde_json::Value::String(s) => s,
+                serde_json::Value::Null => "null".to_string(),
+                other => other.to_string(),
+            };
+            write_or_print(rendered, output.as_ref()).await?;
+            context.save_cookies();
+            return Ok(());
         }
+
+        // --eval combined with --selector or --dump typically kicks off async
+        // work (a fetch promise, a timer, a scroll listener) that writes the
+        // DOM. Drive the event loop again so that work completes, then fall
+        // through to selector/dump instead of returning the still-pending eval
+        // value (issue #248).
+        settle_page(&mut page, wait_secs, wait_is_fixed).await;
     }
 
     if let Some(ref sel) = selector {
         let found = wait_for_selector(&mut page, sel, wait_secs).await;
         if !found {
             eprintln!("Warning: selector '{}' not found after {}s", sel, wait_secs);
-        }
-    }
-
-    // --screenshot renders the settled, optionally evaluated page to a PNG.
-    // Requires the render feature; without it, page.screenshot is absent and
-    // we report clearly.
-    if let Some(ref path) = screenshot {
-        #[cfg(feature = "render")]
-        {
-            let resource_deadline_ms = std::env::var("OBSCURA_RENDER_RESOURCE_DEADLINE_MS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .unwrap_or(3_000);
-            let _ = page
-                .prepare_screenshot_resources(resource_deadline_ms)
-                .await;
-            // Default CSS-pixel viewport, matching the engine's innerWidth/Height.
-            // OBSCURA_SHOT_W / OBSCURA_SHOT_H override it (e.g. a tall viewport to
-            // capture below-the-fold content in one shot).
-            let viewport = screenshot_viewport.unwrap_or((1280.0, 720.0));
-            // Ordinary screenshots sample the live document timeline. The
-            // comparison harness can request an exact instant (normally T=0)
-            // so both engines paint the same animation frame.
-            let requested_animation_sample = std::env::var("OBSCURA_SHOT_ANIMATION_TIME_MS")
-                .ok()
-                .map(|raw| {
-                    let milliseconds = raw.parse::<f32>().map_err(|_| {
-                        anyhow::anyhow!(
-                            "OBSCURA_SHOT_ANIMATION_TIME_MS must be a finite non-negative number"
-                        )
-                    })?;
-                    if !milliseconds.is_finite() || milliseconds < 0.0 {
-                        anyhow::bail!(
-                            "OBSCURA_SHOT_ANIMATION_TIME_MS must be a finite non-negative number"
-                        );
-                    }
-                    Ok(obscura_browser::AnimationSampleTime { milliseconds })
-                })
-                .transpose()?;
-            let capture_screenshot = |page: &Page| match requested_animation_sample {
-                Some(sample) => page.screenshot_at_animation_time(viewport, sample),
-                None => page.screenshot(viewport),
-            };
-            // The parity harness performs one throwaway paint in both engines
-            // before observing image/font readiness. Obscura resolves retained
-            // render resources during prepare/paint, so sampling first would
-            // compare pre-paint Obscura state with post-load Chromium state.
-            // Keep this private opt-in out of ordinary CLI screenshots.
-            let warmup_capture =
-                std::env::var("OBSCURA_SHOT_RESOURCE_WARMUP").is_ok_and(|value| value == "1");
-            if warmup_capture {
-                if capture_screenshot(&page).is_none() {
-                    anyhow::bail!("resource warm-up screenshot failed: page has no DOM to render");
-                }
-                // Give completion callbacks one bounded task turn before the
-                // capture-boundary evaluation reads resource state.
-                page.settle(1).await;
-            }
-            // Paired renderer captures need a stable final coordinate after
-            // the post-eval settle. Authored smooth scrolling and scroll
-            // anchoring may legitimately move an earlier scrollTo while the
-            // page changes above the viewport, so the comparison harness opts
-            // into one instant reassertion at the actual capture boundary.
-            // Ordinary CLI screenshots are unchanged when these private
-            // capture-environment variables are absent.
-            let controlled_scroll = controlled_scroll_request
-                .as_ref()
-                .map(|(x, requested_y)| {
-                    page.evaluate(&format!(
-                        "(()=>{{\
-                         const requestedX={x},requestedY={requested_y};\
-                         const preReassert={{x:window.scrollX,y:window.scrollY}};\
-                         const root=document.documentElement;\
-                         const previous=root?root.style.getPropertyValue('scroll-behavior'):'';\
-                         const priority=root?root.style.getPropertyPriority('scroll-behavior'):'';\
-                         if(root)root.style.setProperty('scroll-behavior','auto','important');\
-                         window.scrollTo(requestedX,requestedY);\
-                         if(root){{if(previous)root.style.setProperty('scroll-behavior',previous,priority);\
-                         else root.style.removeProperty('scroll-behavior')}}\
-                         return {{requested:{{x:requestedX,y:requestedY}},\
-                         preReassertActual:preReassert,\
-                         finalReassertActual:{{x:window.scrollX,y:window.scrollY}},\
-                         behavior:'instant',\
-                         phase:'immediately-before-capture-state-and-screenshot'}}\
-                         }})()"
-                    ))
-                });
-            if eval_at_capture_boundary {
-                if let Some(ref expr) = eval {
-                    deferred_eval_output =
-                        Some(page.evaluate_with_timeout(expr, Duration::from_secs(timeout_secs)));
-                }
-            }
-            let capture_state = deferred_eval_output.as_ref().map(|_| {
-                page.evaluate(
-                    "(()=>({\
-                     scrollX:window.scrollX,scrollY:window.scrollY,\
-                     innerWidth:window.innerWidth,innerHeight:window.innerHeight,\
-                     scrollWidth:document.documentElement?document.documentElement.scrollWidth:0,\
-                     scrollHeight:document.documentElement?document.documentElement.scrollHeight:0\
-                     }))()",
-                )
-            });
-            match capture_screenshot(&page) {
-                Some(bytes) => std::fs::write(path, &bytes)?,
-                None => anyhow::bail!("screenshot failed: page has no DOM to render"),
-            }
-            // A screenshot+eval command used to ignore the expression
-            // completely. Emit both its value and a standard state sampled
-            // after the post-eval settle so automation can record the exact
-            // live viewport that was painted.
-            if let Some(result) = deferred_eval_output {
-                let mut controlled_scroll_report = controlled_scroll;
-                if let (Some(report), Some(initial)) = (
-                    controlled_scroll_report.as_mut(),
-                    initial_controlled_scroll.as_ref(),
-                ) {
-                    if let (Some(report), Some(initial)) =
-                        (report.as_object_mut(), initial.as_object())
-                    {
-                        for key in [
-                            "preInitialActual",
-                            "postInitialActual",
-                            "initialBehavior",
-                            "initialPhase",
-                        ] {
-                            if let Some(value) = initial.get(key) {
-                                report.insert(key.to_string(), value.clone());
-                            }
-                        }
-                    }
-                }
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "evaluation": result,
-                        "controlledScroll": controlled_scroll_report,
-                        "resourceWarmup": {
-                            "performed": warmup_capture,
-                            "discardedShots": if warmup_capture { 1 } else { 0 },
-                            "taskTurnMs": if warmup_capture { 1 } else { 0 },
-                            "phase": "before-final-scroll-reassert-and-state-sample",
-                        },
-                        "captureState": capture_state.unwrap_or(serde_json::Value::Null),
-                    })
-                );
-            }
-            if !quiet {
-                eprintln!(
-                    "Screenshot written: {} ({} bytes)",
-                    path.display(),
-                    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
-                );
-            }
-            context.save_cookies();
-            return Ok(());
-        }
-        #[cfg(not(feature = "render"))]
-        {
-            anyhow::bail!(
-                "--screenshot {} requires a build with the render feature (cargo build --features render)",
-                path.display()
-            );
         }
     }
 
@@ -1135,9 +811,9 @@ fn read_urls_from_file(path: &std::path::Path) -> anyhow::Result<Vec<String>> {
 }
 
 /// Batch raw fetch: run `--dump original` over many URLs concurrently and print
-/// one JSON status line per URL (issue #349). This is the raw-resource-check
-/// counterpart to `scrape`; it never renders, so there is no browser/JS cost
-/// per URL. Output stays in input order regardless of completion order.
+/// one JSON status line per URL (issue #349). It never renders, so there is no
+/// browser/JS cost per URL. Output stays in input order regardless of
+/// completion order.
 async fn run_batch_fetch(
     urls: Vec<String>,
     concurrency: usize,
@@ -1405,7 +1081,7 @@ fn extract_readable_text(dom: &obscura_dom::DomTree, node_id: obscura_dom::NodeI
                 let tag = name.local.as_ref();
 
                 // Boilerplate elements rarely contain content the user wants to
-                // scrape — strip them so `--dump text` returns the article body
+                // extract — strip them so `--dump text` returns the article body
                 // instead of menus, footers, and cookie banners.
                 if matches!(
                     tag,
@@ -1471,248 +1147,6 @@ fn extract_readable_text(dom: &obscura_dom::DomTree, node_id: obscura_dom::NodeI
     result
 }
 
-async fn run_parallel_scrape(
-    urls: Vec<String>,
-    eval: Option<String>,
-    concurrency: usize,
-    format: &str,
-    timeout_secs: u64,
-    quiet: bool,
-    proxy: Option<String>,
-    stealth: bool,
-) -> anyhow::Result<()> {
-    let total = urls.len();
-    let start = Instant::now();
-
-    if total == 0 {
-        anyhow::bail!("No URLs provided. Pass at least one URL to scrape.");
-    }
-
-    if !quiet {
-        eprintln!(
-            "Scraping {} URLs with {} concurrent workers (per-worker timeout: {}s)...",
-            total, concurrency, timeout_secs
-        );
-    }
-
-    let worker_name = if cfg!(windows) {
-        "obscura-worker.exe"
-    } else {
-        "obscura-worker"
-    };
-    let worker_path = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join(worker_name)))
-        .unwrap_or_else(|| std::path::PathBuf::from(worker_name));
-
-    if !worker_path.exists() {
-        anyhow::bail!(
-            "Worker binary not found at {}. Build with: cargo build --release",
-            worker_path.display()
-        );
-    }
-
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(concurrency));
-    let eval = Arc::new(eval);
-    let worker_path = Arc::new(worker_path);
-    let worker_timeout = Duration::from_secs(timeout_secs);
-    let read_timeout = Duration::from_secs(timeout_secs.min(30));
-    let shutdown_timeout = Duration::from_secs(5);
-
-    let mut handles = Vec::new();
-
-    for (i, url) in urls.into_iter().enumerate() {
-        let sem = semaphore.clone();
-        let eval = eval.clone();
-        let worker_path = worker_path.clone();
-        let proxy = proxy.clone();
-
-        let handle = tokio::spawn(async move {
-            let _permit = sem.acquire().await.unwrap();
-            let task_start = Instant::now();
-
-            let mut child = match TokioCommand::new(worker_path.as_ref())
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .env("OBSCURA_PROXY", proxy.as_deref().unwrap_or(""))
-                .env("OBSCURA_STEALTH", if stealth { "1" } else { "" })
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    return serde_json::json!({
-                        "url": url,
-                        "error": format!("Failed to spawn worker: {}", e),
-                        "time_ms": task_start.elapsed().as_millis(),
-                    });
-                }
-            };
-
-            let mut stdin = match child.stdin.take() {
-                Some(stdin) => stdin,
-                None => {
-                    let _ = timeout(shutdown_timeout, child.kill()).await;
-                    return serde_json::json!({
-                        "url": url,
-                        "error": "Failed to open worker stdin",
-                        "time_ms": task_start.elapsed().as_millis(),
-                    });
-                }
-            };
-            let stdout = match child.stdout.take() {
-                Some(stdout) => stdout,
-                None => {
-                    let _ = timeout(shutdown_timeout, child.kill()).await;
-                    return serde_json::json!({
-                        "url": url,
-                        "error": "Failed to open worker stdout",
-                        "time_ms": task_start.elapsed().as_millis(),
-                    });
-                }
-            };
-            let mut reader = BufReader::new(stdout);
-
-            let worker_result: Result<serde_json::Value, String> =
-                match timeout(worker_timeout, async {
-                    let nav_cmd = serde_json::json!({"cmd": "navigate", "url": url});
-                    let mut line = serde_json::to_string(&nav_cmd).unwrap();
-                    line.push('\n');
-                    if stdin.write_all(line.as_bytes()).await.is_err() {
-                        return Err("Write failed".to_string());
-                    }
-                    if stdin.flush().await.is_err() {
-                        return Err("Write failed".to_string());
-                    }
-
-                    let mut resp_line = String::new();
-                    match timeout(read_timeout, reader.read_line(&mut resp_line)).await {
-                        Ok(Ok(bytes)) if bytes > 0 => {}
-                        Ok(Ok(_)) | Ok(Err(_)) => return Err("Read failed".to_string()),
-                        Err(_) => return Err("timeout".to_string()),
-                    };
-
-                    let nav_resp: serde_json::Value = serde_json::from_str(resp_line.trim())
-                        .unwrap_or(serde_json::json!({"ok": false}));
-
-                    if !nav_resp["ok"].as_bool().unwrap_or(false) {
-                        return Err(nav_resp["error"]
-                            .as_str()
-                            .unwrap_or("navigate failed")
-                            .to_string());
-                    }
-
-                    let title = nav_resp["result"]["title"]
-                        .as_str()
-                        .unwrap_or("")
-                        .to_string();
-
-                    let eval_result = if let Some(ref expr) = *eval {
-                        let eval_cmd = serde_json::json!({"cmd": "evaluate", "expression": expr});
-                        let mut line = serde_json::to_string(&eval_cmd).unwrap();
-                        line.push('\n');
-                        if stdin.write_all(line.as_bytes()).await.is_err() {
-                            return Err("Write failed".to_string());
-                        }
-                        if stdin.flush().await.is_err() {
-                            return Err("Write failed".to_string());
-                        }
-
-                        let mut resp_line = String::new();
-                        match timeout(read_timeout, reader.read_line(&mut resp_line)).await {
-                            Ok(Ok(bytes)) if bytes > 0 => {
-                                let resp: serde_json::Value =
-                                    serde_json::from_str(resp_line.trim())
-                                        .unwrap_or(serde_json::json!({"ok": false}));
-                                resp["result"].clone()
-                            }
-                            Ok(Ok(_)) | Ok(Err(_)) => return Err("Read failed".to_string()),
-                            Err(_) => return Err("timeout".to_string()),
-                        }
-                    } else {
-                        serde_json::Value::Null
-                    };
-
-                    let shutdown_cmd = serde_json::json!({"cmd": "shutdown"});
-                    let mut line = serde_json::to_string(&shutdown_cmd).unwrap();
-                    line.push('\n');
-                    let _ = stdin.write_all(line.as_bytes()).await;
-                    let _ = stdin.flush().await;
-                    let _ = timeout(shutdown_timeout, child.wait()).await;
-
-                    Ok(serde_json::json!({
-                        "url": url,
-                        "title": title,
-                        "eval": eval_result,
-                        "time_ms": task_start.elapsed().as_millis(),
-                        "worker": i,
-                    }))
-                })
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => Err("timeout".to_string()),
-                };
-
-            match worker_result {
-                Ok(result) => result,
-                Err(error) => {
-                    let _ = timeout(shutdown_timeout, child.kill()).await;
-                    serde_json::json!({
-                        "url": url,
-                        "error": error,
-                        "time_ms": task_start.elapsed().as_millis(),
-                    })
-                }
-            }
-        });
-
-        handles.push(handle);
-    }
-
-    let mut results = Vec::new();
-    for handle in handles {
-        match handle.await {
-            Ok(result) => results.push(result),
-            Err(e) => results.push(serde_json::json!({"error": e.to_string()})),
-        }
-    }
-
-    let total_time = start.elapsed();
-
-    if format == "json" {
-        let output = serde_json::json!({
-            "total_urls": total,
-            "concurrency": concurrency,
-            "total_time_ms": total_time.as_millis(),
-            "avg_time_ms": total_time.as_millis() as f64 / total as f64,
-            "results": results,
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    } else {
-        for r in &results {
-            let url = r["url"].as_str().unwrap_or("?");
-            let title = r["title"].as_str().unwrap_or("");
-            let time = r["time_ms"].as_u64().unwrap_or(0);
-            let eval = &r["eval"];
-            if eval.is_null() {
-                println!("{}ms\t{}\t{}", time, url, title);
-            } else {
-                println!("{}ms\t{}\t{}", time, url, eval);
-            }
-        }
-        if !quiet {
-            eprintln!(
-                "\nTotal: {}ms for {} URLs ({} concurrent)",
-                total_time.as_millis(),
-                total,
-                concurrency
-            );
-        }
-    }
-
-    Ok(())
-}
 
 fn dump_links(page: &Page) -> String {
     let base_url = page.url.clone();
@@ -2137,20 +1571,6 @@ mod tests {
     }
 
     #[test]
-    fn parsed_v8_flags_with_scrape_subcommand() {
-        let args = Args::try_parse_from([
-            "obscura",
-            "--v8-flags",
-            "--expose-gc",
-            "scrape",
-            "https://a.com",
-            "https://b.com",
-        ])
-        .expect("clap should accept --v8-flags with scrape");
-        assert_eq!(args.v8_flags.as_deref(), Some("--expose-gc"));
-    }
-
-    #[test]
     fn parsed_v8_flags_empty_string_is_accepted() {
         let args =
             Args::try_parse_from(["obscura", "--v8-flags", "", "fetch", "https://example.com"])
@@ -2233,34 +1653,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fetch_screenshot_has_a_short_alias_and_rejects_batch_mode() {
-        let args = Args::try_parse_from([
-            "obscura",
-            "fetch",
-            "https://example.com",
-            "-s",
-            "page.png",
-        ])
-        .unwrap();
-        match args.command {
-            Some(Command::Fetch { screenshot, .. }) => {
-                assert_eq!(screenshot, Some(std::path::PathBuf::from("page.png")));
-            }
-            _ => panic!("expected Fetch command"),
-        }
-
-        assert!(Args::try_parse_from([
-            "obscura",
-            "fetch",
-            "--file",
-            "urls.txt",
-            "--screenshot",
-            "page.png",
-        ])
-        .is_err());
-    }
-
     fn configured_fetch_timeout(args: Args) -> std::time::Duration {
         let timeout = match args.command {
             Some(Command::Fetch { timeout, .. }) => timeout,
@@ -2322,7 +1714,6 @@ mod tests {
             quiet: true,
             output: None,
             storage_dir: None,
-            screenshot: None,
         });
         assert!(is_quiet_command(&cmd));
     }

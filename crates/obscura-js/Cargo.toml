@@ -9,10 +9,6 @@ default = []
 # fetch()/XHR be routed through it so JS-level requests carry the same Chrome
 # TLS fingerprint and client hints as stealth navigation.
 stealth = ["obscura-net/stealth"]
-# Builds the obscura-render layout layer and exposes real box geometry to JS
-# (getBoundingClientRect, elementFromPoint, offset*), and with paint enabled,
-# rasterizes screenshots. Off by default so the scraping build stays lean.
-render = ["dep:obscura-render", "obscura-render/paint"]
 
 [dependencies]
 obscura-dom = { workspace = true }
@@ -45,6 +41,5 @@ pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 hkdf = "0.12"
 # CSPRNG for getRandomValues / randomUUID (replaces Math.random).
 getrandom = "0.2"
-obscura-render = { workspace = true, optional = true }
 # QuickJS-ng via the safe Rust wrapper. `loader` is the ES-module resolver/loader hook.
 rquickjs = { version = "0.12.2", features = ["loader"] }

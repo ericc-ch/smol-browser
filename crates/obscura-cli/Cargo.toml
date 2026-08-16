@@ -7,18 +7,12 @@ edition.workspace = true
 name = "obscura"
 path = "src/main.rs"
 
-[[bin]]
-name = "obscura-worker"
-path = "src/worker.rs"
-
 [features]
 default = []
-stealth = ["obscura-browser/stealth", "obscura-net/stealth", "obscura-mcp/stealth"]
-render = ["obscura-browser/render", "obscura-cdp/render", "obscura-mcp/render"]
+stealth = ["obscura-browser/stealth", "obscura-net/stealth"]
 
 [dependencies]
 obscura-browser = { workspace = true }
-obscura-mcp = { workspace = true }
 obscura-cdp = { workspace = true }
 obscura-dom = { workspace = true }
 obscura-net = { workspace = true }
