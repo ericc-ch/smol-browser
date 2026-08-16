@@ -1931,7 +1931,7 @@ fn build_request_client(proxy_url: Option<&str>) -> Result<reqwest::Client, Stri
         .map_err(|e| format!("failed to build reqwest::Client: {}", e))
 }
 
-fn fetch_timeout() -> std::time::Duration {
+pub(crate) fn fetch_timeout() -> std::time::Duration {
     let timeout_ms = std::env::var("OBSCURA_FETCH_TIMEOUT_MS")
         .ok()
         .and_then(|s| s.parse().ok())

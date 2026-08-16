@@ -123,6 +123,13 @@ pub(crate) async fn fetch_module_bytes(
     referrer: &Url,
     callbacks: Option<&obscura_net::CallbackRegistry>,
 ) -> Result<(String, String), String> {
+    // Same cross-scheme rule as classic <script src>: a web document must
+    // not pull file: modules, which would read the local filesystem.
+    if url.scheme() == "file" && !document_url.scheme().eq_ignore_ascii_case("file") {
+        return Err(format!(
+            "blocking cross-scheme module load: page={document_url} src={url}"
+        ));
+    }
     tracing::debug!("Loading ES module: {}", url);
     let resp = client
         .fetch_resource_with_callbacks(

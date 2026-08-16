@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rquickjs::{
-    CatchResultExt, Context, Ctx, FromJs, Function, Module, Object, Persistent, Promise,
-    Runtime, TypedArray, Value, qjs,
+    CatchResultExt, Context, Ctx, Function, Module, Object, Persistent, Promise,
+    Runtime, TypedArray,
     function::Rest,
     loader::{ImportAttributes, Loader, Resolver},
 };
@@ -287,13 +287,6 @@ impl Loader for QjsModuleSourceLoader {
 
 impl QjsModuleSourceLoader {
     fn load_source(&self, name: &str) -> Result<String, String> {
-        if let Some(path) = name.strip_prefix("file://") {
-            return std::fs::read_to_string(path).map_err(|e| e.to_string());
-        }
-        if name.starts_with('/') && !name.starts_with("//") {
-            return std::fs::read_to_string(name).map_err(|e| e.to_string());
-        }
-
         let host = self.0.borrow();
         let _activity = host.activity.begin();
         let state = host
@@ -318,21 +311,49 @@ impl QjsModuleSourceLoader {
         let fetch_tx = host.fetch_tx.clone();
         drop(host);
 
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        fetch_tx
-            .send(NetworkWork::Module {
-                url: name.to_string(),
-                document_url,
-                referrer,
-                client,
-                callbacks,
-                reply: reply_tx,
-            })
-            .map_err(|_| "network thread closed".to_string())?;
-        reply_rx
-            .recv()
-            .map_err(|_| "module fetch reply closed".to_string())?
-            .map(|(_final_url, code)| code)
+        request_module_source(
+            &fetch_tx,
+            name,
+            document_url,
+            referrer,
+            client,
+            callbacks,
+            ops::fetch_timeout(),
+        )
+    }
+}
+
+fn request_module_source(
+    fetch_tx: &std::sync::mpsc::Sender<NetworkWork>,
+    url: &str,
+    document_url: String,
+    referrer: String,
+    client: std::sync::Arc<obscura_net::ObscuraHttpClient>,
+    callbacks: Option<std::sync::Arc<obscura_net::CallbackRegistry>>,
+    budget: Duration,
+) -> Result<String, String> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| format!("Invalid module URL {url}: {e}"))?;
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    fetch_tx
+        .send(NetworkWork::Module {
+            url: parsed.to_string(),
+            document_url,
+            referrer,
+            client,
+            callbacks,
+            reply: reply_tx,
+        })
+        .map_err(|_| "network thread closed".to_string())?;
+    match reply_rx.recv_timeout(budget) {
+        Ok(result) => result.map(|(_final_url, code)| code),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "Module graph load timed out after {}ms: {url}",
+            budget.as_millis()
+        )),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("module fetch reply closed".to_string())
+        }
     }
 }
 
@@ -347,125 +368,22 @@ fn guarded<R: Default>(f: impl FnOnce() -> R) -> R {
         })
 }
 
+/// Fallible ops return a JS exception on panic instead of unwinding.
+fn guarded_result<T>(f: impl FnOnce() -> Result<T, rquickjs::Error>) -> Result<T, rquickjs::Error> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(_) => {
+            tracing::error!("QuickJS op panicked; returning error");
+            Err(op_err("op panicked"))
+        }
+    }
+}
+
 /// Convert a fallible op's error into a JS exception, matching the V8 path
 /// where `deno_error::JsErrorBox` becomes a thrown error the shim's `runOp`
 /// turns into the appropriate DOMException.
 fn op_err(e: impl std::fmt::Display) -> rquickjs::Error {
     rquickjs::Error::new_from_js_message("obscura op", "operation", e.to_string())
-}
-
-unsafe extern "C" fn op_dom_finalize(opaque: *mut qjs::c_void) {
-    if !opaque.is_null() {
-        drop(Box::from_raw(opaque as *mut ops::SharedState));
-    }
-}
-
-/// Native `op_dom` so tree-edge reads skip rquickjs's `Function::new`
-/// class trampoline. MutationObserver subtree matching uses
-/// `is_inclusive_ancestor` instead of walking `parentNode` in JS.
-unsafe extern "C" fn op_dom_c(
-    ctx: *mut qjs::JSContext,
-    _this: qjs::JSValue,
-    argc: qjs::c_int,
-    argv: *mut qjs::JSValue,
-    _magic: qjs::c_int,
-    opaque: *mut qjs::c_void,
-) -> qjs::JSValue {
-    if argc < 1 || opaque.is_null() {
-        return qjs::JS_NULL;
-    }
-    let state = unsafe { &*(opaque as *const ops::SharedState) };
-    let mut len: qjs::size_t = 0;
-    let cmd_ptr = unsafe { qjs::JS_ToCStringLen2(ctx, &mut len, *argv, false) };
-    if cmd_ptr.is_null() {
-        return qjs::JS_EXCEPTION;
-    }
-    let cmd = unsafe { std::slice::from_raw_parts(cmd_ptr as *const u8, len as usize) };
-    if matches!(
-        cmd,
-        b"parent_node" | b"first_child" | b"last_child" | b"next_sibling" | b"prev_sibling"
-    ) {
-        let cmd_str = unsafe { std::str::from_utf8_unchecked(cmd) };
-        let mut nid = 0i32;
-        if argc >= 2 {
-            unsafe { qjs::JS_ToInt32(ctx, &mut nid, *argv.add(1)) };
-        }
-        let nid = u32::try_from(nid).unwrap_or(0);
-        let id = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ops::op_dom_tree_query(state, cmd_str, nid).unwrap_or(-1)
-        }))
-        .unwrap_or_else(|_| {
-            tracing::error!("op_dom tree query panicked; returning -1");
-            -1
-        });
-        unsafe { qjs::JS_FreeCString(ctx, cmd_ptr) };
-        return qjs::JS_MKVAL(qjs::JS_TAG_INT, id);
-    }
-    let cmd_owned = std::str::from_utf8(cmd).unwrap_or("").to_owned();
-    unsafe { qjs::JS_FreeCString(ctx, cmd_ptr) };
-    let arg1 = c_arg_to_string(ctx, argc, argv, 1);
-    let arg2 = c_arg_to_string(ctx, argc, argv, 2);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        ops::op_dom_inner(state, cmd_owned, arg1, arg2)
-    }))
-    .unwrap_or_else(|_| {
-        tracing::error!("op_dom panicked; returning null");
-        "null".to_string()
-    });
-    unsafe {
-        qjs::JS_NewStringLen(
-            ctx,
-            result.as_ptr() as *const qjs::c_char,
-            result.len() as qjs::size_t,
-        )
-    }
-}
-
-fn c_arg_to_string(
-    ctx: *mut qjs::JSContext,
-    argc: qjs::c_int,
-    argv: *mut qjs::JSValue,
-    index: i32,
-) -> String {
-    if argc <= index {
-        return String::new();
-    }
-    let mut len: qjs::size_t = 0;
-    let ptr = unsafe { qjs::JS_ToCStringLen2(ctx, &mut len, *argv.add(index as usize), false) };
-    if ptr.is_null() {
-        return String::new();
-    }
-    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
-    let s = String::from_utf8_lossy(bytes).into_owned();
-    unsafe { qjs::JS_FreeCString(ctx, ptr) };
-    s
-}
-
-fn install_op_dom<'js>(
-    ctx: &Ctx<'js>,
-    ops: &Object<'js>,
-    state: ops::SharedState,
-) -> Result<(), String> {
-    let opaque = Box::into_raw(Box::new(state)) as *mut qjs::c_void;
-    let raw = unsafe {
-        qjs::JS_NewCClosure(
-            ctx.as_raw().as_ptr(),
-            Some(op_dom_c),
-            c"op_dom".as_ptr() as *const qjs::c_char,
-            Some(op_dom_finalize),
-            3,
-            0,
-            opaque,
-        )
-    };
-    if unsafe { qjs::JS_IsException(raw) } {
-        unsafe { drop(Box::from_raw(opaque as *mut ops::SharedState)) };
-        return Err("JS_NewCClosure(op_dom) failed".into());
-    }
-    let func_val = unsafe { Value::from_raw(ctx.clone(), raw) };
-    let func = Function::from_js(ctx, func_val).map_err(|e| e.to_string())?;
-    ops.set("op_dom", func).map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 /// QuickJS runtime behind [`crate::runtime::ObscuraJsRuntime`].
@@ -540,8 +458,10 @@ impl QuickJsRuntime {
             };
         }
 
-        let dom_state = self.state.clone();
-        install_op_dom(&ctx, &ops, dom_state)?;
+        let s = self.state.clone();
+        set_op!("op_dom", move |cmd: String, arg1: String, arg2: String| -> String {
+            guarded(|| ops::op_dom_inner(&s, cmd, arg1, arg2))
+        });
 
         let s = self.state.clone();
         set_op!("op_script_mark_started", move |nid: u32| -> bool {
@@ -564,11 +484,13 @@ impl QuickJsRuntime {
         });
 
         set_op!("op_console_msg", |level: String, msg: String| {
-            match level.as_str() {
-                "warn" => tracing::warn!(target: "obscura::console", "{}", msg),
-                "error" => tracing::error!(target: "obscura::console", "{}", msg),
-                _ => tracing::info!(target: "obscura::console", "{}", msg),
-            }
+            guarded(|| {
+                match level.as_str() {
+                    "warn" => tracing::warn!(target: "obscura::console", "{}", msg),
+                    "error" => tracing::error!(target: "obscura::console", "{}", msg),
+                    _ => tracing::info!(target: "obscura::console", "{}", msg),
+                }
+            })
         });
 
         let s = self.state.clone();
@@ -671,53 +593,67 @@ impl QuickJsRuntime {
         });
 
         set_op!("op_subtle_digest", |algorithm: String, data: TypedArray<'_, u8>| -> Vec<u8> {
-            let bytes = data.as_bytes().unwrap_or(&[]);
-            guarded(|| ops::subtle_digest(&algorithm, bytes))
+            guarded(|| {
+                let bytes = data.as_bytes().unwrap_or(&[]);
+                ops::subtle_digest(&algorithm, bytes)
+            })
         });
 
         set_op!("op_subtle_hmac", |hash: String, key: TypedArray<'_, u8>, data: TypedArray<'_, u8>| -> Result<Vec<u8>, rquickjs::Error> {
-            let key = key.as_bytes().unwrap_or(&[]);
-            let data = data.as_bytes().unwrap_or(&[]);
-            ops::subtle_hmac(&hash, key, data).map_err(op_err)
+            guarded_result(|| {
+                let key = key.as_bytes().unwrap_or(&[]);
+                let data = data.as_bytes().unwrap_or(&[]);
+                ops::subtle_hmac(&hash, key, data).map_err(op_err)
+            })
         });
 
         set_op!("op_subtle_aes_gcm", |encrypt: bool, key: TypedArray<'_, u8>, iv: TypedArray<'_, u8>, aad: TypedArray<'_, u8>, data: TypedArray<'_, u8>| -> Result<Vec<u8>, rquickjs::Error> {
-            let key = key.as_bytes().unwrap_or(&[]);
-            let iv = iv.as_bytes().unwrap_or(&[]);
-            let aad = aad.as_bytes().unwrap_or(&[]);
-            let data = data.as_bytes().unwrap_or(&[]);
-            ops::subtle_aes_gcm(encrypt, key, iv, aad, data).map_err(op_err)
+            guarded_result(|| {
+                let key = key.as_bytes().unwrap_or(&[]);
+                let iv = iv.as_bytes().unwrap_or(&[]);
+                let aad = aad.as_bytes().unwrap_or(&[]);
+                let data = data.as_bytes().unwrap_or(&[]);
+                ops::subtle_aes_gcm(encrypt, key, iv, aad, data).map_err(op_err)
+            })
         });
 
         set_op!("op_subtle_aes_cbc", |encrypt: bool, key: TypedArray<'_, u8>, iv: TypedArray<'_, u8>, data: TypedArray<'_, u8>| -> Result<Vec<u8>, rquickjs::Error> {
-            let key = key.as_bytes().unwrap_or(&[]);
-            let iv = iv.as_bytes().unwrap_or(&[]);
-            let data = data.as_bytes().unwrap_or(&[]);
-            ops::subtle_aes_cbc(encrypt, key, iv, data).map_err(op_err)
+            guarded_result(|| {
+                let key = key.as_bytes().unwrap_or(&[]);
+                let iv = iv.as_bytes().unwrap_or(&[]);
+                let data = data.as_bytes().unwrap_or(&[]);
+                ops::subtle_aes_cbc(encrypt, key, iv, data).map_err(op_err)
+            })
         });
 
         set_op!("op_subtle_aes_ctr", |key: TypedArray<'_, u8>, counter: TypedArray<'_, u8>, counter_length: u32, data: TypedArray<'_, u8>| -> Result<Vec<u8>, rquickjs::Error> {
-            let key = key.as_bytes().unwrap_or(&[]);
-            let counter = counter.as_bytes().unwrap_or(&[]);
-            let data = data.as_bytes().unwrap_or(&[]);
-            ops::subtle_aes_ctr(key, counter, counter_length, data).map_err(op_err)
+            guarded_result(|| {
+                let key = key.as_bytes().unwrap_or(&[]);
+                let counter = counter.as_bytes().unwrap_or(&[]);
+                let data = data.as_bytes().unwrap_or(&[]);
+                ops::subtle_aes_ctr(key, counter, counter_length, data).map_err(op_err)
+            })
         });
 
         set_op!("op_subtle_pbkdf2", |hash: String, password: TypedArray<'_, u8>, salt: TypedArray<'_, u8>, iterations: u32, len: u32| -> Result<Vec<u8>, rquickjs::Error> {
-            let password = password.as_bytes().unwrap_or(&[]);
-            let salt = salt.as_bytes().unwrap_or(&[]);
-            ops::subtle_pbkdf2(&hash, password, salt, iterations, len).map_err(op_err)
+            guarded_result(|| {
+                let password = password.as_bytes().unwrap_or(&[]);
+                let salt = salt.as_bytes().unwrap_or(&[]);
+                ops::subtle_pbkdf2(&hash, password, salt, iterations, len).map_err(op_err)
+            })
         });
 
         set_op!("op_subtle_hkdf", |hash: String, ikm: TypedArray<'_, u8>, salt: TypedArray<'_, u8>, info: TypedArray<'_, u8>, len: u32| -> Result<Vec<u8>, rquickjs::Error> {
-            let ikm = ikm.as_bytes().unwrap_or(&[]);
-            let salt = salt.as_bytes().unwrap_or(&[]);
-            let info = info.as_bytes().unwrap_or(&[]);
-            ops::subtle_hkdf(&hash, ikm, salt, info, len).map_err(op_err)
+            guarded_result(|| {
+                let ikm = ikm.as_bytes().unwrap_or(&[]);
+                let salt = salt.as_bytes().unwrap_or(&[]);
+                let info = info.as_bytes().unwrap_or(&[]);
+                ops::subtle_hkdf(&hash, ikm, salt, info, len).map_err(op_err)
+            })
         });
 
         set_op!("op_random_bytes", |len: u32| -> Result<Vec<u8>, rquickjs::Error> {
-            ops::random_bytes(len).map_err(op_err)
+            guarded_result(|| ops::random_bytes(len).map_err(op_err))
         });
 
         set_op!("op_url_parse", |href: String, base: String| -> String {
@@ -927,13 +863,7 @@ impl QuickJsRuntime {
         }
     }
 
-    pub fn fetch_module_source(&mut self, url: &str) -> Result<String, String> {
-        if let Some(path) = url.strip_prefix("file://") {
-            return std::fs::read_to_string(path).map_err(|e| e.to_string());
-        }
-        if url.starts_with('/') && !url.starts_with("//") {
-            return std::fs::read_to_string(url).map_err(|e| e.to_string());
-        }
+    pub fn fetch_module_source(&mut self, url: &str, budget: Duration) -> Result<String, String> {
         let _activity = self.activity.begin();
         let (client, callbacks, document_url) = {
             let gs = self.state.borrow();
@@ -943,21 +873,15 @@ impl QuickJsRuntime {
                 .ok_or_else(|| "No http_client wired to module loader".to_string())?;
             (client, gs.callbacks.clone(), gs.url.clone())
         };
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        self.fetch_tx
-            .send(NetworkWork::Module {
-                url: url.to_string(),
-                document_url: document_url.clone(),
-                referrer: document_url,
-                client,
-                callbacks,
-                reply: reply_tx,
-            })
-            .map_err(|_| "network thread closed".to_string())?;
-        let (_final_url, code) = reply_rx
-            .recv()
-            .map_err(|_| "module fetch reply closed".to_string())??;
-        Ok(code)
+        request_module_source(
+            &self.fetch_tx,
+            url,
+            document_url.clone(),
+            document_url,
+            client,
+            callbacks,
+            budget,
+        )
     }
 
     pub fn execute_script(&mut self, name: &str, source: impl AsRef<str>) -> Result<(), String> {
@@ -1693,6 +1617,82 @@ mod tests {
     fn op_panic_landing_pad_returns_default() {
         let v = guarded(|| -> String { panic!("boom") });
         assert_eq!(v, "");
+    }
+
+    #[test]
+    fn fallible_op_panic_landing_pad_returns_error() {
+        let err = guarded_result(|| -> Result<Vec<u8>, rquickjs::Error> { panic!("boom") })
+            .expect_err("panic must become an error");
+        assert!(err.to_string().contains("op panicked"), "{err}");
+    }
+
+    #[test]
+    fn http_document_cannot_read_file_module() {
+        let mut rt = setup_at("<html><body></body></html>", "https://example.com/page");
+        rt.set_http_client(allow_private_client());
+        let err = rt
+            .fetch_module_source("file:///etc/passwd", Duration::from_secs(1))
+            .expect_err("file: module from an https document must fail");
+        assert!(
+            err.contains("cross-scheme") || err.contains("file"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn absolute_path_is_not_a_filesystem_module() {
+        let mut rt = setup_at("<html><body></body></html>", "https://example.com/page");
+        rt.set_http_client(allow_private_client());
+        let err = rt
+            .fetch_module_source("/etc/passwd", Duration::from_secs(1))
+            .expect_err("bare paths must not be read from disk");
+        assert!(
+            err.contains("Invalid module URL"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn file_document_can_load_file_module() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("obscura-qjs-mod-{}.js", std::process::id()));
+        std::fs::write(&path, "export const value = 1;\n").unwrap();
+        let file_url = url::Url::from_file_path(&path).expect("temp path is absolute");
+        let page = url::Url::from_file_path(dir.join("page.html")).expect("temp path is absolute");
+        let mut rt = setup_at("<html><body></body></html>", page.as_str());
+        rt.set_http_client(allow_private_client());
+        let source = rt
+            .fetch_module_source(file_url.as_str(), Duration::from_secs(2))
+            .expect("file: module from a file: document");
+        let _ = std::fs::remove_file(&path);
+        assert!(source.contains("export const value"), "{source}");
+    }
+
+    #[test]
+    fn module_fetch_times_out_instead_of_hanging() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            use std::io::Read;
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                std::thread::sleep(Duration::from_secs(30));
+            }
+        });
+        let mut rt = setup_at("<html><body></body></html>", &format!("http://{addr}/"));
+        rt.set_http_client(allow_private_client());
+        let started = Instant::now();
+        let err = rt
+            .fetch_module_source(&format!("http://{addr}/mod.js"), Duration::from_millis(80))
+            .expect_err("hung module fetch must time out");
+        assert!(err.contains("timed out"), "got {err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout took {:?}",
+            started.elapsed()
+        );
+        drop(server);
     }
 
     fn serve_once(body: &'static str) -> (String, std::thread::JoinHandle<()>) {

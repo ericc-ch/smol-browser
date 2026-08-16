@@ -1257,9 +1257,9 @@ impl ObscuraJsRuntime {
     pub async fn prepare_module(
         &mut self,
         url: &str,
-        _budget_ms: u64,
+        budget_ms: u64,
     ) -> Result<PreparedModule, String> {
-        let source = self.fetch_module_source(url)?;
+        let source = self.fetch_module_source(url, budget_ms)?;
         Ok(PreparedModule {
             specifier: url.to_string(),
             source,
@@ -1267,8 +1267,11 @@ impl ObscuraJsRuntime {
         })
     }
 
-    fn fetch_module_source(&mut self, url: &str) -> Result<String, String> {
-        self.qjs.fetch_module_source(url)
+    fn fetch_module_source(&mut self, url: &str, budget_ms: u64) -> Result<String, String> {
+        self.qjs.fetch_module_source(
+            url,
+            std::time::Duration::from_millis(budget_ms.max(1)),
+        )
     }
 
     pub async fn prepare_inline_module(
@@ -13682,6 +13685,44 @@ mod tests {
             error.contains("HTTP 404"),
             "expected entry fetch status in error, got: {}",
             error
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn module_graph_load_times_out() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::Read;
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                std::thread::sleep(std::time::Duration::from_secs(30));
+            }
+        });
+        let base = format!("http://{address}");
+        let client = std::sync::Arc::new(obscura_net::ObscuraHttpClient::with_full_options(
+            std::sync::Arc::new(obscura_net::CookieJar::new()),
+            None,
+            true,
+        ));
+        let mut rt = ObscuraJsRuntime::with_base_url(&format!("{base}/"));
+        rt.set_http_client(client);
+
+        let started = std::time::Instant::now();
+        let error = rt
+            .load_module(&format!("{base}/entry.js"), 80)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("timed out"),
+            "expected graph load timeout, got: {}",
+            error
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "timeout took {:?}",
+            started.elapsed()
         );
     }
 
