@@ -22,4 +22,4 @@ A change is done when:
 
 - `CONTEXT.md`
 - `docs/adr/`
-- `.scratch/de-flake/`
+- `.scratch/`
