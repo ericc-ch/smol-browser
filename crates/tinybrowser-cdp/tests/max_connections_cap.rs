@@ -1,6 +1,6 @@
 //! `--max-connections` bounds the thread-per-connection server.
 //!
-//! Each CDP connection owns an OS thread and its pages' V8 isolates, so without
+//! Each CDP connection owns an OS thread and its pages' JS runtimes, so without
 //! a cap a client can grow the server's thread count and memory without limit.
 //! The cap must do three things, and this test pins all three:
 //!
@@ -105,7 +105,6 @@ fn max_connections_refuses_then_recovers() {
                 ws_port,
                 "127.0.0.1",
                 None,
-                false,
                 None,
                 false,
                 None,

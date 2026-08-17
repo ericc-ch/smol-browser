@@ -113,7 +113,7 @@ async fn one_client(port: u16, id_base: u64) -> Result<(), String> {
 #[ignore]
 #[tokio::test(flavor = "current_thread")]
 
-async fn concurrency_5_does_not_abort_v8() {
+async fn concurrency_5_does_not_abort_js() {
     let port = pick_port().await;
     let local = tokio::task::LocalSet::new();
     local

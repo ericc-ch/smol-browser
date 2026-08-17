@@ -70,7 +70,6 @@ fn configured_root_certificates() -> &'static [reqwest::Certificate] {
 ///
 /// The only non-test caller is the stealth (wreq) client, so a plain build
 /// without the `stealth` feature sees it as unused.
-#[cfg_attr(not(feature = "stealth"), allow(dead_code))]
 pub(crate) fn custom_cert_store_requested(
     cert_file: Option<&std::ffi::OsStr>,
     cert_dir: Option<&std::ffi::OsStr>,

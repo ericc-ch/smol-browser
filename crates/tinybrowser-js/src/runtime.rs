@@ -88,7 +88,7 @@ impl JsRuntime {
         qjs.load_shim().expect("shim loads");
         qjs.set_url(base_url);
         qjs.execute_script(
-            "<obscura:init>",
+            "<tinybrowser:init>",
             "globalThis.__tinybrowser_objects = {}; globalThis.__tinybrowser_oid = 0;",
         )
         .expect("init should not fail");
@@ -132,7 +132,6 @@ impl JsRuntime {
 
     /// Install the stealth (wreq) HTTP client so scripted fetch()/XHR is routed
     /// through it in stealth mode (see op_fetch_url / stealth_fetch_all).
-    #[cfg(feature = "stealth")]
     pub fn set_stealth_client(&self, client: std::sync::Arc<tinybrowser_net::StealthHttpClient>) {
         self.qjs.shared_state().borrow_mut().stealth_client = Some(client);
     }
@@ -299,7 +298,7 @@ impl JsRuntime {
     /// have been set. Must be called once per page setup, after all set_* methods.
     pub fn run_page_init(&mut self) {
         let _ = self.qjs.execute_script(
-            "<obscura:page-init>",
+            "<tinybrowser:page-init>",
             "globalThis.__tinybrowser_init();".to_string(),
         );
     }
@@ -3259,7 +3258,7 @@ mod tests {
                     matchMedia("(1000px <= width < 1400px) and (height > 700px)").matches,
                     matchMedia("(orientation: portrait)").matches,
                     matchMedia("(prefers-color-scheme: light) and (pointer: fine) and (hover: hover)").matches,
-                    matchMedia("(obscura-unknown-feature: yes)").matches
+                    matchMedia("(tinybrowser-unknown-feature: yes)").matches
                 ];
                 "#,
             )
@@ -3989,7 +3988,7 @@ mod tests {
                     CSS.supports("(display:grid) and (selector(.card > *))"),
                     CSS.supports("not (unknown-engine-prop:value)"),
                     CSS.supports("selector(.card >)"),
-                    CSS.supports("selector(:obscura-unknown)"),
+                    CSS.supports("selector(:tinybrowser-unknown)"),
                     CSS.supports("selector(.card,)"),
                     CSS.supports("scrollbar-gutter", "stable"),
                     CSS.supports("scrollbar-gutter", "floating"),

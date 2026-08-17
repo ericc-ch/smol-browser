@@ -28,13 +28,8 @@ jobs:
             os: macos-latest
             name: tinybrowser-aarch64-macos
           - target: x86_64-apple-darwin
-            # Must run on a native Intel runner. tinybrowser-js bakes a V8 startup
-            # snapshot at build time, and that snapshot is architecture specific.
-            # macos-latest is Apple Silicon, so building x86_64 there embeds an
-            # arm64 snapshot into the Intel binary and V8 crashes deserializing
-            # it at isolate init (issue #290). macos-15-intel is the last x86_64
-            # image (available until Aug 2027); there is no cross-build that
-            # produces a correct snapshot.
+            # Native Intel runner. The binary links BoringSSL via wreq; cross
+            # compiling x86_64 from Apple Silicon has produced broken links.
             os: macos-15-intel
             name: tinybrowser-x86_64-macos
           - target: x86_64-pc-windows-msvc
@@ -75,58 +70,39 @@ jobs:
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} -p tinybrowser-cli --bins --no-default-features
+        run: cargo build --release --target ${{ matrix.target }} -p tinybrowser-cli --bins
 
       - name: Stage release binary
         shell: bash
         run: |
           BIN_DIR=target/${{ matrix.target }}/release
-          mkdir -p dist/default
-          cp "$BIN_DIR"/tinybrowser* dist/default/
+          mkdir -p dist
+          cp "$BIN_DIR"/tinybrowser* dist/
 
-      - name: Build stealth release binary
-        run: cargo build --release --target ${{ matrix.target }} -p tinybrowser-cli --bins --no-default-features --features stealth
-
-      - name: Stage stealth release binary
+      - name: Smoke test release binary
+        # Run fetch once so a release never ships a binary that crashes at
+        # JS init. The data: URL keeps it offline. Every target here is native,
+        # so the runner can execute the binary it just built.
         shell: bash
         run: |
-          BIN_DIR=target/${{ matrix.target }}/release
-          mkdir -p dist/stealth
-          cp "$BIN_DIR"/tinybrowser* dist/stealth/
-
-      - name: Smoke test release binaries (V8 snapshot)
-        # Run the V8 path once so a release never ships a binary that crashes at
-        # isolate init from a mismatched snapshot (issue #290). The data: URL
-        # keeps it offline. Every target here is native, so the runner can
-        # execute all variants it just built.
-        shell: bash
-        run: |
-          for VARIANT in default stealth; do
-            BIN=dist/$VARIANT/tinybrowser
-            [ -f "$BIN.exe" ] && BIN="$BIN.exe"
-            test -x "$BIN"
-            "$BIN" fetch "data:text/html,<title>ok</title>" --eval "1+1"
-          done
+          BIN=dist/tinybrowser
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+          test -x "$BIN"
+          "$BIN" fetch "data:text/html,<title>ok</title>" --eval "1+1"
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
         working-directory: dist
-        run: |
-          tar czf ../${{ matrix.name }}.tar.gz -C default tinybrowser
-          tar czf ../${{ matrix.name }}-stealth.tar.gz -C stealth tinybrowser
+        run: tar czf ../${{ matrix.name }}.tar.gz tinybrowser
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
         working-directory: dist
-        run: |
-          7z a ../${{ matrix.name }}.zip ./default/tinybrowser.exe
-          7z a ../${{ matrix.name }}-stealth.zip ./stealth/tinybrowser.exe
+        run: 7z a ../${{ matrix.name }}.zip ./tinybrowser.exe
 
       - name: Upload
         uses: softprops/action-gh-release@v2
         with:
           files: |
             ${{ matrix.name }}.tar.gz
-            ${{ matrix.name }}-stealth.tar.gz
             ${{ matrix.name }}.zip
-            ${{ matrix.name }}-stealth.zip

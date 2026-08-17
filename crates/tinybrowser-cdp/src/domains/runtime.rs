@@ -104,7 +104,7 @@ pub async fn handle(
                 .unwrap_or(false);
 
             // CDP `timeout` field (milliseconds). Default to Chrome's
-            // protocolTimeout (30s) so long evaluations don't pin the V8 lock
+            // protocolTimeout (30s) so long evaluations don't pin the JS lock
             // indefinitely and starve every other CDP command on the same
             // session.
             let timeout_ms = params

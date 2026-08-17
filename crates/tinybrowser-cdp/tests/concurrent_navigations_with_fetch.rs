@@ -210,7 +210,7 @@ async fn serve_fixture(listener: TcpListener) {
 #[ignore]
 #[tokio::test(flavor = "current_thread")]
 
-async fn fetch_intercept_concurrency_5_does_not_abort_v8() {
+async fn fetch_intercept_concurrency_5_does_not_abort_js() {
     let fixture = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let fixture_port = fixture.local_addr().unwrap().port();
     let target_url = format!("http://127.0.0.1:{}/", fixture_port);

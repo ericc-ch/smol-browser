@@ -29,15 +29,12 @@ const MAX_DEFERRED_MESSAGES: usize = 256;
 const MAX_PENDING_WS_HANDOFFS: usize = 128;
 
 // Cap on *live* CDP connections, each of which costs one OS thread and its own
-// V8 isolates. `MAX_PENDING_WS_HANDOFFS` above bounds only the handoff queue —
+// JS runtimes. `MAX_PENDING_WS_HANDOFFS` above bounds only the handoff queue —
 // connections that have already been handed off are unbounded without this.
 //
 // 128 matches the handoff bound and is well above any real client fan-out
-// (Playwright/Puppeteer use one connection per browser). Threads are what this
-// actually bounds: with arenas capped by `cap_malloc_arenas`, 128 idle
-// connections cost 146 threads, 33.2 GiB of reserved address space and 51 MiB
-// resident -- and nearly all of that 33.2 GiB is V8's process-wide sandbox,
-// which is there at zero connections. Override with `--max-connections`.
+// (Playwright/Puppeteer use one connection per browser). Override with
+// `--max-connections`.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 128;
 
 // How long shutdown waits for connection threads to finish before persisting
@@ -65,64 +62,42 @@ enum ServerMessage {
 }
 
 pub async fn start(port: u16) -> anyhow::Result<()> {
-    start_with_options(port, None, false).await
+    start_with_options(port, None).await
 }
 
-pub async fn start_with_options(
-    port: u16,
-    proxy: Option<String>,
-    stealth: bool,
-) -> anyhow::Result<()> {
-    start_with_full_options(port, proxy, stealth, None, None).await
+pub async fn start_with_options(port: u16, proxy: Option<String>) -> anyhow::Result<()> {
+    start_with_full_options(port, proxy, None, None).await
 }
 
 pub async fn start_with_full_options(
     port: u16,
     proxy: Option<String>,
-    stealth: bool,
     user_agent: Option<String>,
     storage_dir: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
-    start_with_host(port, "127.0.0.1", proxy, stealth, user_agent, storage_dir).await
+    start_with_host(port, "127.0.0.1", proxy, user_agent, storage_dir).await
 }
 
 pub async fn start_with_host(
     port: u16,
     host: &str,
     proxy: Option<String>,
-    stealth: bool,
     user_agent: Option<String>,
     storage_dir: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
-    start_with_host_and_security(port, host, proxy, stealth, user_agent, false, storage_dir).await
+    start_with_host_and_security(port, host, proxy, user_agent, false, storage_dir).await
 }
 
 pub async fn start_with_host_and_security(
     port: u16,
     host: &str,
     proxy: Option<String>,
-    stealth: bool,
     user_agent: Option<String>,
     allow_file_access: bool,
     storage_dir: Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
     start_with_full_serve_options(
-        port, host, proxy, stealth, user_agent, allow_file_access, storage_dir, false,
-    )
-    .await
-}
-
-pub async fn start_with_host_security_and_storage(
-    port: u16,
-    host: &str,
-    proxy: Option<String>,
-    stealth: bool,
-    user_agent: Option<String>,
-    allow_file_access: bool,
-    storage_dir: Option<std::path::PathBuf>,
-) -> anyhow::Result<()> {
-    start_with_full_serve_options(
-        port, host, proxy, stealth, user_agent, allow_file_access, storage_dir, false,
+        port, host, proxy, user_agent, allow_file_access, storage_dir, false,
     )
     .await
 }
@@ -134,7 +109,6 @@ pub async fn start_with_full_serve_options(
     port: u16,
     host: &str,
     proxy: Option<String>,
-    stealth: bool,
     user_agent: Option<String>,
     allow_file_access: bool,
     storage_dir: Option<std::path::PathBuf>,
@@ -144,7 +118,6 @@ pub async fn start_with_full_serve_options(
         port,
         host,
         proxy,
-        stealth,
         user_agent,
         allow_file_access,
         storage_dir,
@@ -155,14 +128,13 @@ pub async fn start_with_full_serve_options(
 }
 
 /// As `start_with_full_serve_options`, with an explicit cap on live CDP
-/// connections. Each connection owns an OS thread and its pages' V8 isolates,
+/// connections. Each connection owns an OS thread and its pages' JS runtimes,
 /// so this is what bounds the server's thread and memory footprint.
 #[allow(clippy::too_many_arguments)]
 pub async fn start_with_serve_options_and_limit(
     port: u16,
     host: &str,
     proxy: Option<String>,
-    stealth: bool,
     user_agent: Option<String>,
     allow_file_access: bool,
     storage_dir: Option<std::path::PathBuf>,
@@ -175,7 +147,7 @@ pub async fn start_with_serve_options_and_limit(
     let addr = SocketAddr::new(ip, port);
 
     // Issue #62: the HTTP control plane (/json/version, /json) must remain
-    // reachable even while V8 JS evaluation blocks the tokio LocalSet thread.
+    // reachable even while JS evaluation blocks the tokio LocalSet thread.
     //
     // We use a dedicated OS thread with a blocking std::net::TcpListener so
     // the kernel's accept backlog is always drained promptly. HTTP endpoints
@@ -204,10 +176,10 @@ pub async fn start_with_serve_options_and_limit(
 
     // Dedicated accept thread: drains the kernel backlog immediately and
     // handles HTTP endpoints (/json/version, /json, /json/protocol) with
-    // blocking I/O so they never contend with the LocalSet's V8 work.
+    // blocking I/O so they never contend with the LocalSet's JS work.
     let accept_flag = shutdown_flag.clone();
     std::thread::Builder::new()
-        .name("obscura-cdp-accept".into())
+        .name("tinybrowser-cdp-accept".into())
         .spawn(move || {
             for stream in std_listener.incoming() {
                 if accept_flag.load(Ordering::Relaxed) {
@@ -229,11 +201,10 @@ pub async fn start_with_serve_options_and_limit(
     // This context is a configuration and persistence template. Each WebSocket
     // gets an isolated copy with its own cookie jar and HTTP client (#449),
     // while the thread-per-connection layout from #430 still confines that
-    // connection's V8 isolates to one OS thread.
+    // connection's JS runtimes to one OS thread.
     let mut bctx = tinybrowser_core::BrowserContext::with_storage_and_network(
         "default".to_string(),
         proxy,
-        stealth,
         user_agent,
         storage_dir,
         allow_private_network,
@@ -250,13 +221,13 @@ pub async fn start_with_serve_options_and_limit(
     // One graceful-shutdown watcher for the whole server. It flips the accept
     // flag (stopping the accept thread) and wakes every connection processor via
     // `notify_waiters()`. On its own thread so it needs no LocalSet and cannot be
-    // starved by a connection's V8 work. Watches SIGTERM as well as Ctrl-C so
+    // starved by a connection's JS work. Watches SIGTERM as well as Ctrl-C so
     // `docker stop` / `kill` also flush cookies (issue #333).
     {
         let sf = shutdown_flag.clone();
         let sn = shutdown_notify.clone();
         std::thread::Builder::new()
-            .name("obscura-cdp-signal".into())
+            .name("tinybrowser-cdp-signal".into())
             .spawn(move || {
                 if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -453,7 +424,7 @@ fn run_connection(
 
     let slot = live_connections.clone();
     let spawned = std::thread::Builder::new()
-        .name("obscura-cdp-conn".into())
+        .name("tinybrowser-cdp-conn".into())
         .spawn(move || {
             let _slot = SlotGuard(slot);
             let default_context = Arc::new(
@@ -836,7 +807,7 @@ async fn cdp_processor(
             }
             ServerMessage::Cdp(cdp_msg) => {
                 // Route every Page.navigate through the spawn-and-defer path,
-                // not just intercepted ones. Holding the V8 lock across a
+                // not just intercepted ones. Holding the JS lock across a
                 // multi-second navigate inside the regular dispatch wedges the
                 // entire processor (40-site sweep: 39/40 timeouts). Spawning
                 // navigation lets `cdp_processor` keep multiplexing other CDP
@@ -1169,7 +1140,7 @@ async fn process_with_interception(
     let nav_js_lock = ctx.js_lock.clone();
 
     tokio::task::spawn_local(async move {
-        // Issue #19: serialize this connection's V8 work across its pages. This
+        // Issue #19: serialize this connection's JS work across its pages. This
         // nav task runs while the connection's processor keeps pumping other CDP
         // messages via `dispatch` (which takes the same per-connection lock), so
         // both sides coordinate on one page's isolate at a time on this thread.
@@ -1253,8 +1224,8 @@ async fn process_with_interception(
                             || msg.text.contains("Fetch.failRequest")
                         {
                             // Safe: only flips a oneshot to resume the parked
-                            // op inside the spawned nav task. No V8 enter on
-                            // this side; the actual V8 work happens back on
+                            // op inside the spawned nav task. No JS enter on
+                            // this side; the actual JS work happens back on
                             // the nav task's thread.
                             handle_fetch_resolution(&msg.text, ctx, &msg.reply_tx, intercepted_paused);
                         } else {
@@ -1424,14 +1395,9 @@ fn fast_path_response(text: &str) -> Option<String> {
 
     let result = match req.method.as_str() {
         "Network.enable" | "Network.setCacheDisabled" | "Network.setRequestInterception" |
-        "Page.enable" | "Page.setLifecycleEventsEnabled" | "Page.setInterceptFileChooserDialog" |
+        "Page.enable" | "Page.setLifecycleEventsEnabled" |
         "Runtime.runIfWaitingForDebugger" | "Runtime.discardConsoleEntries" |
-        "Performance.enable" | "Log.enable" | "Security.enable" |
-        "Emulation.setTouchEmulationEnabled" |
-        "CSS.enable" | "Accessibility.enable" | "ServiceWorker.enable" |
-        "Inspector.enable" | "Debugger.enable" | "Profiler.enable" |
-        "HeapProfiler.enable" | "Overlay.enable" | "Storage.enable" |
-        "Target.setAutoAttach" => {
+        "Accessibility.enable" | "Target.setAutoAttach" => {
             Some(json!({}))
         }
         "Browser.getVersion" => {
@@ -1442,9 +1408,6 @@ fn fast_path_response(text: &str) -> Option<String> {
                 "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
                 "jsVersion": "14.5.0.0",
             }))
-        }
-        "Browser.setDownloadBehavior" | "Browser.getWindowBounds" => {
-            Some(json!({}))
         }
         _ => None,
     };
@@ -1652,7 +1615,7 @@ mod tests {
 
                 // This is deliberately host/client time. No CDP message is sent
                 // while the timeout becomes due; Chrome's renderer still runs,
-                // and Obscura's connection-owned page pump must do the same.
+                // and tinybrowser's connection-owned page pump must do the same.
                 tokio::time::sleep(std::time::Duration::from_millis(120)).await;
 
                 send(json!({

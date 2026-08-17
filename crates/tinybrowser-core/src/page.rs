@@ -85,7 +85,6 @@ fn truncate_on_char_boundary(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-#[cfg(feature = "stealth")]
 use tinybrowser_net::StealthHttpClient;
 
 /// Returns true when a JS-initiated navigation would step from a
@@ -263,15 +262,14 @@ pub struct Page {
     // contract. Includes `Runtime.addBinding` shims so puppeteer's
     // `exposeFunction` bindings exist before inline `<script>` tags execute.
     preload_scripts: Vec<String>,
-    /// Document-owned HTML script preparation flags saved while the V8 realm
-    /// is suspended for CDP/MCP tab switching.  These are restored only when
+    /// Document-owned HTML script preparation flags saved while the JS realm
+    /// is suspended for CDP tab switching.  These are restored only when
     /// the same surviving DomTree is resumed; navigation clears them.
     suspended_started_script_ids: Vec<u32>,
     /// Passive on_request/on_response callbacks, scoped to this page (issue
     /// #408): they fire only for requests this page drives and die with it.
     /// Arc because the JS runtime state holds a second handle for fetch()/XHR.
     callbacks: Arc<CallbackRegistry>,
-    #[cfg(feature = "stealth")]
     pub stealth_client: Option<Arc<StealthHttpClient>>,
 }
 
@@ -815,7 +813,7 @@ fn linked_stylesheet_requests(dom: &DomTree) -> Vec<(usize, String)> {
 }
 
 /// Discover fetchable `@import` rules in inline author sheets. The source
-/// index excludes Obscura's own materialized sheets so it remains stable while
+/// index excludes tinybrowser's own materialized sheets so it remains stable while
 /// imports are inserted before their source nodes.
 fn inline_stylesheet_import_requests(dom: &DomTree) -> Vec<(usize, StylesheetImport)> {
     let style_ids = dom.query_selector_all("style").unwrap_or_default();
@@ -852,21 +850,16 @@ impl Page {
         // Page.getFrameTree return a frame the client cannot match,
         // triggering a Target.closeTarget and "Frame has been detached".
         let frame_id = id.clone();
-        #[cfg(feature = "stealth")]
-        let stealth_client = if context.stealth {
-            // The wreq client backing StealthHttpClient does not speak SOCKS5.
-            // Callers must validate the proxy scheme up front and fail loudly
-            // (see obscura-cli) rather than silently rewriting socks5:// to
-            // http://, which only works when the upstream happens to be a
-            // Clash-style mixed-mode proxy and breaks plain SOCKS5 servers
-            // like `ssh -ND` (#160).
-            Some(Arc::new(StealthHttpClient::with_proxy(
-                context.cookie_jar.clone(),
-                context.proxy_url.as_deref(),
-            )))
-        } else {
-            None
-        };
+        // The wreq client backing StealthHttpClient does not speak SOCKS5.
+        // Callers must validate the proxy scheme up front and fail loudly
+        // rather than silently rewriting socks5:// to http://, which only
+        // works when the upstream happens to be a Clash-style mixed-mode
+        // proxy and breaks plain SOCKS5 servers like `ssh -ND` (#160).
+        let stealth_client = Some(Arc::new(StealthHttpClient::with_full_options(
+            context.cookie_jar.clone(),
+            context.proxy_url.as_deref(),
+            context.allow_private_network,
+        )));
 
         Page {
             id,
@@ -901,7 +894,6 @@ impl Page {
             preload_scripts: Vec::new(),
             suspended_started_script_ids: Vec::new(),
             callbacks: Arc::new(CallbackRegistry::new()),
-            #[cfg(feature = "stealth")]
             stealth_client,
         }
     }
@@ -1010,7 +1002,7 @@ impl Page {
 
     /// Set the screenshot surface density without changing CSS layout. CDP
     /// uses zero to disable its override, which restores the native 1x surface
-    /// in Obscura's headless-only model.
+    /// in tinybrowser's headless-only model.
     pub fn set_device_scale_factor(&mut self, device_scale_factor: f32) {
         if !device_scale_factor.is_finite() || device_scale_factor < 0.0 {
             return;
@@ -1033,7 +1025,6 @@ impl Page {
     }
 
     async fn do_fetch(&self, url: &Url) -> Result<Response, NetError> {
-        #[cfg(feature = "stealth")]
         if let Some(ref stealth) = self.stealth_client {
             return stealth.fetch(url).await;
         }
@@ -1071,36 +1062,13 @@ impl Page {
         rt.set_title(&self.title);
         rt.set_referrer(&self.referrer);
 
-        #[cfg(feature = "stealth")]
-        if self.stealth_client.is_some() {
-            rt.set_stealth(true);
-            rt.set_user_agent(tinybrowser_net::STEALTH_USER_AGENT);
-            rt.set_platform(
-                tinybrowser_net::STEALTH_NAVIGATOR_PLATFORM,
-                tinybrowser_net::STEALTH_UA_PLATFORM,
-                tinybrowser_net::STEALTH_UA_PLATFORM_VERSION,
-            );
-        } else {
-            if let Ok(ua) = self.http_client.user_agent.try_read() {
-                rt.set_user_agent(&ua);
-            }
-            rt.set_platform(
-                &self.context.platform,
-                &self.context.ua_platform,
-                &self.context.ua_platform_version,
-            );
-        }
-        #[cfg(not(feature = "stealth"))]
-        {
-            if let Ok(ua) = self.http_client.user_agent.try_read() {
-                rt.set_user_agent(&ua);
-            }
-            rt.set_platform(
-                &self.context.platform,
-                &self.context.ua_platform,
-                &self.context.ua_platform_version,
-            );
-        }
+        rt.set_stealth(true);
+        rt.set_user_agent(tinybrowser_net::STEALTH_USER_AGENT);
+        rt.set_platform(
+            tinybrowser_net::STEALTH_NAVIGATOR_PLATFORM,
+            tinybrowser_net::STEALTH_UA_PLATFORM,
+            tinybrowser_net::STEALTH_UA_PLATFORM_VERSION,
+        );
         if let Some((lat, lon)) = env_geolocation() {
             rt.set_geolocation(lat, lon);
         }
@@ -1115,7 +1083,6 @@ impl Page {
         rt.set_http_client(self.http_client.clone());
         rt.set_callbacks(self.callbacks.clone());
         rt.set_blocked_urls(self.blocked_url_patterns.clone());
-        #[cfg(feature = "stealth")]
         if let Some(ref stealth) = self.stealth_client {
             rt.set_stealth_client(stealth.clone());
         }
@@ -1243,7 +1210,6 @@ impl Page {
         while !pending.is_empty() {
             let batch = std::mem::take(&mut pending);
             let client = self.http_client.clone();
-            #[cfg(feature = "stealth")]
             let stealth_client = self.stealth_client.clone();
             let callbacks = self.callbacks.clone();
             let initiator = document_url.clone();
@@ -1251,14 +1217,12 @@ impl Page {
             let results: Vec<_> =
                 futures::stream::iter(batch.into_iter().map(|(key, requested_url, depth)| {
                     let client = client.clone();
-                    #[cfg(feature = "stealth")]
                     let stealth_client = stealth_client.clone();
                     let callbacks = callbacks.clone();
                     let initiator = initiator.clone();
                     async move {
                         let request =
                             ResourceRequest::subresource(ResourceType::Stylesheet, &initiator);
-                        #[cfg(feature = "stealth")]
                         let result = if let Some(stealth_client) = stealth_client {
                             stealth_client
                                 .fetch_resource_with_callbacks(
@@ -1276,14 +1240,6 @@ impl Page {
                                 )
                                 .await
                         };
-                        #[cfg(not(feature = "stealth"))]
-                        let result = client
-                            .fetch_resource_with_callbacks(
-                                &requested_url,
-                                request,
-                                Some(&callbacks),
-                            )
-                            .await;
                         (key, requested_url, depth, result)
                     }
                 }))
@@ -2226,7 +2182,7 @@ impl Page {
         body: &str,
     ) -> Result<(), PageError> {
         // Hard ceiling on a single end-to-end navigation. Without this a slow
-        // primary fetch or a runaway settle loop can hold the V8 lock for
+        // primary fetch or a runaway settle loop can hold the JS lock for
         // arbitrarily long (we've measured 60+ seconds on JS-heavy news
         // sites), wedging every other in-flight CDP request because the
         // dispatcher holds the lock across the entire handler. 30 seconds
@@ -2562,7 +2518,7 @@ impl Page {
                 // The previous escaper only handled `, \, and ${,
                 // letting attacker-controlled CSS containing a raw
                 // U+2028 break out of the template literal and run
-                // arbitrary JS in the page's V8 realm.
+                // arbitrary JS in the page's JS realm.
                 let escaped = escape_for_js_template_literal(&combined_css);
                 let code = format!("globalThis.__tinybrowser_css = `{}`;", escaped);
                 let _ = js.execute_script("<css>", &code);
@@ -2749,23 +2705,23 @@ impl Page {
         self.dom.as_ref()
     }
 
-    /// V8 isolate handle for this page's runtime, if it has been initialized.
+    /// JS runtime handle for this page's runtime, if it has been initialized.
     /// Lets the CDP dispatcher arm a per-command watchdog (which bounds any one
-    /// command so a hung page cannot hold this connection's V8 lock forever)
+    /// command so a hung page cannot hold this connection's JS lock forever)
     /// without taking `&mut self`.
     pub fn isolate_handle(&self) -> Option<tinybrowser_js::runtime::IsolateHandle> {
         self.js.as_ref().map(|js| js.isolate_handle())
     }
 
-    /// Clear a V8 termination left by a per-command watchdog so the next command
+    /// Clear a JS termination left by a per-command watchdog so the next command
     /// on this page can run. No-op if the runtime is absent or not terminating.
-    pub fn cancel_v8_termination(&mut self) {
+    pub fn cancel_js_termination(&mut self) {
         if let Some(js) = self.js.as_mut() {
             js.cancel_termination();
         }
     }
 
-    /// Like [`Self::evaluate`] but bounded by a V8 watchdog so a runaway
+    /// Like [`Self::evaluate`] but bounded by a JS watchdog so a runaway
     /// expression cannot hang the process. A non-zero `timeout` of zero falls
     /// back to the unbounded path.
     pub fn evaluate_with_timeout(
@@ -3202,7 +3158,7 @@ impl Page {
     /// Returns a receiver yielding every such request; resolve each through its
     /// `resolver` with `InterceptResolution::{Continue, Fulfill, Fail}` to pass,
     /// mock, or block it. Works in stealth and non-stealth. Mirrors how the CDP
-    /// server wires the channel (`obscura-cdp/src/server.rs`).
+    /// server wires the channel (`tinybrowser-cdp/src/server.rs`).
     pub fn enable_interception(
         &mut self,
     ) -> tokio::sync::mpsc::UnboundedReceiver<tinybrowser_js::ops::InterceptedRequest> {
@@ -3560,7 +3516,6 @@ mod tests {
         let context = std::sync::Arc::new(crate::BrowserContext::with_storage_and_network(
             "referrer-redirect".to_string(),
             None,
-            false,
             None,
             None,
             true,
@@ -3589,7 +3544,6 @@ mod tests {
         let context = std::sync::Arc::new(crate::BrowserContext::with_storage_and_network(
             "stylesheet-graph".to_string(),
             None,
-            false,
             None,
             None,
             true,
@@ -3678,7 +3632,6 @@ mod tests {
         let context = std::sync::Arc::new(crate::BrowserContext::with_storage_and_network(
             "inline-imports".to_string(),
             None,
-            false,
             None,
             None,
             true,
@@ -3752,7 +3705,6 @@ mod tests {
         let context = std::sync::Arc::new(crate::BrowserContext::with_storage_and_network(
             name.to_string(),
             None,
-            false,
             None,
             None,
             true,
@@ -3970,7 +3922,6 @@ mod tests {
         let context = std::sync::Arc::new(crate::BrowserContext::with_storage_and_network(
             "duplicate-script-cache".to_string(),
             None,
-            false,
             None,
             None,
             true,
@@ -3999,7 +3950,6 @@ mod tests {
         let context = std::sync::Arc::new(crate::BrowserContext::with_storage_and_network(
             "distinct-script-cache".to_string(),
             None,
-            false,
             None,
             None,
             true,
@@ -4036,7 +3986,6 @@ mod tests {
         let context = std::sync::Arc::new(crate::BrowserContext::with_storage_and_network(
             "script-state-suspend".to_string(),
             None,
-            false,
             None,
             None,
             true,
@@ -4112,7 +4061,6 @@ mod tests {
         let context = std::sync::Arc::new(crate::BrowserContext::with_storage_and_network(
             "script-state-navigation".to_string(),
             None,
-            false,
             None,
             None,
             true,
@@ -4152,7 +4100,6 @@ mod tests {
         let context = std::sync::Arc::new(crate::BrowserContext::with_storage_and_network(
             name.to_string(),
             None,
-            false,
             None,
             None,
             true,

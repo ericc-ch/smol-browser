@@ -355,8 +355,8 @@ async fn do_navigate(
     // Block CDP-initiated file:// navigation by default.
     // Anyone who can reach the CDP port (default localhost,
     // but Docker images bind 0.0.0.0) could otherwise read
-    // any file the obscura process can read. Opt in via
-    // `obscura serve --allow-file-access` when local-HTML
+    // any file the tinybrowser process can read. Opt in via
+    // `tinybrowser serve --allow-file-access` when local-HTML
     // testing is the intended workflow.
     let allow_file_access = ctx
         .get_session_page(session_id)
@@ -364,7 +364,7 @@ async fn do_navigate(
         .unwrap_or(ctx.default_context.allow_file_access);
     if url_is_file_scheme(url) && !allow_file_access {
         return Err(
-            "Page.navigate to file:// is disabled. Restart with `obscura serve --allow-file-access` to enable.".to_string()
+            "Page.navigate to file:// is disabled. Restart with `tinybrowser serve --allow-file-access` to enable.".to_string()
         );
     }
 
@@ -550,10 +550,12 @@ pub async fn handle(
             ctx.preload_scripts.retain(|(id, _)| id != identifier);
             Ok(json!({}))
         }
-        "setInterceptFileChooserDialog" => Ok(json!({})),
-        // Obscura does not download files to disk, so there is no behavior to
-        // configure; ack it so clients that set it do not warn (issue #340).
-        "setDownloadBehavior" => Ok(json!({})),
+        "setInterceptFileChooserDialog" => {
+            Err(crate::util::cdp_unimplemented("Page.setInterceptFileChooserDialog"))
+        }
+        "setDownloadBehavior" => {
+            Err(crate::util::cdp_unimplemented("Page.setDownloadBehavior"))
+        }
         "getLayoutMetrics" => {
             // Playwright calls this before every page.screenshot(). Report the
             // same live CSS viewport that responsive page code and paint use.
@@ -702,7 +704,7 @@ pub async fn handle(
             }
             Ok(json!({}))
         }
-        "printToPDF" => crate::domains::pdf::print_to_pdf(params, ctx, session_id).await,
+        "printToPDF" => Err(paint_unsupported("printToPDF")),
         "startScreencast" => Err(paint_unsupported("startScreencast")),
         "stopScreencast" => Err(paint_unsupported("stopScreencast")),
         "screencastFrameAck" => Err(paint_unsupported("screencastFrameAck")),
@@ -833,6 +835,24 @@ mod tests {
             .await
             .expect_err("unknown methods must surface as errors");
         assert!(err.contains("Unknown Page method"));
+    }
+
+    #[tokio::test]
+    async fn download_and_file_chooser_stubs_are_explicit_unimplemented() {
+        let mut ctx = CdpContext::new();
+        for method in ["setDownloadBehavior", "setInterceptFileChooserDialog"] {
+            let err = handle(method, &json!({}), &mut ctx, &None)
+                .await
+                .expect_err("no-op stubs must error");
+            assert!(
+                err.contains("not implemented by tinybrowser"),
+                "{method} must say unimplemented: {err}"
+            );
+            assert!(
+                err.contains(&format!("Page.{method}")),
+                "{method} error must name the CDP method: {err}"
+            );
+        }
     }
 
     #[tokio::test]

@@ -6,6 +6,11 @@
 /// (see GHSA-q55h-vfv9-qcr5 and its incomplete-fix variant in
 /// `Target.createTarget`).
 
+/// Explicit error for a CDP method we recognize but do not implement.
+pub(crate) fn cdp_unimplemented(method: &str) -> String {
+    format!("{method} is not implemented by tinybrowser.")
+}
+
 /// Returns true when `raw` parses as a `file:`-scheme URL, or syntactically
 /// starts with `file:` after a possible leading-whitespace strip. Matching is
 /// case-insensitive on the scheme so neither `FILE://` nor `File://` slips

@@ -219,8 +219,8 @@ pub async fn handle(
                 }
             }))
         }
-        "setAttributeValue" => Ok(json!({})),
-        "removeNode" => Ok(json!({})),
+        "setAttributeValue" => Err(crate::util::cdp_unimplemented("DOM.setAttributeValue")),
+        "removeNode" => Err(crate::util::cdp_unimplemented("DOM.removeNode")),
         "focus" => {
             // No layout engine, but tinybrowser's JS focus() sets document.activeElement,
             // which Input.dispatchKeyEvent targets. CDP clients (browser-use) focus an
@@ -688,5 +688,23 @@ mod tests {
             levels < depth,
             "nesting must be bounded below the tree's true depth, got {levels}"
         );
+    }
+
+    #[tokio::test]
+    async fn attribute_and_remove_stubs_are_explicit_unimplemented() {
+        let mut ctx = CdpContext::new();
+        for method in ["setAttributeValue", "removeNode"] {
+            let err = handle(method, &json!({}), &mut ctx, &None)
+                .await
+                .expect_err("no-op stubs must error");
+            assert!(
+                err.contains("not implemented by tinybrowser"),
+                "{method} must say unimplemented: {err}"
+            );
+            assert!(
+                err.contains(&format!("DOM.{method}")),
+                "{method} error must name the CDP method: {err}"
+            );
+        }
     }
 }

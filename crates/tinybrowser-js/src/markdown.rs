@@ -1,6 +1,4 @@
-//! Shared markdown extraction script used by the LP.getMarkdown CDP method
-//! and the CLI `--dump markdown` mode. Lives in tinybrowser-core so both
-//! tinybrowser-cdp and tinybrowser-cli can call it without depending on each other.
+//! Shared markdown extraction script used by the CLI `--dump markdown` mode.
 
 /// JS expression that walks `document.body` and returns a markdown string.
 /// Must be evaluated against a Page that has a fully-bootstrapped JS runtime.

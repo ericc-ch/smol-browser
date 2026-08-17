@@ -25,12 +25,6 @@ struct Args {
     #[arg(long, global = true)]
     proxy: Option<String>,
 
-    /// Enable stealth mode (consistent browser fingerprint, and with the
-    /// `stealth` build feature, TLS impersonation plus tracker blocking).
-    /// Global: applies to fetch and serve.
-    #[arg(long, global = true)]
-    stealth: bool,
-
     #[arg(long)]
     obey_robots: bool,
 
@@ -68,11 +62,8 @@ enum Command {
         #[arg(long)]
         user_agent: Option<String>,
 
-        #[arg(long, default_value_t = 1)]
-        workers: u16,
-
         /// Maximum live CDP connections. Each connection runs on its own OS
-        /// thread with its own V8 isolates, so this bounds the server's thread
+        /// thread with its own JS runtimes, so this bounds the server's thread
         /// and memory footprint. Connections beyond the limit are refused with
         /// a 503 rather than queued.
         #[arg(long, default_value_t = tinybrowser_cdp::DEFAULT_MAX_CONNECTIONS)]
@@ -174,17 +165,7 @@ enum DumpFormat {
 
 fn print_banner(port: u16) {
     println!(
-        r#"
-   ____  _                              
-  / __ \| |                             
- | |  | | |__  ___  ___ _   _ _ __ __ _ 
- | |  | | '_ \/ __|/ __| | | | '__/ _` |
- | |__| | |_) \__ \ (__| |_| | | | (_| |
-  \____/|_.__/|___/\___|\__,_|_|  \__,_|
-                   
-  Headless Browser v{}
-  CDP server: ws://127.0.0.1:{}/devtools/browser
-"#,
+        "tinybrowser v{}\nCDP server: ws://127.0.0.1:{}/devtools/browser",
         env!("TINYBROWSER_BUILD_VERSION"),
         port
     );
@@ -215,13 +196,13 @@ fn merge_proxy(global_proxy: Option<String>, command_proxy: Option<String>) -> O
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    // Pin the process timezone before V8/ICU reads it. V8 sources the zone for
-    // both Date (getTimezoneOffset, toString) and Intl.DateTimeFormat from TZ; left
-    // unset it defaults to UTC for Date while the page layer advertised a different
-    // zone, a cross-surface mismatch fingerprinting scripts flag. Default to
-    // Europe/Berlin; set TINYBROWSER_TIMEZONE to match the exit IP's region. An existing
-    // TZ from the host is respected.
-    // SAFETY: runs before any V8 isolate or worker thread starts, so the env is
+    // Pin the process timezone before JS Date/Intl reads it. QuickJS sources
+    // the zone for both Date (getTimezoneOffset, toString) and Intl.DateTimeFormat
+    // from TZ; left unset it defaults to UTC for Date while the page layer
+    // advertised a different zone, a cross-surface mismatch fingerprinting
+    // scripts flag. Default to Europe/Berlin; set TINYBROWSER_TIMEZONE to match
+    // the exit IP's region. An existing TZ from the host is respected.
+    // SAFETY: runs before any JS runtime or worker thread starts, so the env is
     // effectively single threaded here.
     if let Some(tz) = std::env::var("TINYBROWSER_TIMEZONE")
         .ok()
@@ -260,7 +241,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let global_proxy = args.proxy.clone();
-    let stealth = args.stealth;
 
     match args.command {
         Some(Command::Serve {
@@ -268,15 +248,13 @@ async fn main() -> anyhow::Result<()> {
             host,
             proxy,
             user_agent,
-            workers,
             max_connections,
             allow_file_access,
             storage_dir,
             quiet: _,
         }) => {
             // Fall back to TINYBROWSER_PROXY so a proxy can be supplied without
-            // putting credentials on the command line. The multi-worker load
-            // balancer passes the proxy to each worker this way (issue #366).
+            // putting credentials on the command line.
             let proxy = merge_proxy(global_proxy.clone(), proxy).or_else(|| {
                 std::env::var("TINYBROWSER_PROXY")
                     .ok()
@@ -292,32 +270,18 @@ async fn main() -> anyhow::Result<()> {
             if let Some(ref ua) = user_agent {
                 tracing::info!("User-Agent: {}", ua);
             }
-            if stealth {
-                #[cfg(feature = "stealth")]
-                tracing::info!(
-                    "Stealth mode enabled (TLS fingerprint impersonation + tracker blocking)"
-                );
-                #[cfg(not(feature = "stealth"))]
-                tracing::info!("Stealth mode enabled (tracker blocking)");
-            }
 
-            if workers > 1 {
-                tracing::info!("{} worker processes", workers);
-                run_multi_worker_serve(port, host, workers, proxy, stealth, user_agent).await?;
-            } else {
-                tinybrowser_cdp::start_with_serve_options_and_limit(
-                    port,
-                    &host,
-                    proxy,
-                    stealth,
-                    user_agent,
-                    allow_file_access,
-                    storage_dir,
-                    args.allow_private_network,
-                    max_connections,
-                )
-                .await?;
-            }
+            tinybrowser_cdp::start_with_serve_options_and_limit(
+                port,
+                &host,
+                proxy,
+                user_agent,
+                allow_file_access,
+                storage_dir,
+                args.allow_private_network,
+                max_connections,
+            )
+            .await?;
         }
         Some(Command::Fetch {
             url,
@@ -372,7 +336,6 @@ async fn main() -> anyhow::Result<()> {
                     timeout,
                     &wait_until,
                     user_agent,
-                    stealth,
                     eval,
                     output,
                     quiet,
@@ -388,141 +351,11 @@ async fn main() -> anyhow::Result<()> {
             if let Some(ref proxy) = args.proxy {
                 tracing::info!("Using proxy: {}", proxy);
             }
-            tinybrowser_cdp::start_with_options(args.port, args.proxy, stealth).await?;
+            tinybrowser_cdp::start_with_options(args.port, args.proxy).await?;
         }
     }
 
     Ok(())
-}
-
-async fn run_multi_worker_serve(
-    port: u16,
-    host: String,
-    workers: u16,
-    proxy: Option<String>,
-    stealth: bool,
-    user_agent: Option<String>,
-) -> anyhow::Result<()> {
-    use tokio::io::AsyncWriteExt as _;
-    use tokio::net::TcpListener;
-
-    let exe = std::env::current_exe()?;
-    let mut children = Vec::new();
-
-    for i in 0..workers {
-        let worker_port = port + 1 + i;
-        let mut cmd = std::process::Command::new(&exe);
-        cmd.arg("serve").arg("--port").arg(worker_port.to_string());
-        if let Some(ref p) = proxy {
-            // Pass the proxy (which may embed credentials) via the environment,
-            // not argv. A --proxy flag is visible in `ps`/`/proc/<pid>/cmdline`
-            // to any local user; TINYBROWSER_PROXY is only readable by the owner
-            // (issue #366). The worker's serve path reads this env as a fallback.
-            cmd.env("TINYBROWSER_PROXY", p);
-        }
-        if let Some(ref ua) = user_agent {
-            cmd.arg("--user-agent").arg(ua);
-        }
-        if stealth {
-            cmd.arg("--stealth");
-        }
-        cmd.stdout(std::process::Stdio::null());
-        cmd.stderr(std::process::Stdio::null());
-
-        let child = cmd.spawn()?;
-        tracing::info!("Worker {} on port {}", i + 1, worker_port);
-        children.push(child);
-    }
-
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-    // Bind the load balancer to the requested host, not hardcoded loopback.
-    // With --host 0.0.0.0 (e.g. in Docker) the single-worker path already binds
-    // all interfaces; the multi-worker balancer must too, or the mapped port is
-    // refused from outside the container (issue #336). Workers stay on loopback
-    // and are only reached by the balancer.
-    let listener = TcpListener::bind((host.as_str(), port)).await?;
-    tracing::info!("Load balancer on {}:{}, {} workers", host, port, workers);
-
-    let mut next_worker: u16 = 0;
-
-    loop {
-        let (client_stream, peer_addr) = listener.accept().await?;
-        let worker_port = port + 1 + (next_worker % workers);
-        next_worker = next_worker.wrapping_add(1);
-
-        tracing::debug!("Routing {} to worker port {}", peer_addr, worker_port);
-
-        let mut peek_buf = [0u8; 4];
-        client_stream.peek(&mut peek_buf).await?;
-
-        if &peek_buf == b"GET " {
-            let mut full_peek = [0u8; 256];
-            let n = client_stream.peek(&mut full_peek).await?;
-            let request_line = String::from_utf8_lossy(&full_peek[..n]);
-
-            if request_line.contains("/json") {
-                let worker_addr = format!("127.0.0.1:{}", worker_port);
-                match tokio::net::TcpStream::connect(&worker_addr).await {
-                    Ok(mut worker_stream) => {
-                        tokio::spawn(async move {
-                            let std_stream = match client_stream.into_std() {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    tracing::error!(
-                                        "/json: failed to convert client to std stream: {}",
-                                        e
-                                    );
-                                    return;
-                                }
-                            };
-                            let mut client = match tokio::net::TcpStream::from_std(std_stream) {
-                                Ok(c) => c,
-                                Err(e) => {
-                                    tracing::error!(
-                                        "/json: failed to recreate tokio TcpStream: {}",
-                                        e
-                                    );
-                                    return;
-                                }
-                            };
-                            let _ = tokio::io::copy_bidirectional(&mut client, &mut worker_stream)
-                                .await;
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!("/json worker {} unreachable: {}", worker_addr, e);
-                        tokio::spawn(async move {
-                            let mut s = client_stream;
-                            let _ = s
-                                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
-                                .await;
-                            let _ = s.shutdown().await;
-                        });
-                    }
-                }
-                continue;
-            }
-        }
-
-        let worker_addr = format!("127.0.0.1:{}", worker_port);
-        tokio::spawn(async move {
-            match tokio::net::TcpStream::connect(&worker_addr).await {
-                Ok(mut worker_stream) => {
-                    let mut client = client_stream;
-                    let _ = tokio::io::copy_bidirectional(&mut client, &mut worker_stream).await;
-                }
-                Err(e) => {
-                    tracing::warn!("worker {} unreachable: {}", worker_addr, e);
-                    let mut s = client_stream;
-                    let _ = s
-                        .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
-                        .await;
-                    let _ = s.shutdown().await;
-                }
-            }
-        });
-    }
 }
 
 async fn settle_page(page: &mut Page, wait_secs: u64, fixed: bool) {
@@ -547,7 +380,6 @@ async fn run_fetch(
     timeout_secs: u64,
     wait_until: &str,
     user_agent: Option<String>,
-    stealth: bool,
     eval: Option<String>,
     output: Option<std::path::PathBuf>,
     quiet: bool,
@@ -574,7 +406,6 @@ async fn run_fetch(
     let context = Arc::new(BrowserContext::with_storage_and_network(
         "fetch".to_string(),
         proxy,
-        stealth,
         user_agent.clone(),
         storage_dir.clone(),
         allow_private_network,
@@ -597,8 +428,8 @@ async fn run_fetch(
 
     // Process-level hard deadline. A synchronous hang inside a Rust op invoked
     // from page JS cannot be cancelled by tokio (there is no await to interrupt)
-    // nor by the V8 watchdog (terminate_execution only unwinds JS bytecode, not
-    // native Rust running beneath a V8->op call). As an absolute backstop so one
+    // nor by the JS watchdog (interrupt only stops JS bytecode, not
+    // native Rust running beneath a JS->op call). As an absolute backstop so one
     // fetch can never wedge the process, a daemon thread force-exits if the whole
     // operation overruns navigation + every configured settle pass + grace. A
     // normal fetch returns first and the process exits before this fires.
@@ -1519,7 +1350,6 @@ mod tests {
             tinybrowser_core::BrowserContext::with_storage_and_network(
                 "cli-timeout-test".to_string(),
                 None,
-                false,
                 None,
                 None,
                 true,

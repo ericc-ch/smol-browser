@@ -6,7 +6,6 @@ use std::sync::Arc;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use tinybrowser_dom::{DomTree, NodeData, NodeId};
 use tinybrowser_dom::tree::{AttachShadowError, ShadowRootMode};
-#[cfg(feature = "stealth")]
 use tinybrowser_net::StealthHttpClient;
 use tinybrowser_net::{
     CallbackRegistry, CookieJar, HttpClient, RequestInfo, ResourceType, Response,
@@ -94,7 +93,6 @@ pub struct RuntimeState {
     /// When set (stealth mode), scripted fetch()/XHR is routed through the wreq
     /// client so the request carries the Chrome TLS fingerprint and client
     /// hints instead of the rustls ClientHello op_fetch_url would otherwise send.
-    #[cfg(feature = "stealth")]
     pub stealth_client: Option<Arc<StealthHttpClient>>,
     pub pending_navigation: Option<(String, String, String)>,
     pub intercept_tx: Option<tokio::sync::mpsc::UnboundedSender<InterceptedRequest>>,
@@ -148,7 +146,6 @@ impl RuntimeState {
             cookie_jar: None,
             http_client: None,
             callbacks: None,
-            #[cfg(feature = "stealth")]
             stealth_client: None,
             pending_navigation: None,
             intercept_tx: None,
@@ -1367,7 +1364,7 @@ static FETCH_CLIENT_CACHE: std::sync::OnceLock<
     std::sync::RwLock<std::collections::HashMap<String, reqwest::Client>>,
 > = std::sync::OnceLock::new();
 
-/// Shared HTTP client cache for any code in obscura-js that needs a
+/// Shared HTTP client cache for any code in tinybrowser-js that needs a
 /// reqwest::Client (op_fetch_url for JS-side fetch/XHR, the ES module
 /// loader for dynamic imports). Keyed by proxy URL ("" = direct).
 /// One client per distinct proxy, reused for every request, so the
@@ -1498,7 +1495,6 @@ pub(crate) struct FetchJob {
     pub callbacks: Option<Arc<CallbackRegistry>>,
     pub in_flight: Option<Arc<std::sync::atomic::AtomicU32>>,
     pub page_in_flight: Arc<std::sync::atomic::AtomicU32>,
-    #[cfg(feature = "stealth")]
     pub stealth_client: Option<Arc<StealthHttpClient>>,
 }
 
@@ -1586,7 +1582,6 @@ pub(crate) fn start_fetch(
         intercept,
         callbacks: gs.callbacks.clone(),
         http_client: gs.http_client.clone(),
-        #[cfg(feature = "stealth")]
         stealth_client: gs.stealth_client.clone(),
         url,
         method,
@@ -1656,7 +1651,6 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
         callbacks,
         in_flight,
         page_in_flight,
-        #[cfg(feature = "stealth")]
         stealth_client,
     } = job;
     let proxy_url = http_client
@@ -1857,9 +1851,8 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
     // Stealth mode: route scripted requests through wreq after the CORS
     // preflight. stealth_fetch_all applies the credentials decision to each
     // redirect hop without losing the Chrome TLS/client-hint transport.
-    #[cfg(feature = "stealth")]
     if let Some(stealth) = stealth_client {
-        let json = stealth_fetch_all(
+        return stealth_fetch_all(
             stealth,
             url.clone(),
             req_method.as_str().to_string(),
@@ -1872,10 +1865,7 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
             allow_private_network,
         )
         .await
-        .map_err(|e| e.to_string())?;
-        let parsed: serde_json::Value =
-            serde_json::from_str(&json).unwrap_or_else(|_| serde_json::Value::String(json));
-        return Ok(json_outcome(parsed));
+        .map_err(|e| e.to_string());
     }
 
     // Follow redirects manually so the SSRF policy applies to every hop.
@@ -2120,12 +2110,10 @@ fn fetch_response(
 }
 
 /// Stealth-mode scripted fetch()/XHR: mirrors op_fetch_url's redirect, SSRF,
-/// and CORS semantics but sends every hop through the wreq stealth client so
-/// the request carries the Chrome TLS fingerprint and client hints. Cookie
-/// handling lives inside StealthHttpClient::send_single, which shares the
-/// context jar. Response bodies are not mirrored into the CDP
-/// Network.getResponseBody buffer here; that is a follow-up for stealth fetches.
-#[cfg(feature = "stealth")]
+/// CORS, and CDP Network-event semantics but sends every hop through the wreq
+/// stealth client so the request carries the Chrome TLS fingerprint and client
+/// hints. Cookie handling lives inside StealthHttpClient::send_single, which
+/// shares the context jar.
 async fn stealth_fetch_all(
     stealth: Arc<StealthHttpClient>,
     url: String,
@@ -2137,8 +2125,9 @@ async fn stealth_fetch_all(
     credentials: FetchCredentials,
     callbacks: Option<Arc<CallbackRegistry>>,
     allow_private_network: bool,
-) -> Result<String, deno_error::JsErrorBox> {
+) -> Result<FetchOutcome, deno_error::JsErrorBox> {
     let mut current_url = url.clone();
+    let original_method = method.clone();
     let mut current_method = method;
     let mut current_body = body;
     let mut redirects_followed: usize = 0;
@@ -2147,10 +2136,9 @@ async fn stealth_fetch_all(
         let parsed_current = match url::Url::parse(&current_url) {
             Ok(u) => u,
             Err(_) => {
-                return Ok(serde_json::json!({
+                return Ok(json_outcome(serde_json::json!({
                     "status": 0, "body": "", "url": current_url, "headers": {},
-                })
-                .to_string());
+                })));
             }
         };
 
@@ -2189,21 +2177,19 @@ async fn stealth_fetch_all(
         // Re-validate every redirect target against the SSRF policy, matching
         // op_fetch_url (GHSA-8v6v-g4rh-jmcm).
         if let Err(reason) = validate_fetch_url(&next_url, allow_private_network) {
-            return Ok(serde_json::json!({
+            return Ok(json_outcome(serde_json::json!({
                 "status": 0, "body": "", "url": next_url.to_string(), "headers": {},
                 "blocked": true,
                 "error": format!("Redirect to forbidden URL blocked: {}", reason),
-            })
-            .to_string());
+            })));
         }
         redirects_followed += 1;
         if redirects_followed > FETCH_REDIRECT_LIMIT {
-            return Ok(serde_json::json!({
+            return Ok(json_outcome(serde_json::json!({
                 "status": 0, "body": "", "url": next_url.to_string(), "headers": {},
                 "blocked": true,
                 "error": format!("Too many redirects (>{})", FETCH_REDIRECT_LIMIT),
-            })
-            .to_string());
+            })));
         }
         // Browser semantics: 301/302/303 downgrade to GET with no body.
         if r.status == 301 || r.status == 302 || r.status == 303 {
@@ -2226,7 +2212,7 @@ async fn stealth_fetch_all(
             .map(|s| s.as_str())
             .unwrap_or("");
         if !cors_response_allows(credentials, &page_origin, allowed, allow_credentials) {
-            return Ok(serde_json::json!({
+            return Ok(json_outcome(serde_json::json!({
                 "status": 0, "body": "", "url": url, "headers": {},
                 "corsBlocked": true,
                 "corsError": if credentials == FetchCredentials::Include {
@@ -2240,8 +2226,7 @@ async fn stealth_fetch_all(
                         page_origin, allowed
                     )
                 },
-            })
-            .to_string());
+            })));
         }
     }
 
@@ -2260,14 +2245,23 @@ async fn stealth_fetch_all(
         }
     }
 
-    Ok(serde_json::json!({
-        "status": status,
-        "body": resp_body,
-        "bodyBase64": resp_body_base64,
-        "url": url,
-        "headers": resp_headers,
+    Ok(FetchOutcome {
+        json: serde_json::json!({
+            "status": status,
+            "body": resp_body,
+            "bodyBase64": resp_body_base64,
+            "url": url,
+            "headers": resp_headers,
+        }),
+        store: Some(FetchStore {
+            body: resp_body,
+            body_len: resp_bytes.len(),
+            url,
+            method: original_method,
+            status,
+            response_headers: resp_headers,
+        }),
     })
-    .to_string())
 }
 
 fn glob_match(pattern: &str, url: &str) -> bool {

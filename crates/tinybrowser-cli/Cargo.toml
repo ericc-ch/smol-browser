@@ -7,16 +7,11 @@ edition.workspace = true
 name = "tinybrowser"
 path = "src/main.rs"
 
-[features]
-default = []
-stealth = ["tinybrowser-core/stealth", "tinybrowser-net/stealth"]
-
 [dependencies]
 tinybrowser-core = { workspace = true }
 tinybrowser-cdp = { workspace = true }
 tinybrowser-dom = { workspace = true }
 tinybrowser-net = { workspace = true }
-tinybrowser-js = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

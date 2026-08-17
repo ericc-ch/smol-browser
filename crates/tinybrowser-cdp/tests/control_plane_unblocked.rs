@@ -1,5 +1,5 @@
 //! Issue #62 regression test: `/json/version` (HTTP control plane) must
-//! respond promptly even while V8 JS evaluation blocks the LocalSet thread.
+//! respond promptly even while JS evaluation blocks the LocalSet thread.
 //!
 //! Before the fix, the HTTP accept loop competed with the CDP processor on
 //! the same `LocalSet`, so a synchronous JS `while` loop starved every other

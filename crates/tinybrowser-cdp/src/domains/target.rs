@@ -81,7 +81,7 @@ pub async fn handle(
             // bypassing the page-domain check entirely.
             if url_is_file_scheme(url) && !context.allow_file_access {
                 return Err(
-                    "Target.createTarget to file:// is disabled. Restart with `obscura serve --allow-file-access` to enable.".to_string()
+                    "Target.createTarget to file:// is disabled. Restart with `tinybrowser serve --allow-file-access` to enable.".to_string()
                 );
             }
 
@@ -225,7 +225,7 @@ pub async fn handle(
             Ok(json!({ "success": true }))
         }
         "setAutoAttach" => Ok(json!({})),
-        // No multi-target lifecycle to manage: obscura runs one page per session.
+        // No multi-target lifecycle to manage: tinybrowser runs one page per session.
         // Ack these so Chrome-shaped clients that call them do not warn (issue #340).
         "detachFromTarget" => {
             if let Some(session_id) = params.get("sessionId").and_then(Value::as_str) {

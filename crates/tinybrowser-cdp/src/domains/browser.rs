@@ -12,25 +12,38 @@ pub async fn handle(method: &str, _params: &Value) -> Result<Value, String> {
         "close" => {
             Ok(json!({}))
         }
-        "getWindowForTarget" => Ok(json!({
-            "windowId": 1,
-            "bounds": {
-                "left": 0,
-                "top": 0,
-                "width": 1280,
-                "height": 720,
-                "windowState": "normal",
-            }
-        })),
-        "setDownloadBehavior" => Ok(json!({})),
-        "getWindowBounds" => Ok(json!({
-            "bounds": { "left": 0, "top": 0, "width": 1280, "height": 720, "windowState": "normal" }
-        })),
-        // No-op acks for window-management methods Playwright sends during
-        // page setup. We don't model real OS windows, but answering with {}
-        // lets the client's setup sequence complete instead of tearing down
-        // the page on an unknown-method error.
-        "setWindowBounds" => Ok(json!({})),
+        "getWindowForTarget" => Err(crate::util::cdp_unimplemented("Browser.getWindowForTarget")),
+        "setDownloadBehavior" => Err(crate::util::cdp_unimplemented("Browser.setDownloadBehavior")),
+        "getWindowBounds" => Err(crate::util::cdp_unimplemented("Browser.getWindowBounds")),
+        "setWindowBounds" => Err(crate::util::cdp_unimplemented("Browser.setWindowBounds")),
         _ => Err(format!("Unknown Browser method: {}", method)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn window_and_download_stubs_are_explicit_unimplemented() {
+        for method in [
+            "getWindowForTarget",
+            "getWindowBounds",
+            "setWindowBounds",
+            "setDownloadBehavior",
+        ] {
+            let err = handle(method, &json!({}))
+                .await
+                .expect_err("no-op stubs must error");
+            assert!(
+                err.contains("not implemented by tinybrowser"),
+                "{method} must say unimplemented: {err}"
+            );
+            assert!(
+                err.contains(&format!("Browser.{method}")),
+                "{method} error must name the CDP method: {err}"
+            );
+        }
     }
 }

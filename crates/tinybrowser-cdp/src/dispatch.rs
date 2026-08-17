@@ -25,14 +25,14 @@ pub struct CdpContext {
     pub preload_scripts: Vec<(String, String)>, // (identifier, source)
     pub preload_counter: u32,
     // World names registered via Page.createIsolatedWorld. After every
-    // navigation Obscura clears execution contexts (via
+    // navigation tinybrowser clears execution contexts (via
     // Runtime.executionContextsCleared) and must re-emit a
     // Runtime.executionContextCreated for each registered world, otherwise
     // Playwright/Puppeteer hang waiting for their utility world to come
     // back. Stored as plain Strings (not by-page) — for now we only model
     // a single page in CdpContext anyway.
     pub isolated_worlds: Vec<String>,
-    // Set of executionContextIds Obscura has emitted via
+    // Set of executionContextIds tinybrowser has emitted via
     // Runtime.executionContextCreated. Pre-populated with the default-frame
     // contexts (`1`, `2`) that Runtime.enable / Page.navigate emit, then
     // extended each time Page.createIsolatedWorld assigns a fresh id.
@@ -58,53 +58,47 @@ pub struct CdpContext {
     // caps how many bodies (and how many bytes) can be held at once, evicting
     // the oldest, so an abandoned or disconnected stream cannot leak unbounded.
     pub io_streams: crate::domains::io::IoStreamStore,
-    /// Serializes V8 work within THIS connection. With the thread-per-connection
-    /// server (#430) each connection runs on its own OS thread, so isolates never
+    /// Serializes JS work within THIS connection. With the thread-per-connection
+    /// server (#430) each connection runs on its own OS thread, so runtimes never
     /// collide across connections; this per-connection lock keeps a connection's
     /// own nav task and command dispatch from interleaving two of its pages'
     /// isolates on that one thread. It is deliberately per-connection, not a
     /// process-wide lock, so connections run in parallel (measured ~2x at
-    /// concurrency 2, ~3x at 4) instead of serializing all V8 on one mutex.
+    /// concurrency 2, ~3x at 4) instead of serializing all JS on one mutex.
     pub js_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl CdpContext {
     pub fn new() -> Self {
-        Self::new_with_options(None, false)
+        Self::new_with_options(None)
     }
 
     pub fn new_with_proxy(proxy: Option<String>) -> Self {
-        Self::new_with_options(proxy, false)
+        Self::new_with_options(proxy)
     }
 
-    pub fn new_with_options(proxy: Option<String>, stealth: bool) -> Self {
-        Self::new_with_full_options(proxy, stealth, None)
+    pub fn new_with_options(proxy: Option<String>) -> Self {
+        Self::new_with_full_options(proxy, None)
     }
 
-    pub fn new_with_full_options(
-        proxy: Option<String>,
-        stealth: bool,
-        user_agent: Option<String>,
-    ) -> Self {
-        Self::new_with_security(proxy, stealth, user_agent, false)
+    pub fn new_with_full_options(proxy: Option<String>, user_agent: Option<String>) -> Self {
+        Self::new_with_security(proxy, user_agent, false)
     }
 
     pub fn new_with_storage(
         proxy: Option<String>,
-        stealth: bool,
         user_agent: Option<String>,
         storage_dir: Option<std::path::PathBuf>,
     ) -> Self {
-        Self::_new_inner(proxy, stealth, user_agent, storage_dir, false, false)
+        Self::_new_inner(proxy, user_agent, storage_dir, false, false)
     }
 
     pub fn new_with_security(
         proxy: Option<String>,
-        stealth: bool,
         user_agent: Option<String>,
         allow_file_access: bool,
     ) -> Self {
-        Self::_new_inner(proxy, stealth, user_agent, None, allow_file_access, false)
+        Self::_new_inner(proxy, user_agent, None, allow_file_access, false)
     }
 
     /// Build a CDP context around an already-constructed default browser
@@ -143,7 +137,6 @@ impl CdpContext {
 
     fn _new_inner(
         proxy: Option<String>,
-        stealth: bool,
         user_agent: Option<String>,
         storage_dir: Option<std::path::PathBuf>,
         allow_file_access: bool,
@@ -152,7 +145,6 @@ impl CdpContext {
         let mut ctx = BrowserContext::with_storage_and_network(
             "default".to_string(),
             proxy,
-            stealth,
             user_agent,
             storage_dir,
             allow_private_network,
@@ -282,7 +274,7 @@ impl CdpContext {
     }
 }
 
-/// Whether a CDP method can be served WITHOUT acquiring the per-connection V8 lock.
+/// Whether a CDP method can be served WITHOUT acquiring the per-connection JS lock.
 ///
 /// Methods listed here were audited to confirm they do not transitively
 /// call into a `JsRuntime`. They either don't touch any `Page` at all, or
@@ -357,44 +349,42 @@ fn is_js_free_method(method: &str) -> bool {
 pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
     // headless_chrome (and older Puppeteer) wrap every CDP call inside
     // Target.sendMessageToTarget. Unwrap and recurse BEFORE acquiring the
-    // per-connection V8 lock — the recursive dispatch will acquire it for the
+    // per-connection JS lock — the recursive dispatch will acquire it for the
     // inner call, and tokio Mutex is not reentrant.
     if req.method == "Target.sendMessageToTarget" {
         return dispatch_send_message_to_target(req, ctx).await;
     }
 
-    // Issue #430: keep this connection's V8 work serialized on its own thread.
+    // Issue #430: keep this connection's JS work serialized on its own thread.
     //
-    // Every CDP handler below may call into a per-Page `JsRuntime` (each owning
-    // its own V8 Isolate). With the thread-per-connection server each connection
-    // runs on its own OS thread, so isolates never collide across connections.
-    // Within one connection, though, a nav task spawned by
-    // `process_with_interception` runs while this processor keeps pumping other
-    // CDP messages, so two of this connection's pages could still interleave V8
-    // work on this one thread and trip
-    // `heap->isolate() == Isolate::TryGetCurrent()`. The per-connection lock
-    // (`ctx.js_lock`) keeps each handler contiguous: V8 fully exits one Isolate
-    // before the next of this connection's pages is allowed in. It is
-    // per-connection, not process-wide, so other connections run in parallel.
+    // Every CDP handler below may call into a per-Page `JsRuntime`. With the
+    // thread-per-connection server each connection runs on its own OS thread,
+    // so runtimes never collide across connections. Within one connection,
+    // though, a nav task spawned by `process_with_interception` runs while
+    // this processor keeps pumping other CDP messages, so two of this
+    // connection's pages could still interleave JS work on this one thread.
+    // The per-connection lock (`ctx.js_lock`) keeps each handler contiguous.
+    // It is per-connection, not process-wide, so other connections run in
+    // parallel.
     //
-    // Optimization: methods that demonstrably never touch V8 bypass the lock
+    // Optimization: methods that demonstrably never touch JS bypass the lock
     // (Puppeteer's newPage() setup issues ~8 such calls). Each listed method was
     // audited to confirm it never reaches `JsRuntime::execute_script` or DOM
-    // mutation that re-enters V8; `get_session_page_mut` (which can trigger
-    // `suspend_js`/`resume_js`) is NOT in the list.
+    // mutation that re-enters the runtime; `get_session_page_mut` (which can
+    // trigger `suspend_js`/`resume_js`) is NOT in the list.
     let _js_guard = if is_js_free_method(&req.method) {
         None
     } else {
         // Per-connection lock (owned guard, so it does not borrow `ctx`): keeps
-        // this connection's own V8 work contiguous on its thread without
+        // this connection's own JS work contiguous on its thread without
         // serializing other connections (#430).
         Some(ctx.js_lock.clone().lock_owned().await)
     };
 
-    // Per-command V8 watchdog. The lock above keeps each handler contiguous on
+    // Per-command JS watchdog. The lock above keeps each handler contiguous on
     // the thread, but it does not bound how long a handler runs: a hung page (a
     // runaway Runtime.evaluate, a synchronous DOM op) would hold this
-    // connection's V8 lock and wedge its other sessions forever. The one-shot
+    // connection's JS lock and wedge its other sessions forever. The one-shot
     // CLI uses a process-level hard deadline for this; the long-running server
     // cannot force-exit, so we terminate just the offending isolate instead.
     // TINYBROWSER_CDP_COMMAND_TIMEOUT_MS tunes the bound (0 disables); the default
@@ -441,30 +431,28 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
         "Input" => domains::input::handle(method, &req.params, ctx, &req.session_id).await,
         "Emulation" => domains::emulation::handle(method, &req.params, ctx, &req.session_id).await,
         "Storage" => domains::storage::handle(method, &req.params, ctx, &req.session_id).await,
-        "LP" => domains::lp::handle(method, &req.params, ctx, &req.session_id).await,
         "Accessibility" => {
             domains::accessibility::handle(method, &req.params, ctx, &req.session_id).await
         }
-        // Accepted but no-op. Puppeteer's FrameManager.initialize calls
-        // Audits.enable on connect — refusing it breaks puppeteer.connect()
-        // before any user code runs.
         "Log" | "Performance" | "Security" | "CSS" | "ServiceWorker" | "Inspector" | "Debugger"
-        | "Profiler" | "HeapProfiler" | "Overlay" | "Audits" => Ok(json!({})),
+        | "Profiler" | "HeapProfiler" | "Overlay" | "Audits" => {
+            Err(crate::util::cdp_unimplemented(&req.method))
+        }
         _ => Err(format!("Unknown domain: {}", domain)),
     };
 
-    // Stop the per-command watchdog. If it fired (the handler held V8 past the
-    // budget), V8 is left in a terminating state, so clear that flag before the
+    // Stop the per-command watchdog. If it fired (the handler held JS past the
+    // budget), the runtime is left terminating, so clear that flag before the
     // next command runs on this page.
     if let Some(wd) = cmd_watchdog {
         if tinybrowser_js::cdp_watchdog::disarm(wd) {
             tracing::warn!(
-                "CDP command {} held V8 past {}ms; terminated the isolate to free the dispatcher",
+                "CDP command {} held JS past {}ms; terminated the isolate to free the dispatcher",
                 req.method,
                 cmd_budget_ms
             );
             if let Some(page) = ctx.get_session_page_mut(&req.session_id) {
-                page.cancel_v8_termination();
+                page.cancel_js_termination();
             }
         }
     }
@@ -484,7 +472,7 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
 // page JS invokes a `Runtime.addBinding` shim) and turn each entry into a
 // Runtime.bindingCalled CDP event that the writer task forwards to the
 // connected client. Called after every dispatch — binding calls only land
-// in the queue while V8 is running inside a CDP handler, so there is no
+// in the queue while JS is running inside a CDP handler, so there is no
 // window in which they could pile up without a draining opportunity.
 pub(crate) fn drain_binding_calls(ctx: &mut CdpContext) {
     // page_id -> session_id (any one session that holds this page).
@@ -595,16 +583,42 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn audits_enable_returns_empty_success() {
-        let mut ctx = CdpContext::new();
-        let resp = dispatch(&req("Audits.enable"), &mut ctx).await;
+    fn assert_unimplemented(resp: &CdpResponse, method: &str) {
+        let err = resp
+            .error
+            .as_ref()
+            .unwrap_or_else(|| panic!("{method} must error, got success: {:?}", resp.result));
+        assert_eq!(err.code, -32601);
         assert!(
-            resp.error.is_none(),
-            "Audits.enable should not error: {:?}",
-            resp.error
+            err.message.contains("not implemented by tinybrowser"),
+            "{method} must say it is unimplemented: {}",
+            err.message
         );
-        assert_eq!(resp.result, Some(json!({})));
+        assert!(
+            err.message.contains(method),
+            "{method} error must name the method: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn stub_domains_return_explicit_unimplemented_errors() {
+        let mut ctx = CdpContext::new();
+        for method in [
+            "Audits.enable",
+            "Profiler.enable",
+            "HeapProfiler.enable",
+            "Overlay.enable",
+            "Log.enable",
+            "Performance.enable",
+            "Security.enable",
+            "CSS.enable",
+            "ServiceWorker.enable",
+            "Inspector.enable",
+            "Debugger.enable",
+        ] {
+            assert_unimplemented(&dispatch(&req(method), &mut ctx).await, method);
+        }
     }
 
     #[tokio::test]

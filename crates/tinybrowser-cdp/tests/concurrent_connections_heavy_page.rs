@@ -196,7 +196,7 @@ async fn one_client(ws_port: u16, page_url: String, id_base: u64) -> Result<(), 
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn concurrent_connections_heavy_page_do_not_abort_v8() {
+async fn concurrent_connections_heavy_page_do_not_abort_js() {
     let ws_port = pick_port().await;
     // Bind the fixture listener up front so we can hand its port to the clients.
     let fixture = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -216,7 +216,6 @@ async fn concurrent_connections_heavy_page_do_not_abort_v8() {
                     ws_port,
                     "127.0.0.1",
                     None,
-                    false,
                     None,
                     false,
                     None,

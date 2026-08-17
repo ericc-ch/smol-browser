@@ -40,7 +40,7 @@ pub async fn handle(
                 .unwrap_or_default();
             Ok(json!({ "nodes": nodes }))
         }
-        _ => Ok(json!({})),
+        _ => Err(format!("Unknown Accessibility method: {}", method)),
     }
 }
 

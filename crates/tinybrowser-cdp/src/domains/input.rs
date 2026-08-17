@@ -343,8 +343,34 @@ pub async fn handle(
 
             Ok(json!({}))
         }
-        "dispatchTouchEvent" => Ok(json!({})),
-        "setIgnoreInputEvents" => Ok(json!({})),
+        "dispatchTouchEvent" => Err(crate::util::cdp_unimplemented("Input.dispatchTouchEvent")),
+        "setIgnoreInputEvents" => {
+            Err(crate::util::cdp_unimplemented("Input.setIgnoreInputEvents"))
+        }
         _ => Err(format!("Unknown Input method: {}", method)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn touch_and_ignore_input_stubs_are_explicit_unimplemented() {
+        let mut ctx = CdpContext::new();
+        for method in ["dispatchTouchEvent", "setIgnoreInputEvents"] {
+            let err = handle(method, &json!({}), &mut ctx, &None)
+                .await
+                .expect_err("no-op stubs must error");
+            assert!(
+                err.contains("not implemented by tinybrowser"),
+                "{method} must say unimplemented: {err}"
+            );
+            assert!(
+                err.contains(&format!("Input.{method}")),
+                "{method} error must name the CDP method: {err}"
+            );
+        }
     }
 }

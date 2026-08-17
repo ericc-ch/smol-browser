@@ -5,6 +5,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         perl \
         make \
+        cmake \
+        clang \
+        libclang-dev \
+        llvm-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build

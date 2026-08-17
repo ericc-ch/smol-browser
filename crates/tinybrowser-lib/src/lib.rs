@@ -6,7 +6,6 @@
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let browser = Browser::builder()
-//!         .stealth(true)
 //!         .build()?;
 //!     let mut page = browser.new_page().await?;
 //!     page.goto("https://example.com").await?;

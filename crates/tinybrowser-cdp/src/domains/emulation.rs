@@ -121,10 +121,10 @@ pub async fn handle(
             page.set_default_background_color_override(color);
             Ok(json!({}))
         }
-        // Touch emulation does not affect layout yet, but acknowledging it is
-        // compatible with clients that pair it with a metrics override.
-        "setTouchEmulationEnabled" => Ok(json!({})),
-        _ => Ok(json!({})),
+        "setTouchEmulationEnabled" => {
+            Err(crate::util::cdp_unimplemented("Emulation.setTouchEmulationEnabled"))
+        }
+        _ => Err(format!("Unknown Emulation method: {}", method)),
     }
 }
 
@@ -452,5 +452,21 @@ mod tests {
                 "must reject {params}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn touch_emulation_stub_is_explicit_unimplemented() {
+        let mut ctx = CdpContext::new();
+        let err = handle("setTouchEmulationEnabled", &json!({}), &mut ctx, &None)
+            .await
+            .expect_err("no-op stubs must error");
+        assert!(
+            err.contains("not implemented by tinybrowser"),
+            "must say unimplemented: {err}"
+        );
+        assert!(
+            err.contains("Emulation.setTouchEmulationEnabled"),
+            "error must name the CDP method: {err}"
+        );
     }
 }

@@ -3,10 +3,6 @@ name = "tinybrowser-core"
 version.workspace = true
 edition.workspace = true
 
-[features]
-default = []
-stealth = ["tinybrowser-net/stealth", "tinybrowser-js/stealth"]
-
 [dependencies]
 tinybrowser-dom = { workspace = true }
 tinybrowser-net = { workspace = true }

@@ -14,7 +14,6 @@ pub struct BrowserContext {
     pub proxy_url: Option<String>,
     pub robots_cache: Arc<RobotsCache>,
     pub obey_robots: bool,
-    pub stealth: bool,
     /// When true, CDP-driven navigation to file:// URLs is permitted.
     /// Default is false: a remote CDP client cannot point the browser
     /// at /etc/shadow even if tinybrowser is running as a privileged user.
@@ -34,7 +33,7 @@ pub struct BrowserContext {
 
 impl BrowserContext {
     pub fn new(id: String) -> Self {
-        Self::_new_inner(id, None, false, None, None, false)
+        Self::_new_inner(id, None, None, None, false)
     }
 
     /// Create a BrowserContext with an optional storage directory.
@@ -44,18 +43,17 @@ impl BrowserContext {
         id: String,
         storage_dir: Option<PathBuf>,
     ) -> Self {
-        Self::_new_inner(id, None, false, None, storage_dir, false)
+        Self::_new_inner(id, None, None, storage_dir, false)
     }
 
     /// Create a BrowserContext with full options including storage_dir.
     pub fn with_storage_full(
         id: String,
         proxy_url: Option<String>,
-        stealth: bool,
         user_agent: Option<String>,
         storage_dir: Option<PathBuf>,
     ) -> Self {
-        Self::_new_inner(id, proxy_url, stealth, user_agent, storage_dir, false)
+        Self::_new_inner(id, proxy_url, user_agent, storage_dir, false)
     }
 
     /// Variant that also accepts the `allow_private_network` opt-in. All
@@ -64,18 +62,16 @@ impl BrowserContext {
     pub fn with_storage_and_network(
         id: String,
         proxy_url: Option<String>,
-        stealth: bool,
         user_agent: Option<String>,
         storage_dir: Option<PathBuf>,
         allow_private_network: bool,
     ) -> Self {
-        Self::_new_inner(id, proxy_url, stealth, user_agent, storage_dir, allow_private_network)
+        Self::_new_inner(id, proxy_url, user_agent, storage_dir, allow_private_network)
     }
 
     fn _new_inner(
         id: String,
         proxy_url: Option<String>,
-        stealth: bool,
         user_agent: Option<String>,
         storage_dir: Option<PathBuf>,
         allow_private_network: bool,
@@ -103,9 +99,7 @@ impl BrowserContext {
             proxy_url.as_deref(),
             allow_private_network,
         );
-        if stealth {
-            client.block_trackers = true;
-        }
+        client.block_trackers = true;
         let profile = crate::profiles::select_profile();
         let resolved_ua = user_agent.unwrap_or_else(|| profile.user_agent.to_string());
         let platform = profile.platform.to_string();
@@ -129,28 +123,26 @@ impl BrowserContext {
             proxy_url,
             robots_cache: Arc::new(RobotsCache::new()),
             obey_robots: false,
-            stealth,
             allow_file_access: false,
             storage_dir,
             allow_private_network,
         }
     }
 
-    pub fn with_options(id: String, proxy_url: Option<String>, stealth: bool) -> Self {
-        Self::with_full_options(id, proxy_url, stealth, None)
+    pub fn with_options(id: String, proxy_url: Option<String>) -> Self {
+        Self::with_full_options(id, proxy_url, None)
     }
 
     pub fn with_full_options(
         id: String,
         proxy_url: Option<String>,
-        stealth: bool,
         user_agent: Option<String>,
     ) -> Self {
-        Self::_new_inner(id, proxy_url, stealth, user_agent, None, false)
+        Self::_new_inner(id, proxy_url, user_agent, None, false)
     }
 
     pub fn with_proxy(id: String, proxy_url: Option<String>) -> Self {
-        Self::with_options(id, proxy_url, false)
+        Self::with_options(id, proxy_url)
     }
 
     /// Create a context with the same browser configuration but independent
@@ -168,9 +160,7 @@ impl BrowserContext {
             self.proxy_url.as_deref(),
             self.allow_private_network,
         );
-        if self.stealth {
-            client.block_trackers = true;
-        }
+        client.block_trackers = true;
         if let Ok(mut guard) = client.user_agent.try_write() {
             *guard = self.user_agent.clone();
         }
@@ -186,7 +176,6 @@ impl BrowserContext {
             proxy_url: self.proxy_url.clone(),
             robots_cache: Arc::new(RobotsCache::new()),
             obey_robots: self.obey_robots,
-            stealth: self.stealth,
             allow_file_access: self.allow_file_access,
             storage_dir: persistent.then(|| self.storage_dir.clone()).flatten(),
             allow_private_network: self.allow_private_network,
@@ -217,7 +206,6 @@ mod tests {
         let ctx = BrowserContext::with_full_options(
             "test".to_string(),
             None,
-            false,
             Some("Custom-UA/1.0".to_string()),
         );
         assert_eq!(ctx.user_agent, "Custom-UA/1.0");
@@ -230,7 +218,6 @@ mod tests {
         let ctx = BrowserContext::with_full_options(
             "test".to_string(),
             None,
-            false,
             None,
         );
         assert!(ctx.user_agent.contains("Chrome"));
@@ -241,7 +228,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn with_options_keeps_default_user_agent() {
-        let ctx = BrowserContext::with_options("test".to_string(), None, false);
+        let ctx = BrowserContext::with_options("test".to_string(), None);
         assert!(ctx.user_agent.contains("Chrome"));
     }
 
@@ -250,7 +237,6 @@ mod tests {
         let source = BrowserContext::with_full_options(
             "source".to_string(),
             None,
-            false,
             Some("Template-UA/1.0".to_string()),
         );
         source.cookie_jar.set_cookie("sid=source", &url::Url::parse("https://example.com").unwrap());

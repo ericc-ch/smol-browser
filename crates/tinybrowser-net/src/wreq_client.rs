@@ -1,22 +1,13 @@
-#[cfg(feature = "stealth")]
 use std::collections::HashMap;
-#[cfg(feature = "stealth")]
 use std::error::Error;
-#[cfg(feature = "stealth")]
 use std::sync::Arc;
-#[cfg(feature = "stealth")]
 use std::time::Duration;
 
-#[cfg(feature = "stealth")]
 use futures_util::StreamExt;
-#[cfg(feature = "stealth")]
 use tokio::sync::RwLock;
-#[cfg(feature = "stealth")]
 use url::Url;
 
-#[cfg(feature = "stealth")]
 use crate::cookies::CookieJar;
-#[cfg(feature = "stealth")]
 use crate::client::{
     CallbackRegistry, InFlightGuard, NetError, RequestInfo, RequestMode,
     ResourceRequest, Response, cors_required, fetch_file_url, redirect_taints_origin,
@@ -24,7 +15,6 @@ use crate::client::{
     validate_cors_response, validate_request_mode, validate_url,
 };
 
-#[cfg(feature = "stealth")]
 pub const STEALTH_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
 
@@ -32,14 +22,10 @@ pub const STEALTH_USER_AGENT: &str =
 // UA and sec-ch-ua-platform "Windows" on the wire. navigator has to report the
 // same identity, otherwise the TLS/HTTP layer and the JS layer disagree and a
 // site cross-checks the mismatch as a bot signal.
-#[cfg(feature = "stealth")]
 pub const STEALTH_NAVIGATOR_PLATFORM: &str = "Win32";
-#[cfg(feature = "stealth")]
 pub const STEALTH_UA_PLATFORM: &str = "Windows";
-#[cfg(feature = "stealth")]
 pub const STEALTH_UA_PLATFORM_VERSION: &str = "15.0.0";
 
-#[cfg(feature = "stealth")]
 fn wreq_response_header_value<'a>(
     headers: &'a wreq::header::HeaderMap,
     name: &'static str,
@@ -60,7 +46,6 @@ fn wreq_response_header_value<'a>(
     })
 }
 
-#[cfg(feature = "stealth")]
 fn validate_wreq_cors_response(
     request: &ResourceRequest,
     target: &Url,
@@ -83,7 +68,6 @@ fn validate_wreq_cors_response(
     )
 }
 
-#[cfg(feature = "stealth")]
 async fn read_wreq_body_limited(
     response: wreq::Response,
     url: &Url,
@@ -119,21 +103,28 @@ async fn read_wreq_body_limited(
     Ok(body)
 }
 
-#[cfg(feature = "stealth")]
 pub struct StealthHttpClient {
     client: wreq::Client,
     pub cookie_jar: Arc<CookieJar>,
     pub extra_headers: RwLock<HashMap<String, String>>,
     pub in_flight: Arc<std::sync::atomic::AtomicU32>,
+    pub allow_private_network: bool,
 }
 
-#[cfg(feature = "stealth")]
 impl StealthHttpClient {
     pub fn new(cookie_jar: Arc<CookieJar>) -> Self {
         Self::with_proxy(cookie_jar, None)
     }
 
     pub fn with_proxy(cookie_jar: Arc<CookieJar>, proxy_url: Option<&str>) -> Self {
+        Self::with_full_options(cookie_jar, proxy_url, false)
+    }
+
+    pub fn with_full_options(
+        cookie_jar: Arc<CookieJar>,
+        proxy_url: Option<&str>,
+        allow_private_network: bool,
+    ) -> Self {
         let emulation_opts = wreq_util::Emulation::builder()
             .profile(wreq_util::Profile::Chrome145)
             .platform(wreq_util::Platform::Windows)
@@ -150,7 +141,7 @@ impl StealthHttpClient {
         // feeds `add_root_certificate`, so a private CA works there. This client did not, which
         // made the *better-fingerprinted* transport the only one unable to reach hosts behind a
         // private/national CA (measured against a Brazilian government portal whose leaf is
-        // issued by an ICP-Brasil intermediate: `--stealth` failed with CERTIFICATE_VERIFY_FAILED
+        // issued by an ICP-Brasil intermediate: stealth fetches failed with CERTIFICATE_VERIFY_FAILED
         // while the reqwest path, with SSL_CERT_FILE set, completed the handshake).
         //
         // Two deliberate constraints:
@@ -191,6 +182,7 @@ impl StealthHttpClient {
             cookie_jar,
             extra_headers: RwLock::new(HashMap::new()),
             in_flight: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            allow_private_network,
         }
     }
 
@@ -222,7 +214,7 @@ impl StealthHttpClient {
         request: ResourceRequest,
         callbacks: Option<&CallbackRegistry>,
     ) -> Result<Response, NetError> {
-        validate_url(url, false)?;
+        validate_url(url, self.allow_private_network)?;
         validate_request_mode(&request, url)?;
         if url.scheme() == "file" {
             return fetch_file_url(url, request.max_response_bytes).await;
@@ -333,7 +325,7 @@ impl StealthHttpClient {
                     let next_url = current_url.join(location_str).map_err(|e| {
                         NetError::Network(format!("Invalid redirect URL: {}", e))
                     })?;
-                    validate_url(&next_url, false)?;
+                    validate_url(&next_url, self.allow_private_network)?;
                     validate_request_mode(&request, &next_url)?;
                     redirect_tainted |=
                         redirect_taints_origin(&request, &current_url, &next_url);
@@ -452,7 +444,7 @@ impl StealthHttpClient {
     }
 }
 
-#[cfg(all(test, feature = "stealth"))]
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
@@ -505,11 +497,45 @@ mod tests {
     #[tokio::test]
     async fn stealth_client_decodes_gzip_response() {
         let port = gzip_fixture().await;
-        let client = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        let client = StealthHttpClient::with_full_options(
+            Arc::new(CookieJar::new()),
+            None,
+            true,
+        );
         let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
 
         let resp = client.fetch(&url).await.expect("fixture must be reachable");
         assert_eq!(resp.status, 200);
         assert_eq!(resp.text(), PLAIN_BODY, "gzip body must be decompressed");
+    }
+
+    #[tokio::test]
+    async fn stealth_client_blocks_loopback_unless_private_network_is_allowed() {
+        if crate::client::env_allows_private_network() {
+            return;
+        }
+        let port = gzip_fixture().await;
+        let url = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
+
+        let blocked = StealthHttpClient::new(Arc::new(CookieJar::new()));
+        let err = blocked
+            .fetch(&url)
+            .await
+            .expect_err("loopback must be SSRF-blocked by default");
+        assert!(
+            err.to_string().contains("not allowed"),
+            "default stealth client must refuse 127.0.0.1: {err}"
+        );
+
+        let allowed = StealthHttpClient::with_full_options(
+            Arc::new(CookieJar::new()),
+            None,
+            true,
+        );
+        let resp = allowed
+            .fetch(&url)
+            .await
+            .expect("allow_private_network must reach loopback");
+        assert_eq!(resp.status, 200);
     }
 }

@@ -26,7 +26,6 @@ impl Browser {
             BrowserContext::with_storage_full(
                 "api".to_string(),
                 config.proxy,
-                config.stealth,
                 config.user_agent,
                 Some(dir.clone()),
             )
@@ -34,7 +33,6 @@ impl Browser {
             BrowserContext::with_full_options(
                 "api".to_string(),
                 config.proxy,
-                config.stealth,
                 config.user_agent,
             )
         };
@@ -74,10 +72,6 @@ pub struct BrowserBuilder {
 impl BrowserBuilder {
     pub fn proxy(mut self, proxy: impl Into<String>) -> Self {
         self.config.proxy = Some(proxy.into());
-        self
-    }
-    pub fn stealth(mut self, stealth: bool) -> Self {
-        self.config.stealth = stealth;
         self
     }
     pub fn user_agent(mut self, ua: impl Into<String>) -> Self {

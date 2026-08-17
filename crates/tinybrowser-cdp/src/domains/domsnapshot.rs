@@ -53,9 +53,7 @@ pub async fn handle(
             page.with_dom(|dom| build_capture_snapshot(dom, &url, &title))
                 .ok_or_else(|| "No DOM loaded".to_string())
         }
-        // Permissive no-op for the rest of the domain (e.g. getSnapshot) so a
-        // client that probes it does not abort on an Unknown-method error.
-        _ => Ok(json!({})),
+        _ => Err(format!("Unknown DOMSnapshot method: {}", method)),
     }
 }
 
@@ -404,13 +402,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_domsnapshot_method_is_permissive_noop() {
-        // Probing the domain (e.g. getSnapshot) must not abort with an
-        // Unknown-method error the way an unhandled domain would.
+    async fn unknown_domsnapshot_method_errors() {
         let mut ctx = CdpContext::new();
-        let r = handle("getSnapshot", &json!({}), &mut ctx, &None)
+        let err = handle("getSnapshot", &json!({}), &mut ctx, &None)
             .await
-            .expect("unknown DOMSnapshot methods are a permissive no-op");
-        assert!(r.is_object());
+            .expect_err("unknown methods must surface as errors");
+        assert!(err.contains("Unknown DOMSnapshot method"));
     }
 }

@@ -50,6 +50,6 @@ pub async fn handle(
             }
             Ok(json!({}))
         }
-        _ => Ok(json!({})),
+        _ => Err(format!("Unknown Storage method: {}", method)),
     }
 }
