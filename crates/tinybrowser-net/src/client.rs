@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use std::net::{IpAddr, SocketAddr};
@@ -9,7 +9,7 @@ use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use reqwest::redirect::Policy;
 use reqwest::{Client, Method};
-use tokio::sync::{RwLock, watch};
+use tokio::sync::{watch, RwLock};
 use url::Url;
 
 use crate::cookies::CookieJar;
@@ -337,11 +337,7 @@ pub(crate) fn serialized_request_origin(
         .unwrap_or_else(|| "null".to_string())
 }
 
-pub(crate) fn redirect_taints_origin(
-    request: &ResourceRequest,
-    current: &Url,
-    next: &Url,
-) -> bool {
+pub(crate) fn redirect_taints_origin(request: &ResourceRequest, current: &Url, next: &Url) -> bool {
     current.origin() != next.origin()
         && request
             .initiator
@@ -388,9 +384,7 @@ pub(crate) fn validate_cors_response(
             target, allow_origin, serialized_origin
         )));
     }
-    if request.credentials == RequestCredentials::Include
-        && allow_credentials != Some("true")
-    {
+    if request.credentials == RequestCredentials::Include && allow_credentials != Some("true") {
         return Err(NetError::Cors(format!(
             "credentialed response from {} requires Access-Control-Allow-Credentials: true",
             target
@@ -421,10 +415,7 @@ pub(crate) fn request_fetch_site(request: &ResourceRequest, target: &Url) -> &'s
 }
 
 pub(crate) fn request_referrer(request: &ResourceRequest, target: &Url) -> Option<String> {
-    let source = request
-        .referrer
-        .as_ref()
-        .or(request.initiator.as_ref())?;
+    let source = request.referrer.as_ref().or(request.initiator.as_ref())?;
     if !matches!(source.scheme(), "http" | "https")
         || !matches!(target.scheme(), "http" | "https")
         || (source.scheme() == "https" && target.scheme() == "http")
@@ -776,9 +767,10 @@ fn response_header_value<'a>(
             url, name
         )));
     }
-    first.to_str().map(Some).map_err(|_| {
-        NetError::Cors(format!("{} returned an invalid {} header", url, name))
-    })
+    first
+        .to_str()
+        .map(Some)
+        .map_err(|_| NetError::Cors(format!("{} returned an invalid {} header", url, name)))
 }
 
 fn validate_reqwest_cors_response(
@@ -790,16 +782,9 @@ fn validate_reqwest_cors_response(
     if !cors_required(request, target) {
         return Ok(());
     }
-    let allow_origin = response_header_value(
-        headers,
-        "access-control-allow-origin",
-        target,
-    )?;
-    let allow_credentials = response_header_value(
-        headers,
-        "access-control-allow-credentials",
-        target,
-    )?;
+    let allow_origin = response_header_value(headers, "access-control-allow-origin", target)?;
+    let allow_credentials =
+        response_header_value(headers, "access-control-allow-credentials", target)?;
     validate_cors_response(
         request,
         target,
@@ -842,9 +827,11 @@ async fn read_reqwest_body_limited(
         .unwrap_or(0)
         .min(limit);
     let mut body = Vec::with_capacity(capacity);
-    while let Some(chunk) = response.chunk().await.map_err(|error| {
-        NetError::Network(format!("Failed to read body: {}", error))
-    })? {
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| NetError::Network(format!("Failed to read body: {}", error)))?
+    {
         if chunk.len() > limit.saturating_sub(body.len()) {
             return Err(response_too_large(url, limit));
         }
@@ -1019,7 +1006,14 @@ fn chrome_client_hints(ua: &str) -> (String, String) {
         .unwrap_or(145);
     const GREASE_CHARS: [char; 11] = [' ', '(', ':', '-', '.', '/', ')', ';', '=', '?', '_'];
     const GREASE_VER: [&str; 3] = ["8", "99", "24"];
-    const PERMS: [[usize; 3]; 6] = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+    const PERMS: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
     let grease_brand = format!(
         "Not{}A{}Brand",
         GREASE_CHARS[major % 11],
@@ -1082,31 +1076,32 @@ impl HttpClient {
     }
 
     async fn get_client(&self) -> &Client {
-        self.client.get_or_init(|| async {
-            let mut builder = Client::builder()
-                .redirect(Policy::none())
-                .timeout(self.timeout)
-                .danger_accept_invalid_certs(false)
-                // SSRF guard: reject hostnames that resolve to a private/loopback IP.
-                .dns_resolver(Arc::new(SsrfGuardResolver::new(self.allow_private_network)))
-;
+        self.client
+            .get_or_init(|| async {
+                let mut builder = Client::builder()
+                    .redirect(Policy::none())
+                    .timeout(self.timeout)
+                    .danger_accept_invalid_certs(false)
+                    // SSRF guard: reject hostnames that resolve to a private/loopback IP.
+                    .dns_resolver(Arc::new(SsrfGuardResolver::new(self.allow_private_network)));
 
-            if std::env::var_os("SSL_CERT_FILE").is_some()
-                || std::env::var_os("SSL_CERT_DIR").is_some()
-            {
-                for certificate in configured_root_certificates() {
-                    builder = builder.add_root_certificate(certificate.clone());
+                if std::env::var_os("SSL_CERT_FILE").is_some()
+                    || std::env::var_os("SSL_CERT_DIR").is_some()
+                {
+                    for certificate in configured_root_certificates() {
+                        builder = builder.add_root_certificate(certificate.clone());
+                    }
                 }
-            }
 
-            if let Some(ref proxy) = self.proxy_url {
-                if let Ok(p) = reqwest::Proxy::all(proxy.as_str()) {
-                    builder = builder.proxy(p);
+                if let Some(ref proxy) = self.proxy_url {
+                    if let Ok(p) = reqwest::Proxy::all(proxy.as_str()) {
+                        builder = builder.proxy(p);
+                    }
                 }
-            }
 
-            builder.build().expect("failed to build HTTP client")
-        }).await
+                builder.build().expect("failed to build HTTP client")
+            })
+            .await
     }
 
     /// Clone the request client owned by this browser context.
@@ -1138,11 +1133,13 @@ impl HttpClient {
         url: &Url,
         callbacks: Option<&CallbackRegistry>,
     ) -> Result<Response, NetError> {
-        self.fetch_with_method(Method::GET, url, None, callbacks).await
+        self.fetch_with_method(Method::GET, url, None, callbacks)
+            .await
     }
 
     pub async fn post_form(&self, url: &Url, body: &str) -> Result<Response, NetError> {
-        self.fetch_with_method(Method::POST, url, Some(body.as_bytes().to_vec()), None).await
+        self.fetch_with_method(Method::POST, url, Some(body.as_bytes().to_vec()), None)
+            .await
     }
 
     /// `post_form` variant of `fetch_with_callbacks`.
@@ -1460,14 +1457,20 @@ impl HttpClient {
                 HeaderValue::from_str(&sec_ch_ua)
                     .unwrap_or_else(|_| HeaderValue::from_static("\"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"145\", \"Chromium\";v=\"145\"")),
             );
-            headers.insert(HeaderName::from_static("sec-ch-ua-mobile"), HeaderValue::from_static("?0"));
+            headers.insert(
+                HeaderName::from_static("sec-ch-ua-mobile"),
+                HeaderValue::from_static("?0"),
+            );
             headers.insert(
                 HeaderName::from_static("sec-ch-ua-platform"),
                 HeaderValue::from_str(&sec_ch_ua_platform)
                     .unwrap_or_else(|_| HeaderValue::from_static("\"Windows\"")),
             );
             if request.mode == RequestMode::Navigate {
-                headers.insert(HeaderName::from_static("upgrade-insecure-requests"), HeaderValue::from_static("1"));
+                headers.insert(
+                    HeaderName::from_static("upgrade-insecure-requests"),
+                    HeaderValue::from_static("1"),
+                );
             }
             headers.insert(USER_AGENT, HeaderValue::from_str(&ua).unwrap_or_else(|_| {
                 HeaderValue::from_static("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36")
@@ -1485,7 +1488,10 @@ impl HttpClient {
                 HeaderValue::from_static(request.mode.header_value()),
             );
             if request.mode == RequestMode::Navigate {
-                headers.insert(HeaderName::from_static("sec-fetch-user"), HeaderValue::from_static("?1"));
+                headers.insert(
+                    HeaderName::from_static("sec-fetch-user"),
+                    HeaderValue::from_static("?1"),
+                );
             }
             headers.insert(
                 HeaderName::from_static("sec-fetch-dest"),
@@ -1531,7 +1537,8 @@ impl HttpClient {
                         }
                         tracing::debug!(
                             "Cookie header invalid chars, filtered {} -> {} bytes",
-                            cookie_header.len(), filtered.len(),
+                            cookie_header.len(),
+                            filtered.len(),
                         );
                     }
                 }
@@ -1555,7 +1562,10 @@ impl HttpClient {
                 headers.remove(reqwest::header::ORIGIN);
             }
 
-            let mut req_builder = self.get_client().await.request(method.clone(), current_url.as_str())
+            let mut req_builder = self
+                .get_client()
+                .await
+                .request(method.clone(), current_url.as_str())
                 .headers(headers);
 
             if let Some(ref b) = body {
@@ -1569,9 +1579,10 @@ impl HttpClient {
             }
 
             let in_flight = InFlightGuard::new(&self.in_flight);
-            let resp = req_builder.send().await.map_err(|e| {
-                NetError::Network(format!("{}: {}", current_url, e))
-            })?;
+            let resp = req_builder
+                .send()
+                .await
+                .map_err(|e| NetError::Network(format!("{}: {}", current_url, e)))?;
 
             let status = resp.status();
             validate_reqwest_cors_response(
@@ -1592,7 +1603,12 @@ impl HttpClient {
             let response_headers: HashMap<String, String> = resp
                 .headers()
                 .iter()
-                .map(|(k, v)| (k.as_str().to_lowercase(), v.to_str().unwrap_or("").to_string()))
+                .map(|(k, v)| {
+                    (
+                        k.as_str().to_lowercase(),
+                        v.to_str().unwrap_or("").to_string(),
+                    )
+                })
                 .collect();
 
             if status.is_redirection() {
@@ -1600,13 +1616,12 @@ impl HttpClient {
                     let location_str = location.to_str().map_err(|_| {
                         NetError::Network("Invalid redirect Location header".into())
                     })?;
-                    let next_url = current_url.join(location_str).map_err(|e| {
-                        NetError::Network(format!("Invalid redirect URL: {}", e))
-                    })?;
+                    let next_url = current_url
+                        .join(location_str)
+                        .map_err(|e| NetError::Network(format!("Invalid redirect URL: {}", e)))?;
                     validate_url(&next_url, self.allow_private_network)?;
                     validate_request_mode(&request, &next_url)?;
-                    redirect_tainted |=
-                        redirect_taints_origin(&request, &current_url, &next_url);
+                    redirect_tainted |= redirect_taints_origin(&request, &current_url, &next_url);
                     redirects.push(current_url.clone());
                     current_url = next_url;
                     if status == reqwest::StatusCode::MOVED_PERMANENTLY
@@ -1620,12 +1635,8 @@ impl HttpClient {
                 }
             }
 
-            let body_bytes = read_reqwest_body_limited(
-                resp,
-                &current_url,
-                request.max_response_bytes,
-            )
-            .await?;
+            let body_bytes =
+                read_reqwest_body_limited(resp, &current_url, request.max_response_bytes).await?;
             drop(in_flight);
 
             let response = Response {
@@ -1690,17 +1701,17 @@ pub enum NetError {
 #[cfg(test)]
 mod ssrf_tests {
     use super::{
-        is_forbidden_ip, request_fetch_site, request_referrer, validate_url,
-        CallbackRegistry, HttpClient, NetError, RequestCredentials, RequestMode,
-        ResourceRequest, ResourceType, SsrfGuardResolver,
+        is_forbidden_ip, request_fetch_site, request_referrer, validate_url, CallbackRegistry,
+        HttpClient, NetError, RequestCredentials, RequestMode, ResourceRequest, ResourceType,
+        SsrfGuardResolver,
     };
     use crate::cookies::CookieJar;
     use reqwest::dns::{Name, Resolve};
     use std::collections::HashMap;
     use std::net::IpAddr;
     use std::str::FromStr;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
     use url::Url;
 
@@ -1781,15 +1792,9 @@ mod ssrf_tests {
         assert_eq!(font.destination(), "font");
         assert_eq!(font.accept(), "*/*");
 
-        assert!(image.sends_credentials_to(
-            &Url::parse("https://cdn.example/image.png").unwrap()
-        ));
-        assert!(font.sends_credentials_to(
-            &Url::parse("https://app.example/font.woff2").unwrap()
-        ));
-        assert!(!font.sends_credentials_to(
-            &Url::parse("https://cdn.example/font.woff2").unwrap()
-        ));
+        assert!(image.sends_credentials_to(&Url::parse("https://cdn.example/image.png").unwrap()));
+        assert!(font.sends_credentials_to(&Url::parse("https://app.example/font.woff2").unwrap()));
+        assert!(!font.sends_credentials_to(&Url::parse("https://cdn.example/font.woff2").unwrap()));
 
         let module = ResourceRequest::module_script(&document, &document);
         assert_eq!(module.resource_type, ResourceType::Script);
@@ -1797,12 +1802,8 @@ mod ssrf_tests {
         assert_eq!(module.credentials, RequestCredentials::SameOrigin);
         assert_eq!(module.destination(), "script");
         assert_eq!(module.accept(), "*/*");
-        assert!(module.sends_credentials_to(
-            &Url::parse("https://app.example/chunk.js").unwrap()
-        ));
-        assert!(!module.sends_credentials_to(
-            &Url::parse("https://cdn.example/chunk.js").unwrap()
-        ));
+        assert!(module.sends_credentials_to(&Url::parse("https://app.example/chunk.js").unwrap()));
+        assert!(!module.sends_credentials_to(&Url::parse("https://cdn.example/chunk.js").unwrap()));
     }
 
     #[test]
@@ -1995,11 +1996,7 @@ mod ssrf_tests {
         let advertised = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n";
         let chunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nabcd\r\n4\r\nefgh\r\n0\r\n\r\n";
         let (target, _) = http_fixture(vec![advertised.to_string(), chunked.to_string()]).await;
-        let client = HttpClient::with_full_options(
-            Arc::new(CookieJar::new()),
-            None,
-            true,
-        );
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
         let initiator = target.clone();
         let request = ResourceRequest::subresource(ResourceType::Image, &initiator)
             .with_max_response_bytes(6);
@@ -2009,10 +2006,7 @@ mod ssrf_tests {
                 .fetch_resource_with_callbacks(&target, request.clone(), None)
                 .await
                 .unwrap_err();
-            assert!(matches!(
-                error,
-                NetError::ResponseTooLarge { limit: 6, .. }
-            ));
+            assert!(matches!(error, NetError::ResponseTooLarge { limit: 6, .. }));
             assert_eq!(client.active_requests(), 0);
         }
     }
@@ -2181,11 +2175,7 @@ mod ssrf_tests {
     #[tokio::test]
     async fn transport_timeout_returns_active_requests_to_zero() {
         let (target, started) = hanging_fixture().await;
-        let mut client = HttpClient::with_full_options(
-            Arc::new(CookieJar::new()),
-            None,
-            true,
-        );
+        let mut client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
         client.timeout = std::time::Duration::from_millis(25);
         let fetch = client.fetch(&target);
         let (_, result) = tokio::join!(started, fetch);
@@ -2197,11 +2187,7 @@ mod ssrf_tests {
     async fn callbacks_fire_once_across_redirects() {
         let redirect = "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         let (target, _) = http_fixture(vec![redirect.to_string(), ok_response("", "done")]).await;
-        let client = HttpClient::with_full_options(
-            Arc::new(CookieJar::new()),
-            None,
-            true,
-        );
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
         let callbacks = CallbackRegistry::new();
         let requests = Arc::new(AtomicUsize::new(0));
         let responses = Arc::new(AtomicUsize::new(0));
@@ -2308,11 +2294,8 @@ mod ssrf_tests {
 
     #[tokio::test]
     async fn cacheable_identical_module_scripts_share_one_in_flight_request() {
-        let (url, network_requests) = cacheable_resource_fixture(
-            200,
-            "Cache-Control: public, max-age=3600\r\n",
-        )
-        .await;
+        let (url, network_requests) =
+            cacheable_resource_fixture(200, "Cache-Control: public, max-age=3600\r\n").await;
         let initiator = url.join("/app.js").unwrap();
         let client = Arc::new(HttpClient::with_full_options(
             Arc::new(CookieJar::new()),
@@ -2383,8 +2366,7 @@ mod ssrf_tests {
         ] {
             let (url, network_requests) = cacheable_resource_fixture(status, headers).await;
             let initiator = url.join("/page.html").unwrap();
-            let client =
-                HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+            let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
             let request = ResourceRequest::subresource(ResourceType::Script, &initiator);
             client
                 .fetch_resource_with_callbacks(&url, request.clone(), None)
@@ -2411,8 +2393,7 @@ mod ssrf_tests {
             let (url, network_requests) =
                 cacheable_resource_fixture(200, "Cache-Control: public, max-age=3600\r\n").await;
             let initiator = url.join("/page.html").unwrap();
-            let client =
-                HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+            let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
             client
                 .set_extra_headers(HashMap::from([(
                     header.0.to_string(),
@@ -2473,17 +2454,14 @@ mod ssrf_tests {
         let ca_cert = ca_params.self_signed(&ca_key).unwrap();
 
         let leaf_key = rcgen::KeyPair::generate().unwrap();
-        let leaf_params =
-            rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap();
+        let leaf_params = rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap();
         let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
 
         let certs = vec![tokio_rustls::rustls::pki_types::CertificateDer::from(
             leaf_cert.der().to_vec(),
         )];
         let key = tokio_rustls::rustls::pki_types::PrivateKeyDer::Pkcs8(
-            tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer::from(
-                leaf_key.serialize_der(),
-            ),
+            tokio_rustls::rustls::pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()),
         );
         let config = tokio_rustls::rustls::ServerConfig::builder()
             .with_no_client_auth()
@@ -2529,10 +2507,12 @@ mod ssrf_tests {
         std::fs::write(ca_file.path(), ca_pem).unwrap();
         std::env::set_var("SSL_CERT_FILE", ca_file.path());
 
-        let client =
-            HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
         let url = Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
-        let resp = client.fetch(&url).await.expect("private CA in SSL_CERT_FILE must be trusted");
+        let resp = client
+            .fetch(&url)
+            .await
+            .expect("private CA in SSL_CERT_FILE must be trusted");
         assert_eq!(resp.status, 200);
         assert_eq!(resp.text(), "private ca ok");
     }
@@ -2544,8 +2524,7 @@ mod ssrf_tests {
         std::fs::write(ca_dir.path().join("private-ca.pem"), ca_pem).unwrap();
         std::env::set_var("SSL_CERT_DIR", ca_dir.path());
 
-        let client =
-            HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
         let url = Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
         let resp = client
             .fetch(&url)
@@ -2560,10 +2539,12 @@ mod ssrf_tests {
         // The same fixture that the SSL_CERT_FILE test trusts must fail here. The
         // listener is reachable (same setup), so an Err can only be TLS.
         let (port, _ca_pem) = https_fixture_with_private_ca().await;
-        let client =
-            HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
+        let client = HttpClient::with_full_options(Arc::new(CookieJar::new()), None, true);
         let url = Url::parse(&format!("https://127.0.0.1:{port}/")).unwrap();
-        assert!(client.fetch(&url).await.is_err(), "unknown CA must be rejected");
+        assert!(
+            client.fetch(&url).await.is_err(),
+            "unknown CA must be rejected"
+        );
     }
 }
 

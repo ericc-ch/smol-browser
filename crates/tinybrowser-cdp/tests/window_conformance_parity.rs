@@ -3,9 +3,9 @@
 // them dies with "X is not a function". Each case fails on main, passes
 // after the stubs land. These are spec surface gaps, not anti-bot work.
 
+use serde_json::{json, Value};
 use tinybrowser_cdp::dispatch::{dispatch, CdpContext};
 use tinybrowser_cdp::types::CdpRequest;
-use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -45,7 +45,11 @@ async fn cdp(
         ctx,
     )
     .await;
-    assert!(resp.error.is_none(), "CDP {method} failed: {:?}", resp.error);
+    assert!(
+        resp.error.is_none(),
+        "CDP {method} failed: {:?}",
+        resp.error
+    );
     resp.result.unwrap_or_else(|| json!({}))
 }
 

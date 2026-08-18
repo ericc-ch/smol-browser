@@ -97,14 +97,23 @@ pub async fn handle(
             let event_type = params.get("type").and_then(|v| v.as_str()).unwrap_or("");
             let x = params.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let button = params.get("button").and_then(|v| v.as_str()).unwrap_or("left");
+            let button = params
+                .get("button")
+                .and_then(|v| v.as_str())
+                .unwrap_or("left");
             let button_code = mouse_button_code(button);
             let buttons = params
                 .get("buttons")
                 .and_then(|v| v.as_u64())
                 .unwrap_or_else(|| mouse_button_mask(button));
-            let click_count = params.get("clickCount").and_then(|v| v.as_u64()).unwrap_or(1);
-            let modifiers = params.get("modifiers").and_then(|v| v.as_u64()).unwrap_or(0);
+            let click_count = params
+                .get("clickCount")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1);
+            let modifiers = params
+                .get("modifiers")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             let (alt_key, ctrl_key, meta_key, shift_key) = modifier_flags(modifiers);
 
             if event_type == "mousePressed" {
@@ -207,7 +216,9 @@ pub async fn handle(
                         shift_key = shift_key,
                     );
                     page.evaluate(&code);
-                    page.process_pending_navigation().await.map_err(|e| e.to_string())?;
+                    page.process_pending_navigation()
+                        .await
+                        .map_err(|e| e.to_string())?;
                 }
             } else if event_type == "mouseWheel" {
                 let delta_x = params.get("deltaX").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -344,9 +355,7 @@ pub async fn handle(
             Ok(json!({}))
         }
         "dispatchTouchEvent" => Err(crate::util::cdp_unimplemented("Input.dispatchTouchEvent")),
-        "setIgnoreInputEvents" => {
-            Err(crate::util::cdp_unimplemented("Input.setIgnoreInputEvents"))
-        }
+        "setIgnoreInputEvents" => Err(crate::util::cdp_unimplemented("Input.setIgnoreInputEvents")),
         _ => Err(format!("Unknown Input method: {}", method)),
     }
 }

@@ -25,7 +25,12 @@ pub fn label_name(label: &str) -> Option<String> {
 /// Decode `bytes` with an explicit encoding label, with TextDecoder semantics.
 /// Returns None when the label is unknown, or (when `fatal`) when the input is
 /// not valid in that encoding. Non-fatal decoding replaces errors with U+FFFD.
-pub fn decode_with_label(label: &str, bytes: &[u8], fatal: bool, ignore_bom: bool) -> Option<String> {
+pub fn decode_with_label(
+    label: &str,
+    bytes: &[u8],
+    fatal: bool,
+    ignore_bom: bool,
+) -> Option<String> {
     let enc = Encoding::for_label(label.as_bytes())?;
     let mut dec = if ignore_bom {
         enc.new_decoder_without_bom_handling()
@@ -81,10 +86,8 @@ fn push_pct(out: &mut String, b: u8) {
 /// `>`, 0x7F), plus `'` for special schemes (the special-query set). ASCII
 /// delimiters like `=` and `&` are left literal, so structured queries survive.
 fn push_query_ascii(out: &mut String, b: u8, special: bool) {
-    let must_encode = b <= 0x20
-        || b == 0x7F
-        || matches!(b, 0x22 | 0x23 | 0x3C | 0x3E)
-        || (special && b == 0x27);
+    let must_encode =
+        b <= 0x20 || b == 0x7F || matches!(b, 0x22 | 0x23 | 0x3C | 0x3E) || (special && b == 0x27);
     if must_encode {
         push_pct(out, b);
     } else {
@@ -181,7 +184,10 @@ pub fn detect_encoding<'a>(
 fn charset_from_content_type(header: &str) -> Option<String> {
     for part in header.split(';') {
         let trimmed = part.trim();
-        if let Some(rest) = trimmed.strip_prefix("charset=").or_else(|| trimmed.strip_prefix("Charset=")) {
+        if let Some(rest) = trimmed
+            .strip_prefix("charset=")
+            .or_else(|| trimmed.strip_prefix("Charset="))
+        {
             // Strip surrounding quotes if present.
             let value = rest.trim_matches(|c: char| c == '"' || c == '\'').trim();
             if !value.is_empty() {
@@ -390,7 +396,10 @@ mod tests {
     #[test]
     fn url_encode_query_eucjp_high_bytes() {
         // U+8108 (脈) is EUC-JP CC AE; both bytes are above 0x7E so both encode.
-        assert_eq!(url_encode_query("\u{8108}", "euc-jp", true).unwrap(), "%CC%AE");
+        assert_eq!(
+            url_encode_query("\u{8108}", "euc-jp", true).unwrap(),
+            "%CC%AE"
+        );
     }
 
     #[test]
@@ -405,7 +414,10 @@ mod tests {
     fn url_encode_query_big5_low_trail_byte_is_escaped() {
         // U+4E00 (一) is Big5 A4 40; the 0x40 trail byte is ASCII '@' but must
         // still be percent-encoded because it serializes a non-ASCII char.
-        assert_eq!(url_encode_query("\u{4e00}", "big5", true).unwrap(), "%A4%40");
+        assert_eq!(
+            url_encode_query("\u{4e00}", "big5", true).unwrap(),
+            "%A4%40"
+        );
     }
 
     #[test]

@@ -27,5 +27,8 @@ pub use error::Error;
 pub use page::Page;
 
 // Request/response interception types (issue #306).
-pub use tinybrowser_core::{InterceptedRequest, InterceptResolution};
+pub use tinybrowser_core::{
+    page_actor_channel, run_page_actor, InterceptResolution, InterceptedRequest, PageActorHandle,
+    PageCommand,
+};
 pub use tinybrowser_net::{RequestCallback, RequestInfo, ResourceType, Response, ResponseCallback};

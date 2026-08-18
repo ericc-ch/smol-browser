@@ -89,9 +89,11 @@ pub async fn handle(
             let session_id = format!("{}-session", page_id);
 
             if let Some(page) = ctx.get_page_mut(&page_id) {
-                if url == "about:blank" || url.is_empty() {
-                    page.navigate_blank();
-                } else {
+                // `create_page_in_context` already left an about:blank document
+                // with a live JS realm attached, so an `about:blank` /
+                // empty URL needs no further work. A real URL drives a full
+                // navigation (which re-`init_js`s the realm for that origin).
+                if url != "about:blank" && !url.is_empty() {
                     let _ = page.navigate(url).await;
                 }
             }

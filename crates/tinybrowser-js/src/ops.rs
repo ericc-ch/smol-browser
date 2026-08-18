@@ -4,8 +4,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use tinybrowser_dom::{DomTree, NodeData, NodeId};
 use tinybrowser_dom::tree::{AttachShadowError, ShadowRootMode};
+use tinybrowser_dom::{DomTree, NodeData, NodeId};
 use tinybrowser_net::StealthHttpClient;
 use tinybrowser_net::{
     CallbackRegistry, CookieJar, HttpClient, RequestInfo, ResourceType, Response,
@@ -291,7 +291,7 @@ fn render_mutation_impact(
     arg1: &str,
     arg2: &str,
 ) -> RenderMutationImpact {
-    let node = |value: &str| value.parse::<u32>().ok().map(NodeId::new);
+    let node = |value: &str| value.parse::<u64>().ok().map(NodeId::new);
     match cmd {
         "set_attribute" => {
             let Some(target) = node(arg1) else {
@@ -484,7 +484,14 @@ fn fragment_context_and_html(arg: &str) -> (html5ever::QualName, &str) {
         Some((prefix, local)) if !prefix.is_empty() && !local.is_empty() => {
             (Some(html5ever::Prefix::from(prefix)), local)
         }
-        _ => (None, if qualified.is_empty() { "body" } else { qualified }),
+        _ => (
+            None,
+            if qualified.is_empty() {
+                "body"
+            } else {
+                qualified
+            },
+        ),
     };
     (
         html5ever::QualName::new(
@@ -495,7 +502,7 @@ fn fragment_context_and_html(arg: &str) -> (html5ever::QualName, &str) {
         html,
     )
 }
-pub(crate) fn op_script_mark_started_inner(shared: &SharedState, nid: u32) -> bool {
+pub(crate) fn op_script_mark_started_inner(shared: &SharedState, nid: u64) -> bool {
     let state = shared.borrow();
     let Some(dom) = state.dom.as_ref() else {
         return false;
@@ -510,7 +517,7 @@ pub(crate) fn op_script_mark_started_inner(shared: &SharedState, nid: u32) -> bo
 
 /// Atomically claim an executable script.  A false result means the node was
 /// created inert by an HTML-string API or has already been prepared once.
-pub(crate) fn op_script_try_start_inner(shared: &SharedState, nid: u32) -> bool {
+pub(crate) fn op_script_try_start_inner(shared: &SharedState, nid: u64) -> bool {
     let state = shared.borrow();
     let Some(dom) = state.dom.as_ref() else {
         return false;
@@ -526,7 +533,7 @@ pub(crate) fn op_script_try_start_inner(shared: &SharedState, nid: u32) -> bool 
 /// Attach one native shadow-tree scope without making it part of the light
 /// tree. Layout intentionally remains unaware of the detached root until
 /// scoped style, slot assignment, and composed-tree paint are implemented.
-pub(crate) fn op_shadow_attach_inner(shared: &SharedState, host_nid: u32, mode: String) -> i32 {
+pub(crate) fn op_shadow_attach_inner(shared: &SharedState, host_nid: u64, mode: String) -> i64 {
     let mode = match mode.as_str() {
         "open" => ShadowRootMode::Open,
         "closed" => ShadowRootMode::Closed,
@@ -537,7 +544,7 @@ pub(crate) fn op_shadow_attach_inner(shared: &SharedState, host_nid: u32, mode: 
         return -1;
     };
     match dom.attach_shadow_root(NodeId::new(host_nid), mode) {
-        Ok(root) => root.raw() as i32,
+        Ok(root) => root.raw() as i64,
         Err(AttachShadowError::HostAlreadyHasShadowRoot) => -2,
         Err(_) => -1,
     }
@@ -546,7 +553,7 @@ pub(crate) fn op_shadow_attach_inner(shared: &SharedState, host_nid: u32, mode: 
 /// Return native host-owned shadow identity as `root-id\0mode`. Closed roots
 /// are included here; the Web-facing `Element.shadowRoot` getter applies mode
 /// visibility in bootstrap.js.
-pub(crate) fn op_shadow_root_info_inner(shared: &SharedState, host_nid: u32) -> String {
+pub(crate) fn op_shadow_root_info_inner(shared: &SharedState, host_nid: u64) -> String {
     let state = shared.borrow();
     let Some(dom) = state.dom.as_ref() else {
         return String::new();
@@ -565,7 +572,7 @@ pub(crate) fn op_shadow_root_info_inner(shared: &SharedState, host_nid: u32) -> 
 /// Read-only parent/sibling walks used by MutationObserver ancestor checks.
 /// Returns the neighbor node id, or -1 when the edge is empty. `None` means
 /// `cmd` is not a tree-edge read.
-pub(crate) fn op_dom_tree_query(shared: &SharedState, cmd: &str, nid: u32) -> Option<i32> {
+pub(crate) fn op_dom_tree_query(shared: &SharedState, cmd: &str, nid: u64) -> Option<i64> {
     if !matches!(
         cmd,
         "parent_node" | "first_child" | "last_child" | "next_sibling" | "prev_sibling"
@@ -586,7 +593,7 @@ pub(crate) fn op_dom_tree_query(shared: &SharedState, cmd: &str, nid: u32) -> Op
             _ => None,
         })
         .flatten();
-    Some(id.map(|id| id.index() as i32).unwrap_or(-1))
+    Some(id.map(|id| id.raw() as i64).unwrap_or(-1))
 }
 
 pub(crate) fn op_dom_inner(
@@ -596,7 +603,7 @@ pub(crate) fn op_dom_inner(
     arg2: String,
 ) -> String {
     if let Some(fast) = arg1
-        .parse::<u32>()
+        .parse::<u64>()
         .ok()
         .and_then(|nid| op_dom_tree_query(shared, cmd.as_str(), nid))
     {
@@ -630,7 +637,7 @@ pub(crate) fn op_dom_inner(
     };
 
     match cmd.as_str() {
-        "document_node_id" => dom.document().index().to_string(),
+        "document_node_id" => dom.document().raw().to_string(),
         "document_title" => {
             // The DOM is authoritative after parsing. In particular, script
             // changes through title.textContent must be reflected by
@@ -659,7 +666,7 @@ pub(crate) fn op_dom_inner(
                         .map(|name| name.local.as_ref() == "html")
                         .unwrap_or(false)
                     {
-                        return cid.index().to_string();
+                        return cid.raw().to_string();
                     }
                 }
             }
@@ -678,7 +685,7 @@ pub(crate) fn op_dom_inner(
                             "name": name,
                             "publicId": public_id,
                             "systemId": system_id,
-                            "nodeId": cid.index(),
+                            "nodeId": cid.raw(),
                         })
                         .to_string();
                     }
@@ -694,7 +701,7 @@ pub(crate) fn op_dom_inner(
             let nid = dom.get_element_by_id(&arg1);
             let live = nid.filter(|&n| dom.ancestors(n).contains(&doc));
             match live {
-                Some(n) => n.index().to_string(),
+                Some(n) => n.raw().to_string(),
                 None => {
                     // Fall back to full scan for the live document.
                     let sel = format!(
@@ -704,7 +711,7 @@ pub(crate) fn op_dom_inner(
                     dom.query_selector(&sel)
                         .ok()
                         .flatten()
-                        .map(|id| id.index().to_string())
+                        .map(|id| id.raw().to_string())
                         .unwrap_or("-1".into())
                 }
             }
@@ -713,41 +720,41 @@ pub(crate) fn op_dom_inner(
             .query_selector(&arg1)
             .ok()
             .flatten()
-            .map(|id| id.index().to_string())
+            .map(|id| id.raw().to_string())
             .unwrap_or("-1".into()),
         "query_selector_all" => {
-            let ids: Vec<i32> = dom
+            let ids: Vec<i64> = dom
                 .query_selector_all(&arg1)
                 .ok()
-                .map(|ids| ids.iter().map(|id| id.index() as i32).collect())
+                .map(|ids| ids.iter().map(|id| id.raw() as i64).collect::<Vec<i64>>())
                 .unwrap_or_default();
             serde_json::to_string(&ids).unwrap_or("[]".into())
         }
         "query_selector_scoped" => {
-            let root_nid = arg1.parse::<u32>().unwrap_or(0);
+            let root_nid = arg1.parse::<u64>().unwrap_or(0);
             dom.query_selector_from(NodeId::new(root_nid), &arg2)
                 .ok()
                 .flatten()
-                .map(|id| id.index().to_string())
+                .map(|id| id.raw().to_string())
                 .unwrap_or("-1".into())
         }
         "query_selector_all_scoped" => {
-            let root_nid = arg1.parse::<u32>().unwrap_or(0);
-            let ids: Vec<i32> = dom
+            let root_nid = arg1.parse::<u64>().unwrap_or(0);
+            let ids: Vec<i64> = dom
                 .query_selector_all_from(NodeId::new(root_nid), &arg2)
                 .ok()
-                .map(|ids| ids.iter().map(|id| id.index() as i32).collect())
+                .map(|ids| ids.iter().map(|id| id.raw() as i64).collect::<Vec<i64>>())
                 .unwrap_or_default();
             serde_json::to_string(&ids).unwrap_or("[]".into())
         }
         "matches_selector" => {
-            let nid = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
+            let nid = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
             dom.matches_selector(nid, &arg2)
                 .unwrap_or(false)
                 .to_string()
         }
         "node_type" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             dom.with_node(NodeId::new(nid), |n| match &n.data {
                 NodeData::Document => "9",
                 NodeData::Element { .. } => "1",
@@ -760,7 +767,7 @@ pub(crate) fn op_dom_inner(
             .into()
         }
         "node_name" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let name: String = dom
                 .with_node(NodeId::new(nid), |n| match &n.data {
                     NodeData::Document => "#document".to_string(),
@@ -774,11 +781,11 @@ pub(crate) fn op_dom_inner(
             serde_json::to_string(&name).unwrap_or("\"\"".into())
         }
         "text_content" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             serde_json::to_string(&dom.text_content(NodeId::new(nid))).unwrap_or("\"\"".into())
         }
         "parent_node" | "first_child" | "last_child" | "next_sibling" | "prev_sibling" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             dom.with_node(NodeId::new(nid), |n| match cmd.as_str() {
                 "parent_node" => n.parent,
                 "first_child" => n.first_child,
@@ -788,45 +795,45 @@ pub(crate) fn op_dom_inner(
                 _ => None,
             })
             .flatten()
-            .map(|id| id.index().to_string())
+            .map(|id| id.raw().to_string())
             .unwrap_or("-1".into())
         }
         "next_in_subtree" => {
-            let root = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
-            let current = NodeId::new(arg2.parse::<u32>().unwrap_or(0));
+            let root = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
+            let current = NodeId::new(arg2.parse::<u64>().unwrap_or(0));
             dom.next_in_subtree(root, current)
-                .map(|id| id.index().to_string())
+                .map(|id| id.raw().to_string())
                 .unwrap_or("-1".into())
         }
         // Reverse document order within a subtree, for NodeIterator's backward
         // walk (which prunes nothing, so the whole step fits in the DOM layer).
         "prev_in_subtree" => {
-            let root = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
-            let current = NodeId::new(arg2.parse::<u32>().unwrap_or(0));
+            let root = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
+            let current = NodeId::new(arg2.parse::<u64>().unwrap_or(0));
             dom.prev_in_subtree(root, current)
-                .map(|id| id.index().to_string())
+                .map(|id| id.raw().to_string())
                 .unwrap_or("-1".into())
         }
         // Step past a whole subtree rather than into it: NodeFilter.FILTER_REJECT
         // prunes the rejected node's descendants, unlike FILTER_SKIP.
         "next_after_subtree" => {
-            let root = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
-            let current = NodeId::new(arg2.parse::<u32>().unwrap_or(0));
+            let root = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
+            let current = NodeId::new(arg2.parse::<u64>().unwrap_or(0));
             dom.next_after_subtree(root, current)
-                .map(|id| id.index().to_string())
+                .map(|id| id.raw().to_string())
                 .unwrap_or("-1".into())
         }
         "child_nodes" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
-            let ids: Vec<i32> = dom
+            let nid = arg1.parse::<u64>().unwrap_or(0);
+            let ids: Vec<i64> = dom
                 .children(NodeId::new(nid))
                 .iter()
-                .map(|id| id.index() as i32)
+                .map(|id| id.raw() as i64)
                 .collect();
             serde_json::to_string(&ids).unwrap_or("[]".into())
         }
         "tag_name" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let name = dom
                 .with_node(NodeId::new(nid), |n| {
                     n.as_element().map(|name| {
@@ -845,7 +852,7 @@ pub(crate) fn op_dom_inner(
             serde_json::to_string(&name).unwrap_or("\"\"".into())
         }
         "local_name" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let name = dom
                 .with_node(NodeId::new(nid), |n| {
                     n.as_element().map(|name| name.local.to_string())
@@ -858,7 +865,7 @@ pub(crate) fn op_dom_inner(
         // subtree) its own namespace; expose it so JS does not have to guess
         // the namespace from the tag name.
         "namespace_uri" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let ns = dom
                 .with_node(NodeId::new(nid), |n| {
                     n.as_element().map(|name| name.ns.as_ref().to_string())
@@ -868,7 +875,7 @@ pub(crate) fn op_dom_inner(
             serde_json::to_string(&ns).unwrap_or("\"\"".into())
         }
         "get_attribute" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let val = dom
                 .with_node(NodeId::new(nid), |n| {
                     n.get_attribute(&arg2).map(|s| s.to_string())
@@ -877,7 +884,7 @@ pub(crate) fn op_dom_inner(
             serde_json::to_string(&val).unwrap_or("null".into())
         }
         "attribute_names" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let names: Vec<String> = dom
                 .with_node(NodeId::new(nid), |n| {
                     n.attrs()
@@ -888,7 +895,7 @@ pub(crate) fn op_dom_inner(
             serde_json::to_string(&names).unwrap_or("[]".into())
         }
         "set_attribute" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let node_id = NodeId::new(nid);
             if let Some((name, value)) = arg2.split_once('\0') {
                 if name == "id" {
@@ -904,22 +911,22 @@ pub(crate) fn op_dom_inner(
             "true".into()
         }
         "inner_html" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             serde_json::to_string(&dom.inner_html(NodeId::new(nid))).unwrap_or("\"\"".into())
         }
         "outer_html" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             serde_json::to_string(&dom.outer_html(NodeId::new(nid))).unwrap_or("\"\"".into())
         }
         "append_child" => {
             // Reject if either nid failed to parse (was "undefined"/empty) — those
             // default to 0 which is the document root, and silently operating on it
             // corrupts the tree. Require both args to be valid positive integers.
-            let parent = match arg1.parse::<u32>() {
+            let parent = match arg1.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => return "false".into(),
             };
-            let child = match arg2.parse::<u32>() {
+            let child = match arg2.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => return "false".into(),
             };
@@ -929,21 +936,27 @@ pub(crate) fn op_dom_inner(
             (dom.get_node(child).and_then(|node| node.parent) == Some(parent)).to_string()
         }
         "remove_child" => {
-            let child = match arg1.parse::<u32>() {
+            let child = match arg1.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => return "false".into(),
             };
             let child = NodeId::new(child);
-            let had_parent = dom.get_node(child).is_some_and(|node| node.parent.is_some());
+            let had_parent = dom
+                .get_node(child)
+                .is_some_and(|node| node.parent.is_some());
             dom.remove_child(child);
-            (had_parent && dom.get_node(child).is_some_and(|node| node.parent.is_none())).to_string()
+            (had_parent
+                && dom
+                    .get_node(child)
+                    .is_some_and(|node| node.parent.is_none()))
+            .to_string()
         }
         "insert_before" => {
-            let new_node = match arg1.parse::<u32>() {
+            let new_node = match arg1.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => return "false".into(),
             };
-            let ref_node = match arg2.parse::<u32>() {
+            let ref_node = match arg2.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => return "false".into(),
             };
@@ -956,7 +969,7 @@ pub(crate) fn op_dom_inner(
                 .to_string()
         }
         "remove_attribute" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             dom.with_node_mut(NodeId::new(nid), |n| {
                 if let NodeData::Element { attrs, .. } = &mut n.data {
                     attrs.retain(|a| !a.qualified_name_eq(&arg2));
@@ -968,15 +981,17 @@ pub(crate) fn op_dom_inner(
         //   get/remove: "<namespace>\0<localName>"
         //   set:        "<namespace>\0<qualifiedName>\0<value>"
         "get_attribute_ns" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let (ns, local) = arg2.split_once('\0').unwrap_or(("", arg2.as_str()));
             let val = dom
-                .with_node(NodeId::new(nid), |n| n.get_attribute_ns(ns, local).map(|s| s.to_string()))
+                .with_node(NodeId::new(nid), |n| {
+                    n.get_attribute_ns(ns, local).map(|s| s.to_string())
+                })
                 .flatten();
             serde_json::to_string(&val).unwrap_or("null".into())
         }
         "set_attribute_ns" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let node_id = NodeId::new(nid);
             let mut parts = arg2.splitn(3, '\0');
             let ns = parts.next().unwrap_or("");
@@ -1004,7 +1019,7 @@ pub(crate) fn op_dom_inner(
             "true".into()
         }
         "remove_attribute_ns" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let node_id = NodeId::new(nid);
             let (ns, local) = arg2.split_once('\0').unwrap_or(("", arg2.as_str()));
             if ns.is_empty() && local == "id" {
@@ -1019,7 +1034,7 @@ pub(crate) fn op_dom_inner(
             "true".into()
         }
         "set_inner_html" => {
-            let nid = match arg1.parse::<u32>() {
+            let nid = match arg1.parse::<u64>() {
                 Ok(n) if n > 0 => n,
                 // nid=0 is the document root; never allow innerHTML to clear it.
                 // nid parse failure (e.g. "undefined") also falls here.
@@ -1050,7 +1065,7 @@ pub(crate) fn op_dom_inner(
             "true".into()
         }
         "set_inner_html_context" => {
-            let nid = match arg1.parse::<u32>() {
+            let nid = match arg1.parse::<u64>() {
                 Ok(n) if n > 0 => n,
                 _ => return "false".into(),
             };
@@ -1073,7 +1088,7 @@ pub(crate) fn op_dom_inner(
         // policy from innerHTML: scripts remain eligible and are prepared when
         // the returned fragment is inserted into a connected document.
         "set_fragment_html_executable" => {
-            let nid = match arg1.parse::<u32>() {
+            let nid = match arg1.parse::<u64>() {
                 Ok(n) if n > 0 => n,
                 _ => return "false".into(),
             };
@@ -1090,7 +1105,7 @@ pub(crate) fn op_dom_inner(
             "true".into()
         }
         "set_text_content" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             dom.with_node_mut(NodeId::new(nid), |n| match &mut n.data {
                 NodeData::Text { contents } => {
                     *contents = arg2.clone();
@@ -1109,14 +1124,14 @@ pub(crate) fn op_dom_inner(
         // is the only route to them from JS. Allocates one on demand for
         // templates built via createElement.
         "template_contents" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             dom.template_contents(NodeId::new(nid))
-                .map(|id| id.index().to_string())
+                .map(|id| id.raw().to_string())
                 .unwrap_or("-1".into())
         }
-        "create_document_fragment" => dom.new_node(NodeData::Document).index().to_string(),
+        "create_document_fragment" => dom.new_node(NodeData::Document).raw().to_string(),
         "clone_node" => {
-            let nid = match arg1.parse::<u32>() {
+            let nid = match arg1.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => return "-1".into(),
             };
@@ -1124,7 +1139,7 @@ pub(crate) fn op_dom_inner(
             match dom.clone_node(source, arg2 == "true") {
                 Some(cloned) => {
                     propagate_script_start_state(dom, source, cloned, &gs.already_started_scripts);
-                    cloned.index().to_string()
+                    cloned.raw().to_string()
                 }
                 None => "-1".into(),
             }
@@ -1140,7 +1155,7 @@ pub(crate) fn op_dom_inner(
                 template_contents: None,
                 mathml_annotation_xml_integration_point: false,
             })
-            .index()
+            .raw()
             .to_string(),
         "create_element_ns" => {
             let (namespace, qualified) = arg1.split_once('\0').unwrap_or(("", arg1.as_str()));
@@ -1161,20 +1176,20 @@ pub(crate) fn op_dom_inner(
                 template_contents: None,
                 mathml_annotation_xml_integration_point: false,
             })
-            .index()
+            .raw()
             .to_string()
         }
         "create_text_node" => dom
             .new_node(NodeData::Text {
                 contents: arg1.clone(),
             })
-            .index()
+            .raw()
             .to_string(),
         "create_comment_node" => dom
             .new_node(NodeData::Comment {
                 contents: arg1.clone(),
             })
-            .index()
+            .raw()
             .to_string(),
         "create_processing_instruction" => {
             // arg1 = target, arg2 = data
@@ -1182,7 +1197,7 @@ pub(crate) fn op_dom_inner(
                 target: arg1.clone(),
                 data: arg2.clone(),
             })
-            .index()
+            .raw()
             .to_string()
         }
         "create_doctype" => {
@@ -1194,11 +1209,11 @@ pub(crate) fn op_dom_inner(
                 public_id: arg2.clone(),
                 system_id: String::new(),
             })
-            .index()
+            .raw()
             .to_string()
         }
         "pi_target" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let val = dom
                 .with_node(NodeId::new(nid), |n| match &n.data {
                     NodeData::ProcessingInstruction { target, .. } => Some(target.clone()),
@@ -1209,7 +1224,7 @@ pub(crate) fn op_dom_inner(
             serde_json::to_string(&val).unwrap_or("\"\"".into())
         }
         "doctype_name" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let val = dom
                 .with_node(NodeId::new(nid), |n| match &n.data {
                     NodeData::Doctype { name, .. } => Some(name.clone()),
@@ -1220,7 +1235,7 @@ pub(crate) fn op_dom_inner(
             serde_json::to_string(&val).unwrap_or("\"\"".into())
         }
         "doctype_public_id" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let val = dom
                 .with_node(NodeId::new(nid), |n| match &n.data {
                     NodeData::Doctype { public_id, .. } => Some(public_id.clone()),
@@ -1231,24 +1246,24 @@ pub(crate) fn op_dom_inner(
             serde_json::to_string(&val).unwrap_or("\"\"".into())
         }
         "element_children" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
-            let ids: Vec<i32> = dom
+            let nid = arg1.parse::<u64>().unwrap_or(0);
+            let ids: Vec<i64> = dom
                 .children(NodeId::new(nid))
                 .iter()
                 .filter(|&&id| dom.get_node(id).map(|n| n.is_element()).unwrap_or(false))
-                .map(|id| id.index() as i32)
+                .map(|id| id.raw() as i64)
                 .collect();
             serde_json::to_string(&ids).unwrap_or("[]".into())
         }
         "has_child_nodes" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             dom.with_node(NodeId::new(nid), |n| n.first_child.is_some())
                 .unwrap_or(false)
                 .to_string()
         }
         "contains" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
-            let other = arg2.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
+            let other = arg2.parse::<u64>().unwrap_or(0);
             dom.descendants(NodeId::new(nid))
                 .contains(&NodeId::new(other))
                 .to_string()
@@ -1257,37 +1272,37 @@ pub(crate) fn op_dom_inner(
         // cached bit avoids an ancestor op crossing for every level when JS
         // builds a deep detached subtree.
         "is_connected" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             dom.is_connected(NodeId::new(nid)).to_string()
         }
         // Index of a node among its parent's children. Walks prev siblings in
         // Rust, avoiding the per-step JS->op round trips a Range comparison
         // would otherwise make.
         "node_index" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             node_child_index(dom, NodeId::new(nid)).to_string()
         }
         // Document (preorder) tree order of two nodes: -1 if a precedes b, 1 if
         // a follows b, 0 if equal. Used by the Range boundary-point algorithms.
         "compare_order" => {
-            let a = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
-            let b = NodeId::new(arg2.parse::<u32>().unwrap_or(0));
+            let a = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
+            let b = NodeId::new(arg2.parse::<u64>().unwrap_or(0));
             compare_node_order(dom, a, b).to_string()
         }
         // Root (topmost ancestor) of a node, in one op rather than an O(depth)
         // walk of parentNode ops from JS.
         "node_root" => {
-            let mut cur = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
+            let mut cur = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
             while let Some(p) = dom.with_node(cur, |x| x.parent).flatten() {
                 cur = p;
             }
-            cur.index().to_string()
+            cur.raw().to_string()
         }
         // Inclusive ancestor test in one op so MutationObserver subtree
         // matching does not walk parentNode in JS (quadratic on deep trees).
         "is_inclusive_ancestor" => {
-            let ancestor = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
-            let mut cur = NodeId::new(arg2.parse::<u32>().unwrap_or(0));
+            let ancestor = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
+            let mut cur = NodeId::new(arg2.parse::<u64>().unwrap_or(0));
             let mut hops = 0u32;
             loop {
                 if cur == ancestor {
@@ -1339,7 +1354,7 @@ fn compare_node_order(dom: &DomTree, a: NodeId, b: NodeId) -> i32 {
     let bb = node_ancestors_root_first(dom, b);
     // Different roots: order is undefined per spec; keep it stable by node id.
     if aa[0] != bb[0] {
-        return if a.index() < b.index() { -1 } else { 1 };
+        return if a.raw() < b.raw() { -1 } else { 1 };
     }
     let mut i = 0usize;
     while i < aa.len() && i < bb.len() && aa[i] == bb[i] {
@@ -1402,9 +1417,9 @@ fn build_request_client(proxy_url: Option<&str>) -> Result<reqwest::Client, Stri
         .redirect(reqwest::redirect::Policy::none())
         .timeout(fetch_timeout())
         // SSRF guard: also reject hostnames that resolve to a private/loopback IP.
-        .dns_resolver(std::sync::Arc::new(tinybrowser_net::SsrfGuardResolver::new(
-            false,
-        )))
+        .dns_resolver(std::sync::Arc::new(
+            tinybrowser_net::SsrfGuardResolver::new(false),
+        ))
         // Be explicit about pool size: default is unbounded which is fine,
         // but pool_idle_timeout default (90s) is short for SPA-heavy
         // workloads where the same origin is hit dozens of times across
@@ -1491,7 +1506,10 @@ pub(crate) struct FetchJob {
     pub credentials: String,
     pub cookie_jar: Option<Arc<CookieJar>>,
     pub http_client: Option<Arc<HttpClient>>,
-    pub intercept: Option<(tokio::sync::mpsc::UnboundedSender<InterceptedRequest>, String)>,
+    pub intercept: Option<(
+        tokio::sync::mpsc::UnboundedSender<InterceptedRequest>,
+        String,
+    )>,
     pub callbacks: Option<Arc<CallbackRegistry>>,
     pub in_flight: Option<Arc<std::sync::atomic::AtomicU32>>,
     pub page_in_flight: Arc<std::sync::atomic::AtomicU32>,
@@ -1761,9 +1779,7 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
 
     let client = match &http_client {
         Some(client) => client.request_client().await,
-        None => {
-            cached_request_client(proxy_url.as_deref())?
-        }
+        None => cached_request_client(proxy_url.as_deref())?,
     };
 
     let initial_request_origin = request_origin(&url).unwrap_or_default();
@@ -2046,10 +2062,7 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
         }
     }
 
-    let resp_bytes = response
-        .bytes()
-        .await
-        .map_err(|e| e.to_string())?;
+    let resp_bytes = response.bytes().await.map_err(|e| e.to_string())?;
     let resp_body = String::from_utf8_lossy(&resp_bytes).to_string();
     let resp_body_base64 = BASE64.encode(&resp_bytes);
     if let Some(ref cbs) = callbacks {
@@ -2439,11 +2452,15 @@ mod tests {
             .unwrap();
         let values = result.as_array().unwrap();
         assert!(
-            values[..3].iter().all(|value| value.as_f64() == Some(100.0)),
+            values[..3]
+                .iter()
+                .all(|value| value.as_f64() == Some(100.0)),
             "posted-task chains did not finish inside the 100ms pump: {result}",
         );
         assert!(
-            values[3].as_f64().is_some_and(|elapsed| elapsed >= 0.0 && elapsed < 75.0),
+            values[3]
+                .as_f64()
+                .is_some_and(|elapsed| elapsed >= 0.0 && elapsed < 75.0),
             "300 chained posted-task deliveries retained timer-wheel latency: {result}",
         );
     }
@@ -2502,7 +2519,6 @@ mod tests {
             ]),
         );
     }
-
 }
 
 fn validate_fetch_url(url: &url::Url, allow_private_network: bool) -> Result<(), String> {
@@ -2514,10 +2530,7 @@ fn validate_fetch_url(url: &url::Url, allow_private_network: bool) -> Result<(),
         ));
     }
 
-    if scheme == "file"
-        || allow_private_network
-        || tinybrowser_net::env_allows_private_network()
-    {
+    if scheme == "file" || allow_private_network || tinybrowser_net::env_allows_private_network() {
         return Ok(());
     }
 
@@ -2583,7 +2596,9 @@ pub(crate) fn op_set_cookie_inner(shared: &SharedState, cookie_str: &str) {
 }
 pub(crate) fn op_navigate_inner(shared: &SharedState, url: &str, method: &str, body: &str) {
     let mut gs = shared.borrow_mut();
-    gs.url = url.to_string();
+    // Document URL / origin stay on the committed document until navigation
+    // headers commit. Mutating `gs.url` here would let `document.cookie` read
+    // the destination origin before the new response exists.
     gs.pending_navigation = Some((url.to_string(), method.to_string(), body.to_string()));
 }
 
@@ -3073,12 +3088,7 @@ pub(crate) fn encoding_for_label(label: &str) -> String {
 /// Decode bytes with a legacy/explicit encoding via encoding_rs. Returns
 /// {"ok":true,"v":<string>} or {"ok":false} (unknown label, or a fatal decode
 /// error). The UTF-8 non-fatal common case is handled in JS without this op.
-pub(crate) fn text_decode(
-    label: &str,
-    bytes: &[u8],
-    fatal: bool,
-    ignore_bom: bool,
-) -> String {
+pub(crate) fn text_decode(label: &str, bytes: &[u8], fatal: bool, ignore_bom: bool) -> String {
     match tinybrowser_net::decode_with_label(label, bytes, fatal, ignore_bom) {
         Some(s) => serde_json::json!({ "ok": true, "v": s }).to_string(),
         None => "{\"ok\":false}".to_string(),
@@ -3094,4 +3104,3 @@ pub(crate) fn text_decode(
 pub(crate) fn url_encode_query(query: &str, label: &str, special: bool) -> String {
     tinybrowser_net::url_encode_query(query, label, special).unwrap_or_else(|| query.to_string())
 }
-

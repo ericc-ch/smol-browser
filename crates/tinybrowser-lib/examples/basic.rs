@@ -1,6 +1,6 @@
+use std::time::Duration;
 /// Full example: launch, navigate, interact, check cookies.
 use tinybrowser_lib::Browser;
-use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

@@ -315,8 +315,8 @@ impl<'a> Element for DomElement<'a> {
         // tree's Vec instead (OpaqueElement only compares the address, never
         // dereferences it, and the Vec is not mutated during a query).
         let inner = self.tree.borrow_inner();
-        match inner.nodes.get(self.node_id.index()) {
-            Some(slot) => OpaqueElement::new(slot),
+        match inner.get(self.node_id) {
+            Some(node) => OpaqueElement::new(node),
             None => OpaqueElement::new(self),
         }
     }
@@ -1791,11 +1791,7 @@ mod tests {
         let item = tree.get_element_by_id("item").unwrap();
         let unslotted = tree.get_element_by_id("unslotted").unwrap();
         let root = tree.attach_shadow_root(host, ShadowRootMode::Open).unwrap();
-        let slot = shadow_element(
-            &tree,
-            "slot",
-            &[("name", "title"), ("class", "outlet")],
-        );
+        let slot = shadow_element(&tree, "slot", &[("name", "title"), ("class", "outlet")]);
         let wrapper = shadow_element(&tree, "div", &[("class", "wrapper")]);
         tree.append_child(root, wrapper);
         tree.append_child(wrapper, slot);

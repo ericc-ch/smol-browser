@@ -5,9 +5,9 @@
 // which skipped any addEventListener('load', ...) listener. Both fail on main,
 // pass after the fix.
 
+use serde_json::{json, Value};
 use tinybrowser_cdp::dispatch::{dispatch, CdpContext};
 use tinybrowser_cdp::types::CdpRequest;
-use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -51,7 +51,11 @@ async fn cdp(
         ctx,
     )
     .await;
-    assert!(resp.error.is_none(), "CDP {method} failed: {:?}", resp.error);
+    assert!(
+        resp.error.is_none(),
+        "CDP {method} failed: {:?}",
+        resp.error
+    );
     resp.result.unwrap_or_else(|| json!({}))
 }
 
@@ -124,11 +128,29 @@ async fn iframe_document_dispatches_registered_listeners() {
     .await;
     let val = serde_json::from_str::<Value>(v["result"]["value"].as_str().unwrap()).unwrap();
     assert_eq!(val["hasDoc"], true);
-    assert_eq!(val["afterRegister"].as_u64(), Some(1), "listener runs once on dispatch");
-    assert_eq!(val["afterDuplicate"].as_u64(), Some(2), "duplicate registration deduped");
-    assert_eq!(val["afterRemove"].as_u64(), Some(2), "removed listener does not run");
-    assert_eq!(val["cancelReturn"], false, "preventDefault -> dispatchEvent returns false");
-    assert_eq!(val["plainReturn"], true, "no cancellation -> dispatchEvent returns true");
+    assert_eq!(
+        val["afterRegister"].as_u64(),
+        Some(1),
+        "listener runs once on dispatch"
+    );
+    assert_eq!(
+        val["afterDuplicate"].as_u64(),
+        Some(2),
+        "duplicate registration deduped"
+    );
+    assert_eq!(
+        val["afterRemove"].as_u64(),
+        Some(2),
+        "removed listener does not run"
+    );
+    assert_eq!(
+        val["cancelReturn"], false,
+        "preventDefault -> dispatchEvent returns false"
+    );
+    assert_eq!(
+        val["plainReturn"], true,
+        "no cancellation -> dispatchEvent returns true"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

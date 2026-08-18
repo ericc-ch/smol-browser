@@ -6,9 +6,9 @@
 //! walker reject every node. These use the structured_clone_crypto_parity
 //! helper pattern.
 
+use serde_json::{json, Value};
 use tinybrowser_cdp::dispatch::{dispatch, CdpContext};
 use tinybrowser_cdp::types::CdpRequest;
-use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -31,7 +31,13 @@ async fn serve_once() -> String {
     format!("http://{addr}/")
 }
 
-async fn cdp(ctx: &mut CdpContext, id: u64, method: &str, params: Value, session_id: &str) -> Value {
+async fn cdp(
+    ctx: &mut CdpContext,
+    id: u64,
+    method: &str,
+    params: Value,
+    session_id: &str,
+) -> Value {
     let resp = dispatch(
         &CdpRequest {
             id,
@@ -42,7 +48,11 @@ async fn cdp(ctx: &mut CdpContext, id: u64, method: &str, params: Value, session
         ctx,
     )
     .await;
-    assert!(resp.error.is_none(), "CDP {method} failed: {:?}", resp.error);
+    assert!(
+        resp.error.is_none(),
+        "CDP {method} failed: {:?}",
+        resp.error
+    );
     resp.result.unwrap_or_else(|| json!({}))
 }
 
@@ -64,7 +74,14 @@ async fn setup() -> (CdpContext, String) {
     let page_id = ctx.create_page();
     let session_id = "session-1";
     ctx.sessions.insert(session_id.to_string(), page_id.clone());
-    cdp(&mut ctx, 1, "Page.navigate", json!({"url": url, "waitUntil": "load"}), session_id).await;
+    cdp(
+        &mut ctx,
+        1,
+        "Page.navigate",
+        json!({"url": url, "waitUntil": "load"}),
+        session_id,
+    )
+    .await;
     (ctx, session_id.to_string())
 }
 

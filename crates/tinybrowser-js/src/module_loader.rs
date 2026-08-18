@@ -92,17 +92,13 @@ pub(crate) fn resolve_module_specifier(
         return resolve_import(specifier, document_base);
     }
 
-    let base = if referrer.is_empty()
-        || referrer.starts_with('<')
-        || referrer == "about:blank"
-    {
+    let base = if referrer.is_empty() || referrer.starts_with('<') || referrer == "about:blank" {
         document_base
     } else {
         referrer
     };
 
-    let base = Url::parse(base)
-        .map_err(|e| format!("Invalid module referrer {base}: {e}"))?;
+    let base = Url::parse(base).map_err(|e| format!("Invalid module referrer {base}: {e}"))?;
     import_map.resolve(specifier, &base)
 }
 

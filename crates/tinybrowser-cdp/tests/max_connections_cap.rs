@@ -39,12 +39,16 @@ async fn pick_port() -> u16 {
 async fn open_and_use(
     ws_port: u16,
     id: u64,
-) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>, String>
-{
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    String,
+> {
     let url = format!("ws://127.0.0.1:{}/devtools/browser", ws_port);
     let (mut ws, _) = connect_async(&url).await.map_err(|e| e.to_string())?;
     ws.send(Message::Text(
-        json!({"id": id, "method": "Target.getTargets"}).to_string().into(),
+        json!({"id": id, "method": "Target.getTargets"})
+            .to_string()
+            .into(),
     ))
     .await
     .map_err(|e| e.to_string())?;
@@ -121,7 +125,9 @@ fn max_connections_refuses_then_recovers() {
             held.push(
                 open_and_use(ws_port, 100 + i as u64)
                     .await
-                    .unwrap_or_else(|e| panic!("connection {} within the limit must be accepted: {}", i, e)),
+                    .unwrap_or_else(|e| {
+                        panic!("connection {} within the limit must be accepted: {}", i, e)
+                    }),
             );
         }
 

@@ -1,28 +1,29 @@
 use html5ever::{LocalName, Namespace, Prefix, QualName};
+use slotmap::{DefaultKey, Key, KeyData, SlotMap};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct NodeId(pub(crate) u32);
+pub struct NodeId(pub(crate) DefaultKey);
 
 impl NodeId {
-    pub fn new(val: u32) -> Self {
-        NodeId(val)
+    pub fn from_raw(raw: u64) -> Self {
+        NodeId(KeyData::from_ffi(raw).into())
     }
 
-    pub fn index(self) -> usize {
-        self.0 as usize
+    pub fn new(raw: u64) -> Self {
+        Self::from_raw(raw)
     }
 
-    pub fn raw(self) -> u32 {
-        self.0
+    pub fn raw(self) -> u64 {
+        self.0.data().as_ffi()
     }
 }
 
 impl fmt::Display for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "NodeId({})", self.0)
+        write!(f, "NodeId({})", self.raw())
     }
 }
 
@@ -230,9 +231,7 @@ impl Node {
 
     pub fn remove_attribute_ns(&mut self, ns: &str, local: &str) {
         if let NodeData::Element { attrs, .. } = &mut self.data {
-            attrs.retain(|a| {
-                !(a.name.ns.as_ref() == ns && a.name.local.as_ref() == local)
-            });
+            attrs.retain(|a| !(a.name.ns.as_ref() == ns && a.name.local.as_ref() == local));
         }
     }
 
@@ -245,12 +244,11 @@ impl Node {
 }
 
 pub struct DomTree {
-    inner: RefCell<DomTreeInner>,
+    pub(crate) inner: RefCell<DomTreeInner>,
 }
 
 pub(crate) struct DomTreeInner {
-    pub(crate) nodes: Vec<Option<Node>>,
-    pub(crate) free_list: Vec<u32>,
+    pub(crate) nodes: SlotMap<DefaultKey, Node>,
     pub(crate) document: NodeId,
     pub(crate) id_index: HashMap<String, NodeId>,
     /// Shadow roots are arena nodes with their own child list. They are kept
@@ -264,12 +262,29 @@ pub(crate) struct DomTreeInner {
     // Whether the document was parsed in (full) quirks mode. In quirks mode CSS
     // class and id selectors match ASCII-case-insensitively.
     pub(crate) quirks: bool,
+    pub(crate) listeners: HashMap<NodeId, Vec<crate::events::NativeListener>>,
+    pub(crate) next_listener_id: u64,
+}
+
+impl DomTreeInner {
+    pub(crate) fn get(&self, id: NodeId) -> Option<&Node> {
+        self.nodes.get(id.0)
+    }
+
+    pub(crate) fn get_mut(&mut self, id: NodeId) -> Option<&mut Node> {
+        self.nodes.get_mut(id.0)
+    }
+
+    pub(crate) fn contains(&self, id: NodeId) -> bool {
+        self.nodes.contains_key(id.0)
+    }
 }
 
 impl DomTree {
     pub fn new() -> Self {
-        let doc_node = Node {
-            id: NodeId(0),
+        let mut nodes = SlotMap::with_key();
+        let document = NodeId(nodes.insert_with_key(|key| Node {
+            id: NodeId(key),
             connected: true,
             parent: None,
             first_child: None,
@@ -277,17 +292,18 @@ impl DomTree {
             prev_sibling: None,
             next_sibling: None,
             data: NodeData::Document,
-        };
+        }));
         DomTree {
             inner: RefCell::new(DomTreeInner {
-                nodes: vec![Some(doc_node)],
-                free_list: Vec::new(),
-                document: NodeId(0),
+                nodes,
+                document,
                 id_index: HashMap::new(),
                 shadow_roots: HashMap::new(),
                 shadow_roots_by_host: HashMap::new(),
                 allow_declarative_shadow_roots: false,
                 quirks: false,
+                listeners: HashMap::new(),
+                next_listener_id: 1,
             }),
         }
     }
@@ -327,11 +343,7 @@ impl DomTree {
     ) -> Result<NodeId, AttachShadowError> {
         {
             let inner = self.inner.borrow();
-            let host_is_element = inner
-                .nodes
-                .get(host.index())
-                .and_then(|node| node.as_ref())
-                .is_some_and(Node::is_element);
+            let host_is_element = inner.get(host).is_some_and(Node::is_element);
             if !host_is_element {
                 return Err(AttachShadowError::HostIsNotElement);
             }
@@ -362,11 +374,7 @@ impl DomTree {
         mode: ShadowRootMode,
     ) -> Result<(), AttachShadowError> {
         let mut inner = self.inner.borrow_mut();
-        let host_is_element = inner
-            .nodes
-            .get(host.index())
-            .and_then(|node| node.as_ref())
-            .is_some_and(Node::is_element);
+        let host_is_element = inner.get(host).is_some_and(Node::is_element);
         if !host_is_element {
             return Err(AttachShadowError::HostIsNotElement);
         }
@@ -376,16 +384,12 @@ impl DomTree {
 
         let valid_root = root != inner.document
             && !inner.shadow_roots.contains_key(&root)
-            && inner
-                .nodes
-                .get(root.index())
-                .and_then(|node| node.as_ref())
-                .is_some_and(|node| {
-                    matches!(node.data, NodeData::Document)
-                        && node.parent.is_none()
-                        && node.prev_sibling.is_none()
-                        && node.next_sibling.is_none()
-                });
+            && inner.get(root).is_some_and(|node| {
+                matches!(node.data, NodeData::Document)
+                    && node.parent.is_none()
+                    && node.prev_sibling.is_none()
+                    && node.next_sibling.is_none()
+            });
         if !valid_root {
             return Err(AttachShadowError::InvalidShadowRoot);
         }
@@ -397,11 +401,7 @@ impl DomTree {
         };
         inner.shadow_roots.insert(root, info);
         inner.shadow_roots_by_host.insert(host, root);
-        let connected = inner
-            .nodes
-            .get(host.index())
-            .and_then(|node| node.as_ref())
-            .is_some_and(|node| node.connected);
+        let connected = inner.get(host).is_some_and(|node| node.connected);
         Self::set_subtree_connected(&mut inner, root, connected);
         Ok(())
     }
@@ -427,7 +427,7 @@ impl DomTree {
         let inner = self.inner.borrow();
         let mut current = node;
         for _ in 0..=inner.nodes.len() {
-            let current_node = inner.nodes.get(current.index())?.as_ref()?;
+            let current_node = inner.get(current)?;
             match current_node.parent {
                 Some(parent) => current = parent,
                 None => return Some(current),
@@ -447,7 +447,7 @@ impl DomTree {
         let inner = self.inner.borrow();
         let mut current = node;
         for _ in 0..=inner.nodes.len() {
-            let current_node = inner.nodes.get(current.index())?.as_ref()?;
+            let current_node = inner.get(current)?;
             if let Some(parent) = current_node.parent {
                 current = parent;
             } else if let Some(root) = inner.shadow_roots.get(&current) {
@@ -464,9 +464,7 @@ impl DomTree {
     pub fn is_connected(&self, node: NodeId) -> bool {
         self.inner
             .borrow()
-            .nodes
-            .get(node.index())
-            .and_then(|entry| entry.as_ref())
+            .get(node)
             .is_some_and(|node| node.connected)
     }
 
@@ -474,13 +472,11 @@ impl DomTree {
         // Fresh parser/framework insertions are overwhelmingly leaves. Avoid
         // allocating traversal state for the one-node case.
         let is_leaf = inner
-            .nodes
-            .get(root.index())
-            .and_then(|entry| entry.as_ref())
+            .get(root)
             .is_some_and(|node| node.first_child.is_none())
             && !inner.shadow_roots_by_host.contains_key(&root);
         if is_leaf {
-            if let Some(Some(node)) = inner.nodes.get_mut(root.index()) {
+            if let Some(node) = inner.get_mut(root) {
                 node.connected = connected;
             }
             return;
@@ -492,17 +488,14 @@ impl DomTree {
             if !seen.insert(node_id) {
                 continue;
             }
-            let (mut child, shadow_root) = match inner
-                .nodes
-                .get_mut(node_id.index())
-                .and_then(|entry| entry.as_mut())
-            {
+            let mut child = match inner.get_mut(node_id) {
                 Some(node) => {
                     node.connected = connected;
-                    (node.first_child, inner.shadow_roots_by_host.get(&node_id).copied())
+                    node.first_child
                 }
                 None => continue,
             };
+            let shadow_root = inner.shadow_roots_by_host.get(&node_id).copied();
             if let Some(root) = shadow_root {
                 stack.push(root);
             }
@@ -511,20 +504,14 @@ impl DomTree {
             for _ in 0..=inner.nodes.len() {
                 let Some(child_id) = child else { break };
                 stack.push(child_id);
-                child = inner
-                    .nodes
-                    .get(child_id.index())
-                    .and_then(|entry| entry.as_ref())
-                    .and_then(|node| node.next_sibling);
+                child = inner.get(child_id).and_then(|node| node.next_sibling);
             }
         }
     }
 
     fn host_including_parent(inner: &DomTreeInner, node: NodeId) -> Option<NodeId> {
         inner
-            .nodes
-            .get(node.index())
-            .and_then(|entry| entry.as_ref())
+            .get(node)
             .and_then(|entry| entry.parent)
             .or_else(|| inner.shadow_roots.get(&node).map(|root| root.host))
     }
@@ -538,9 +525,7 @@ impl DomTree {
         child: NodeId,
     ) -> bool {
         let child_can_be_ancestor = inner
-            .nodes
-            .get(child.index())
-            .and_then(|entry| entry.as_ref())
+            .get(child)
             .is_some_and(|entry| entry.first_child.is_some())
             || inner.shadow_roots_by_host.contains_key(&child);
         if !child_can_be_ancestor {
@@ -566,25 +551,8 @@ impl DomTree {
 
     pub fn new_node(&self, data: NodeData) -> NodeId {
         let mut inner = self.inner.borrow_mut();
-        let id = if let Some(slot) = inner.free_list.pop() {
-            NodeId(slot)
-        } else {
-            let idx = inner.nodes.len() as u32;
-            inner.nodes.push(None);
-            NodeId(idx)
-        };
-
-        if let NodeData::Element { ref attrs, .. } = data {
-            if let Some(id_attr) = attrs.iter().find(|a| a.name.local.as_ref() == "id") {
-                // Keep the FIRST element created with a given id. Parse order is
-                // document order, so getElementById / querySelector('#id') return
-                // the first-in-tree-order element on duplicate ids, per spec.
-                inner.id_index.entry(id_attr.value.clone()).or_insert(id);
-            }
-        }
-
-        inner.nodes[id.index()] = Some(Node {
-            id,
+        let id = NodeId(inner.nodes.insert_with_key(|key| Node {
+            id: NodeId(key),
             connected: false,
             parent: None,
             first_child: None,
@@ -592,12 +560,26 @@ impl DomTree {
             prev_sibling: None,
             next_sibling: None,
             data,
-        });
+        }));
+
+        let id_value = match &inner.nodes[id.0].data {
+            NodeData::Element { attrs, .. } => attrs
+                .iter()
+                .find(|a| a.name.local.as_ref() == "id")
+                .map(|a| a.value.clone()),
+            _ => None,
+        };
+        if let Some(value) = id_value {
+            // Keep the FIRST element created with a given id. Parse order is
+            // document order, so getElementById / querySelector('#id') return
+            // the first-in-tree-order element on duplicate ids, per spec.
+            inner.id_index.entry(value).or_insert(id);
+        }
         id
     }
 
     pub fn get_node(&self, id: NodeId) -> Option<Node> {
-        self.inner.borrow().nodes.get(id.index())?.clone()
+        self.inner.borrow().get(id).cloned()
     }
 
     pub fn with_node<F, R>(&self, id: NodeId, f: F) -> Option<R>
@@ -605,7 +587,7 @@ impl DomTree {
         F: FnOnce(&Node) -> R,
     {
         let inner = self.inner.borrow();
-        inner.nodes.get(id.index())?.as_ref().map(f)
+        inner.get(id).map(f)
     }
 
     pub fn with_node_mut<F, R>(&self, id: NodeId, f: F) -> Option<R>
@@ -613,7 +595,7 @@ impl DomTree {
         F: FnOnce(&mut Node) -> R,
     {
         let mut inner = self.inner.borrow_mut();
-        inner.nodes.get_mut(id.index())?.as_mut().map(f)
+        inner.get_mut(id).map(f)
     }
 
     pub fn append_child(&self, parent_id: NodeId, child_id: NodeId) {
@@ -630,14 +612,8 @@ impl DomTree {
         // pointer is null. Follow both ordinary parents and root-to-host edges.
         let (parent_connected, child_connected) = {
             let inner = self.inner.borrow();
-            let parent_exists = inner
-                .nodes
-                .get(parent_id.index())
-                .is_some_and(Option::is_some);
-            let child_exists = inner
-                .nodes
-                .get(child_id.index())
-                .is_some_and(Option::is_some);
+            let parent_exists = inner.contains(parent_id);
+            let child_exists = inner.contains(child_id);
             // A leaf which is not a shadow host cannot be an inclusive
             // ancestor of the destination parent. Detached framework tree
             // construction appends thousands of freshly-created leaves; doing
@@ -645,9 +621,7 @@ impl DomTree {
             // Non-leaves and shadow hosts retain the full host-including cycle
             // check, where reparenting really can create a cycle.
             let child_can_be_ancestor = inner
-                .nodes
-                .get(child_id.index())
-                .and_then(|entry| entry.as_ref())
+                .get(child_id)
                 .is_some_and(|child| child.first_child.is_some())
                 || inner.shadow_roots_by_host.contains_key(&child_id);
             if !parent_exists
@@ -658,39 +632,29 @@ impl DomTree {
             {
                 return;
             }
-            let parent_connected = inner
-                .nodes
-                .get(parent_id.index())
-                .and_then(|entry| entry.as_ref())
-                .is_some_and(|parent| parent.connected);
-            let child_connected = inner
-                .nodes
-                .get(child_id.index())
-                .and_then(|entry| entry.as_ref())
-                .is_some_and(|child| child.connected);
+            let parent_connected = inner.get(parent_id).is_some_and(|parent| parent.connected);
+            let child_connected = inner.get(child_id).is_some_and(|child| child.connected);
             (parent_connected, child_connected)
         };
         self.detach_for_reparent(child_id, child_connected && !parent_connected);
 
         let mut inner = self.inner.borrow_mut();
 
-        let old_last = inner.nodes.get(parent_id.index())
-            .and_then(|n| n.as_ref())
-            .and_then(|n| n.last_child);
+        let old_last = inner.get(parent_id).and_then(|n| n.last_child);
 
-        if let Some(Some(child)) = inner.nodes.get_mut(child_id.index()) {
+        if let Some(child) = inner.get_mut(child_id) {
             child.parent = Some(parent_id);
             child.prev_sibling = old_last;
             child.next_sibling = None;
         }
 
         if let Some(old_last_id) = old_last {
-            if let Some(Some(old_last_node)) = inner.nodes.get_mut(old_last_id.index()) {
+            if let Some(old_last_node) = inner.get_mut(old_last_id) {
                 old_last_node.next_sibling = Some(child_id);
             }
         }
 
-        if let Some(Some(parent)) = inner.nodes.get_mut(parent_id.index()) {
+        if let Some(parent) = inner.get_mut(parent_id) {
             if parent.first_child.is_none() {
                 parent.first_child = Some(child_id);
             }
@@ -713,13 +677,9 @@ impl DomTree {
         }
         let (parent_id, parent_connected) = {
             let inner = self.inner.borrow();
-            match inner.nodes.get(existing_id.index()).and_then(|n| n.as_ref()).and_then(|n| n.parent) {
+            match inner.get(existing_id).and_then(|n| n.parent) {
                 Some(parent) => {
-                    let connected = inner
-                        .nodes
-                        .get(parent.index())
-                        .and_then(|entry| entry.as_ref())
-                        .is_some_and(|node| node.connected);
+                    let connected = inner.get(parent).is_some_and(|node| node.connected);
                     (parent, connected)
                 }
                 None => return,
@@ -731,10 +691,7 @@ impl DomTree {
         // root is not present in the ordinary child list.
         {
             let inner = self.inner.borrow();
-            let new_exists = inner
-                .nodes
-                .get(new_sibling_id.index())
-                .is_some_and(Option::is_some);
+            let new_exists = inner.contains(new_sibling_id);
             if !new_exists
                 || inner.shadow_roots.contains_key(&new_sibling_id)
                 || Self::would_create_host_including_cycle(&inner, parent_id, new_sibling_id)
@@ -744,10 +701,7 @@ impl DomTree {
         }
 
         let child_connected = self.is_connected(new_sibling_id);
-        self.detach_for_reparent(
-            new_sibling_id,
-            child_connected && !parent_connected,
-        );
+        self.detach_for_reparent(new_sibling_id, child_connected && !parent_connected);
 
         // Read existing's prev AFTER detaching new. If new was existing's
         // immediate previous sibling, detach moved that pointer; using the
@@ -755,28 +709,26 @@ impl DomTree {
         // and hang every later sibling walk. This is what hung ebay.com.
         let prev_id = {
             let inner = self.inner.borrow();
-            inner.nodes.get(existing_id.index())
-                .and_then(|n| n.as_ref())
-                .and_then(|n| n.prev_sibling)
+            inner.get(existing_id).and_then(|n| n.prev_sibling)
         };
 
         let mut inner = self.inner.borrow_mut();
 
-        if let Some(Some(node)) = inner.nodes.get_mut(new_sibling_id.index()) {
+        if let Some(node) = inner.get_mut(new_sibling_id) {
             node.parent = Some(parent_id);
             node.prev_sibling = prev_id;
             node.next_sibling = Some(existing_id);
         }
 
-        if let Some(Some(node)) = inner.nodes.get_mut(existing_id.index()) {
+        if let Some(node) = inner.get_mut(existing_id) {
             node.prev_sibling = Some(new_sibling_id);
         }
 
         if let Some(prev) = prev_id {
-            if let Some(Some(node)) = inner.nodes.get_mut(prev.index()) {
+            if let Some(node) = inner.get_mut(prev) {
                 node.next_sibling = Some(new_sibling_id);
             }
-        } else if let Some(Some(parent)) = inner.nodes.get_mut(parent_id.index()) {
+        } else if let Some(parent) = inner.get_mut(parent_id) {
             parent.first_child = Some(new_sibling_id);
         }
         if parent_connected && !child_connected {
@@ -797,40 +749,35 @@ impl DomTree {
             return;
         }
 
-        let (parent_id, prev_id, next_id) = match inner.nodes.get(node_id.index()).and_then(|n| n.as_ref()) {
+        let (parent_id, prev_id, next_id) = match inner.get(node_id) {
             Some(node) => (node.parent, node.prev_sibling, node.next_sibling),
             None => return,
         };
-        if disconnect && inner
-            .nodes
-            .get(node_id.index())
-            .and_then(|entry| entry.as_ref())
-            .is_some_and(|node| node.connected)
-        {
+        if disconnect && inner.get(node_id).is_some_and(|node| node.connected) {
             Self::set_subtree_connected(&mut inner, node_id, false);
         }
 
         if let Some(prev) = prev_id {
-            if let Some(Some(node)) = inner.nodes.get_mut(prev.index()) {
+            if let Some(node) = inner.get_mut(prev) {
                 node.next_sibling = next_id;
             }
         } else if let Some(parent_id) = parent_id {
-            if let Some(Some(parent)) = inner.nodes.get_mut(parent_id.index()) {
+            if let Some(parent) = inner.get_mut(parent_id) {
                 parent.first_child = next_id;
             }
         }
 
         if let Some(next) = next_id {
-            if let Some(Some(node)) = inner.nodes.get_mut(next.index()) {
+            if let Some(node) = inner.get_mut(next) {
                 node.prev_sibling = prev_id;
             }
         } else if let Some(parent_id) = parent_id {
-            if let Some(Some(parent)) = inner.nodes.get_mut(parent_id.index()) {
+            if let Some(parent) = inner.get_mut(parent_id) {
                 parent.last_child = prev_id;
             }
         }
 
-        if let Some(Some(node)) = inner.nodes.get_mut(node_id.index()) {
+        if let Some(node) = inner.get_mut(node_id) {
             node.parent = None;
             node.prev_sibling = None;
             node.next_sibling = None;
@@ -848,13 +795,13 @@ impl DomTree {
             let descendants = self.descendants(node_id);
             let inner = self.inner.borrow();
             let mut ids: Vec<String> = Vec::new();
-            if let Some(Some(node)) = inner.nodes.get(node_id.index()) {
+            if let Some(node) = inner.get(node_id) {
                 if let Some(id_val) = node.get_attribute("id") {
                     ids.push(id_val.to_string());
                 }
             }
             for desc_id in &descendants {
-                if let Some(Some(node)) = inner.nodes.get(desc_id.index()) {
+                if let Some(node) = inner.get(*desc_id) {
                     if let Some(id_val) = node.get_attribute("id") {
                         ids.push(id_val.to_string());
                     }
@@ -881,7 +828,7 @@ impl DomTree {
 
         let mut ids_to_remove = Vec::new();
         for &id in &nodes_to_remove {
-            if let Some(Some(node)) = inner.nodes.get(id.index()) {
+            if let Some(node) = inner.get(id) {
                 if let Some(id_val) = node.get_attribute("id") {
                     ids_to_remove.push(id_val.to_string());
                 }
@@ -910,10 +857,8 @@ impl DomTree {
         // would push it onto the free list a second time — later handing the
         // same NodeId to two live nodes (aliasing).
         for id in nodes_to_remove {
-            if matches!(inner.nodes.get(id.index()), Some(Some(_))) {
-                inner.nodes[id.index()] = None;
-                inner.free_list.push(id.0);
-            }
+            inner.listeners.remove(&id);
+            inner.nodes.remove(id.0);
         }
     }
 
@@ -922,11 +867,7 @@ impl DomTree {
     /// traversal must remain tree-scoped and therefore never follows host edges.
     fn inclusive_owned_subtrees(&self, node_id: NodeId) -> Vec<NodeId> {
         let inner = self.inner.borrow();
-        if !inner
-            .nodes
-            .get(node_id.index())
-            .is_some_and(Option::is_some)
-        {
+        if !inner.contains(node_id) {
             return Vec::new();
         }
 
@@ -937,11 +878,7 @@ impl DomTree {
             if !seen.insert(current) {
                 continue;
             }
-            let Some(node) = inner
-                .nodes
-                .get(current.index())
-                .and_then(|entry| entry.as_ref())
-            else {
+            let Some(node) = inner.get(current) else {
                 continue;
             };
             result.push(current);
@@ -957,11 +894,7 @@ impl DomTree {
                 if children.len() > inner.nodes.len() {
                     break;
                 }
-                child = inner
-                    .nodes
-                    .get(child_id.index())
-                    .and_then(|entry| entry.as_ref())
-                    .and_then(|entry| entry.next_sibling);
+                child = inner.get(child_id).and_then(|entry| entry.next_sibling);
             }
             stack.extend(children.into_iter().rev());
         }
@@ -971,14 +904,10 @@ impl DomTree {
     pub fn children(&self, node_id: NodeId) -> Vec<NodeId> {
         let inner = self.inner.borrow();
         let mut result = Vec::new();
-        let mut current = inner.nodes.get(node_id.index())
-            .and_then(|n| n.as_ref())
-            .and_then(|n| n.first_child);
+        let mut current = inner.get(node_id).and_then(|n| n.first_child);
         while let Some(child_id) = current {
             result.push(child_id);
-            current = inner.nodes.get(child_id.index())
-                .and_then(|n| n.as_ref())
-                .and_then(|n| n.next_sibling);
+            current = inner.get(child_id).and_then(|n| n.next_sibling);
         }
         result
     }
@@ -995,19 +924,18 @@ impl DomTree {
         let mut result = Vec::new();
         let mut stack = Vec::new();
 
-        let mut first = inner.nodes.get(node_id.index())
-            .and_then(|n| n.as_ref())
-            .and_then(|n| n.first_child);
+        let mut first = inner.get(node_id).and_then(|n| n.first_child);
         let mut children_to_push = Vec::new();
         while let Some(child_id) = first {
             children_to_push.push(child_id);
             if children_to_push.len() > inner.nodes.len() {
-                eprintln!("tinybrowser: sibling-chain cap hit at node {} - cycle", node_id.index());
+                eprintln!(
+                    "tinybrowser: sibling-chain cap hit at node {} - cycle",
+                    node_id
+                );
                 break;
             }
-            first = inner.nodes.get(child_id.index())
-                .and_then(|n| n.as_ref())
-                .and_then(|n| n.next_sibling);
+            first = inner.get(child_id).and_then(|n| n.next_sibling);
         }
         for child_id in children_to_push.into_iter().rev() {
             stack.push(child_id);
@@ -1023,25 +951,24 @@ impl DomTree {
             if result.len() > inner.nodes.len() {
                 eprintln!(
                     "tinybrowser: descendants() cap hit at node {} ({} nodes) - tree has a cycle",
-                    node_id.index(),
+                    node_id,
                     inner.nodes.len()
                 );
                 break;
             }
 
-            let mut child = inner.nodes.get(current.index())
-                .and_then(|n| n.as_ref())
-                .and_then(|n| n.first_child);
+            let mut child = inner.get(current).and_then(|n| n.first_child);
             let mut children_to_push = Vec::new();
             while let Some(child_id) = child {
                 children_to_push.push(child_id);
                 if children_to_push.len() > inner.nodes.len() {
-                    eprintln!("tinybrowser: sibling-chain cap hit at node {} - cycle", current.index());
+                    eprintln!(
+                        "tinybrowser: sibling-chain cap hit at node {} - cycle",
+                        current
+                    );
                     break;
                 }
-                child = inner.nodes.get(child_id.index())
-                    .and_then(|n| n.as_ref())
-                    .and_then(|n| n.next_sibling);
+                child = inner.get(child_id).and_then(|n| n.next_sibling);
             }
             for child_id in children_to_push.into_iter().rev() {
                 stack.push(child_id);
@@ -1064,8 +991,7 @@ impl DomTree {
     pub fn is_html_slot_element(&self, node: NodeId) -> bool {
         self.get_node(node).is_some_and(|node| {
             node.as_element().is_some_and(|name| {
-                name.ns.as_ref() == "http://www.w3.org/1999/xhtml"
-                    && name.local.as_ref() == "slot"
+                name.ns.as_ref() == "http://www.w3.org/1999/xhtml" && name.local.as_ref() == "slot"
             })
         })
     }
@@ -1166,7 +1092,7 @@ impl DomTree {
     /// per ancestor when a TreeWalker reaches a deep leaf.
     pub fn next_in_subtree(&self, root: NodeId, current: NodeId) -> Option<NodeId> {
         let inner = self.inner.borrow();
-        let current_node = inner.nodes.get(current.index())?.as_ref()?;
+        let current_node = inner.get(current)?;
         if let Some(child) = current_node.first_child {
             return Some(child);
         }
@@ -1198,7 +1124,7 @@ impl DomTree {
         if current == root {
             return None;
         }
-        let current_node = inner.nodes.get(current.index())?.as_ref()?;
+        let current_node = inner.get(current)?;
 
         let Some(prev) = current_node.prev_sibling else {
             // No previous sibling: the parent immediately precedes `current`.
@@ -1208,7 +1134,7 @@ impl DomTree {
         // Otherwise it is the previous sibling's deepest last descendant.
         let mut node_id = prev;
         for _ in 0..=inner.nodes.len() {
-            let node = inner.nodes.get(node_id.index())?.as_ref()?;
+            let node = inner.get(node_id)?;
             match node.last_child {
                 Some(child) => node_id = child,
                 None => return Some(node_id),
@@ -1232,7 +1158,7 @@ impl DomTree {
             if node_id == root {
                 return None;
             }
-            let node = inner.nodes.get(node_id.index())?.as_ref()?;
+            let node = inner.get(node_id)?;
             if let Some(sibling) = node.next_sibling {
                 return Some(sibling);
             }
@@ -1255,9 +1181,11 @@ impl DomTree {
     pub fn template_contents(&self, node_id: NodeId) -> Option<NodeId> {
         {
             let inner = self.inner.borrow();
-            let node = inner.nodes.get(node_id.index())?.as_ref()?;
+            let node = inner.get(node_id)?;
             match &node.data {
-                NodeData::Element { template_contents, .. } => {
+                NodeData::Element {
+                    template_contents, ..
+                } => {
                     if let Some(existing) = *template_contents {
                         return Some(existing);
                     }
@@ -1270,8 +1198,11 @@ impl DomTree {
         // Matches what the tree sink allocates for a parsed template.
         let contents = self.new_node(NodeData::Document);
         let mut inner = self.inner.borrow_mut();
-        if let Some(Some(node)) = inner.nodes.get_mut(node_id.index()) {
-            if let NodeData::Element { template_contents, .. } = &mut node.data {
+        if let Some(node) = inner.get_mut(node_id) {
+            if let NodeData::Element {
+                template_contents, ..
+            } = &mut node.data
+            {
                 *template_contents = Some(contents);
                 return Some(contents);
             }
@@ -1282,14 +1213,10 @@ impl DomTree {
     pub fn ancestors(&self, node_id: NodeId) -> Vec<NodeId> {
         let inner = self.inner.borrow();
         let mut result = Vec::new();
-        let mut current = inner.nodes.get(node_id.index())
-            .and_then(|n| n.as_ref())
-            .and_then(|n| n.parent);
+        let mut current = inner.get(node_id).and_then(|n| n.parent);
         while let Some(parent_id) = current {
             result.push(parent_id);
-            current = inner.nodes.get(parent_id.index())
-                .and_then(|n| n.as_ref())
-                .and_then(|n| n.parent);
+            current = inner.get(parent_id).and_then(|n| n.parent);
         }
         result
     }
@@ -1305,10 +1232,12 @@ impl DomTree {
         // document.getElementById; recover the first matching light-tree
         // element in document order instead. Detached and template-content
         // nodes retain the legacy best-effort lookup behavior used internally.
-        self.descendants(self.document()).into_iter().find(|node_id| {
-            self.with_node(*node_id, |node| node.get_attribute("id") == Some(id))
-                .unwrap_or(false)
-        })
+        self.descendants(self.document())
+            .into_iter()
+            .find(|node_id| {
+                self.with_node(*node_id, |node| node.get_attribute("id") == Some(id))
+                    .unwrap_or(false)
+            })
     }
 
     pub fn text_content(&self, node_id: NodeId) -> String {
@@ -1319,7 +1248,7 @@ impl DomTree {
         // concatenates Text node content only (Comment + PI are
         // skipped). Handle the direct-CharacterData case here so the
         // descent helper can keep its element-centric behavior.
-        if let Some(Some(node)) = inner.nodes.get(node_id.index()) {
+        if let Some(node) = inner.get(node_id) {
             match &node.data {
                 NodeData::Text { contents } => return contents.clone(),
                 NodeData::Comment { contents } => return contents.clone(),
@@ -1335,11 +1264,10 @@ impl DomTree {
     pub fn append_text(&self, parent_id: NodeId, text: &str) {
         let last_child_is_text = {
             let inner = self.inner.borrow();
-            inner.nodes.get(parent_id.index())
-                .and_then(|n| n.as_ref())
+            inner
+                .get(parent_id)
                 .and_then(|n| n.last_child)
-                .and_then(|lc| inner.nodes.get(lc.index()))
-                .and_then(|n| n.as_ref())
+                .and_then(|lc| inner.get(lc))
                 .map(|n| n.is_text())
                 .unwrap_or(false)
         };
@@ -1350,13 +1278,11 @@ impl DomTree {
             // panicking (a panic here aborts the whole engine via V8_Fatal).
             let last_child_id = {
                 let inner = self.inner.borrow();
-                inner.nodes.get(parent_id.index())
-                    .and_then(|n| n.as_ref())
-                    .and_then(|n| n.last_child)
+                inner.get(parent_id).and_then(|n| n.last_child)
             };
             if let Some(last_child_id) = last_child_id {
                 let mut inner = self.inner.borrow_mut();
-                if let Some(Some(node)) = inner.nodes.get_mut(last_child_id.index()) {
+                if let Some(node) = inner.get_mut(last_child_id) {
                     if let NodeData::Text { contents } = &mut node.data {
                         contents.push_str(text);
                         return;
@@ -1386,7 +1312,10 @@ impl DomTree {
         let doc = self.document();
         for child in self.children(doc) {
             if let Some(n) = self.get_node(child) {
-                if n.as_element().map(|name| name.local.as_ref() == "html").unwrap_or(false) {
+                if n.as_element()
+                    .map(|name| name.local.as_ref() == "html")
+                    .unwrap_or(false)
+                {
                     return child;
                 }
             }
@@ -1442,7 +1371,9 @@ impl DomTree {
     ) {
         let source_contents = self
             .with_node(source_node, |node| match &node.data {
-                NodeData::Element { template_contents, .. } => *template_contents,
+                NodeData::Element {
+                    template_contents, ..
+                } => *template_contents,
                 _ => None,
             })
             .flatten();
@@ -1450,7 +1381,10 @@ impl DomTree {
         if let Some(source_contents) = source_contents {
             let cloned_contents = self.new_node(NodeData::Document);
             self.with_node_mut(cloned_node, |node| {
-                if let NodeData::Element { template_contents, .. } = &mut node.data {
+                if let NodeData::Element {
+                    template_contents, ..
+                } = &mut node.data
+                {
                     *template_contents = Some(cloned_contents);
                 }
             });
@@ -1478,8 +1412,8 @@ impl DomTree {
         while let Some((dest_parent, src_id)) = stack.pop() {
             let node_data = {
                 let source_inner = source.inner.borrow();
-                match source_inner.nodes.get(src_id.index()) {
-                    Some(Some(node)) => node.data.clone(),
+                match source_inner.get(src_id) {
+                    Some(node) => node.data.clone(),
                     _ => continue,
                 }
             };
@@ -1495,9 +1429,11 @@ impl DomTree {
             // the reference is remapped rather than left dangling (issue #463).
             let src_contents = {
                 let inner = self.inner.borrow();
-                match inner.nodes.get(new_id.index()).and_then(|n| n.as_ref()) {
+                match inner.get(new_id) {
                     Some(node) => match &node.data {
-                        NodeData::Element { template_contents, .. } => *template_contents,
+                        NodeData::Element {
+                            template_contents, ..
+                        } => *template_contents,
                         _ => None,
                     },
                     None => None,
@@ -1507,8 +1443,11 @@ impl DomTree {
                 let dest_contents = self.new_node(NodeData::Document);
                 {
                     let mut inner = self.inner.borrow_mut();
-                    if let Some(Some(node)) = inner.nodes.get_mut(new_id.index()) {
-                        if let NodeData::Element { template_contents, .. } = &mut node.data {
+                    if let Some(node) = inner.get_mut(new_id) {
+                        if let NodeData::Element {
+                            template_contents, ..
+                        } = &mut node.data
+                        {
                             *template_contents = Some(dest_contents);
                         }
                     }
@@ -1526,7 +1465,7 @@ impl DomTree {
     }
 
     pub fn len(&self) -> usize {
-        self.inner.borrow().nodes.iter().filter(|n| n.is_some()).count()
+        self.inner.borrow().nodes.len()
     }
 
     // Number of node slots (live plus freed), i.e. the same upper bound
@@ -1570,8 +1509,8 @@ fn collect_text_inner(inner: &DomTreeInner, node_id: NodeId, buf: &mut String) {
             break;
         }
 
-        let node = match inner.nodes.get(id.index()) {
-            Some(Some(n)) => n,
+        let node = match inner.get(id) {
+            Some(n) => n,
             _ => continue,
         };
 
@@ -1592,9 +1531,7 @@ fn collect_text_inner(inner: &DomTreeInner, node_id: NodeId, buf: &mut String) {
                         eprintln!("tinybrowser: collect_text_inner sibling cap hit - cycle");
                         break;
                     }
-                    child = inner.nodes.get(child_id.index())
-                        .and_then(|n| n.as_ref())
-                        .and_then(|n| n.next_sibling);
+                    child = inner.get(child_id).and_then(|n| n.next_sibling);
                 }
                 for child_id in kids.into_iter().rev() {
                     stack.push(child_id);
@@ -1656,15 +1593,24 @@ mod tests {
     fn remove_twice_does_not_alias_slots() {
         let tree = DomTree::new();
         let doc = tree.document();
-        let a = tree.new_node(NodeData::Text { contents: "a".into() });
+        let a = tree.new_node(NodeData::Text {
+            contents: "a".into(),
+        });
         tree.append_child(doc, a);
         tree.remove(a);
         // Removing the already-freed node again must not push its slot onto the
         // free list a second time, or two later allocations alias one slot.
         tree.remove(a);
-        let x = tree.new_node(NodeData::Text { contents: "x".into() });
-        let y = tree.new_node(NodeData::Text { contents: "y".into() });
-        assert_ne!(x, y, "double-free aliased two live nodes onto the same slot");
+        let x = tree.new_node(NodeData::Text {
+            contents: "x".into(),
+        });
+        let y = tree.new_node(NodeData::Text {
+            contents: "y".into(),
+        });
+        assert_ne!(
+            x, y,
+            "double-free aliased two live nodes onto the same slot"
+        );
     }
 
     #[test]
@@ -1725,13 +1671,15 @@ mod tests {
         tree.append_child(host, named);
         tree.append_child(host, default_text);
 
-        let root = tree
-            .attach_shadow_root(host, ShadowRootMode::Open)
-            .unwrap();
+        let root = tree.attach_shadow_root(host, ShadowRootMode::Open).unwrap();
         let first_named = element(&tree, "slot");
-        tree.with_node_mut(first_named, |node| node.set_attribute("name", "title".into()));
+        tree.with_node_mut(first_named, |node| {
+            node.set_attribute("name", "title".into())
+        });
         let duplicate_named = element(&tree, "slot");
-        tree.with_node_mut(duplicate_named, |node| node.set_attribute("name", "title".into()));
+        tree.with_node_mut(duplicate_named, |node| {
+            node.set_attribute("name", "title".into())
+        });
         let fallback = element(&tree, "b");
         tree.append_child(duplicate_named, fallback);
         let default_slot = element(&tree, "slot");
@@ -1758,9 +1706,7 @@ mod tests {
         let document = tree.document();
         let host = element(&tree, "x-card");
         tree.append_child(document, host);
-        let root = tree
-            .attach_shadow_root(host, ShadowRootMode::Open)
-            .unwrap();
+        let root = tree.attach_shadow_root(host, ShadowRootMode::Open).unwrap();
 
         // The shadow element is created first, so it owns the best-effort
         // global id-index entry. Public document lookup still has to recover
@@ -1787,9 +1733,7 @@ mod tests {
         let document = tree.document();
         let host = element(&tree, "x-card");
         tree.append_child(document, host);
-        let root = tree
-            .attach_shadow_root(host, ShadowRootMode::Open)
-            .unwrap();
+        let root = tree.attach_shadow_root(host, ShadowRootMode::Open).unwrap();
         let shadow_child = element(&tree, "span");
         tree.append_child(root, shadow_child);
 
@@ -1812,9 +1756,7 @@ mod tests {
         let host = element(&tree, "x-card");
         let light = element(&tree, "span");
         tree.append_child(host, light);
-        let root = tree
-            .attach_shadow_root(host, ShadowRootMode::Open)
-            .unwrap();
+        let root = tree.attach_shadow_root(host, ShadowRootMode::Open).unwrap();
         let shadow = element(&tree, "button");
         tree.append_child(root, shadow);
         for node in [host, light, root, shadow] {
@@ -1843,9 +1785,7 @@ mod tests {
         tree.append_child(document, left);
         tree.append_child(document, right);
         tree.append_child(host, light);
-        let root = tree
-            .attach_shadow_root(host, ShadowRootMode::Open)
-            .unwrap();
+        let root = tree.attach_shadow_root(host, ShadowRootMode::Open).unwrap();
         let shadow = element(&tree, "button");
         tree.append_child(root, shadow);
         tree.append_child(left, host);
@@ -1871,9 +1811,7 @@ mod tests {
         let tree = DomTree::new();
         let host = element(&tree, "x-card");
         tree.append_child(tree.document(), host);
-        let root = tree
-            .attach_shadow_root(host, ShadowRootMode::Open)
-            .unwrap();
+        let root = tree.attach_shadow_root(host, ShadowRootMode::Open).unwrap();
         let shadow_host = element(&tree, "nested-card");
         tree.append_child(root, shadow_host);
         let nested_root = tree
@@ -1902,13 +1840,13 @@ mod tests {
         let host = element(&tree, "x-card");
         let light = element(&tree, "span");
         tree.append_child(host, light);
-        let root = tree
-            .attach_shadow_root(host, ShadowRootMode::Open)
-            .unwrap();
+        let root = tree.attach_shadow_root(host, ShadowRootMode::Open).unwrap();
         tree.append_child(root, element(&tree, "button"));
 
         assert_eq!(tree.clone_node(root, true), None);
-        let clone = tree.clone_node(host, true).expect("host itself is clonable");
+        let clone = tree
+            .clone_node(host, true)
+            .expect("host itself is clonable");
         assert_eq!(tree.shadow_root(clone), None);
         assert_eq!(tree.children(clone).len(), 1);
     }
@@ -1937,9 +1875,15 @@ mod tests {
     fn test_multiple_children() {
         let tree = DomTree::new();
         let doc = tree.document();
-        let c1 = tree.new_node(NodeData::Text { contents: "a".into() });
-        let c2 = tree.new_node(NodeData::Text { contents: "b".into() });
-        let c3 = tree.new_node(NodeData::Text { contents: "c".into() });
+        let c1 = tree.new_node(NodeData::Text {
+            contents: "a".into(),
+        });
+        let c2 = tree.new_node(NodeData::Text {
+            contents: "b".into(),
+        });
+        let c3 = tree.new_node(NodeData::Text {
+            contents: "c".into(),
+        });
         tree.append_child(doc, c1);
         tree.append_child(doc, c2);
         tree.append_child(doc, c3);
@@ -1951,8 +1895,12 @@ mod tests {
     fn test_detach() {
         let tree = DomTree::new();
         let doc = tree.document();
-        let c1 = tree.new_node(NodeData::Text { contents: "a".into() });
-        let c2 = tree.new_node(NodeData::Text { contents: "b".into() });
+        let c1 = tree.new_node(NodeData::Text {
+            contents: "a".into(),
+        });
+        let c2 = tree.new_node(NodeData::Text {
+            contents: "b".into(),
+        });
         tree.append_child(doc, c1);
         tree.append_child(doc, c2);
 
@@ -1966,9 +1914,15 @@ mod tests {
     fn test_insert_before() {
         let tree = DomTree::new();
         let doc = tree.document();
-        let c1 = tree.new_node(NodeData::Text { contents: "a".into() });
-        let c2 = tree.new_node(NodeData::Text { contents: "b".into() });
-        let c3 = tree.new_node(NodeData::Text { contents: "c".into() });
+        let c1 = tree.new_node(NodeData::Text {
+            contents: "a".into(),
+        });
+        let c2 = tree.new_node(NodeData::Text {
+            contents: "b".into(),
+        });
+        let c3 = tree.new_node(NodeData::Text {
+            contents: "c".into(),
+        });
         tree.append_child(doc, c1);
         tree.append_child(doc, c3);
         tree.insert_before(c3, c2);
@@ -1988,8 +1942,12 @@ mod tests {
         });
         tree.append_child(doc, div);
 
-        let t1 = tree.new_node(NodeData::Text { contents: "Hello ".into() });
-        let t2 = tree.new_node(NodeData::Text { contents: "World".into() });
+        let t1 = tree.new_node(NodeData::Text {
+            contents: "Hello ".into(),
+        });
+        let t2 = tree.new_node(NodeData::Text {
+            contents: "World".into(),
+        });
         tree.append_child(div, t1);
         tree.append_child(div, t2);
 
@@ -2043,12 +2001,20 @@ mod tests {
 
         // append_child: html is an ancestor of div -> must be a no-op, no cycle.
         tree.append_child(div, html);
-        assert_eq!(tree.descendants(doc).len(), before, "cyclic append must be a no-op");
+        assert_eq!(
+            tree.descendants(doc).len(),
+            before,
+            "cyclic append must be a no-op"
+        );
         assert_eq!(tree.descendants(div).len(), 0, "div must stay a leaf");
 
         // insert_before: html is an ancestor of body (div's parent) -> no-op.
         tree.insert_before(div, html);
-        assert_eq!(tree.descendants(doc).len(), before, "cyclic insert_before must be a no-op");
+        assert_eq!(
+            tree.descendants(doc).len(),
+            before,
+            "cyclic insert_before must be a no-op"
+        );
 
         // self-append / self-insert remain no-ops (existing guards).
         tree.append_child(div, div);
@@ -2109,7 +2075,9 @@ mod tests {
             mathml_annotation_xml_integration_point: false,
         });
         tree.append_child(doc, div);
-        let text = tree.new_node(NodeData::Text { contents: "hi".into() });
+        let text = tree.new_node(NodeData::Text {
+            contents: "hi".into(),
+        });
         tree.append_child(div, text);
 
         assert_eq!(tree.len(), 3);
@@ -2120,10 +2088,18 @@ mod tests {
     #[test]
     fn test_next_in_subtree_follows_document_order_and_stays_within_root() {
         let tree = DomTree::new();
-        let root = tree.new_node(NodeData::Text { contents: "root".into() });
-        let first = tree.new_node(NodeData::Text { contents: "first".into() });
-        let nested = tree.new_node(NodeData::Text { contents: "nested".into() });
-        let second = tree.new_node(NodeData::Text { contents: "second".into() });
+        let root = tree.new_node(NodeData::Text {
+            contents: "root".into(),
+        });
+        let first = tree.new_node(NodeData::Text {
+            contents: "first".into(),
+        });
+        let nested = tree.new_node(NodeData::Text {
+            contents: "nested".into(),
+        });
+        let second = tree.new_node(NodeData::Text {
+            contents: "second".into(),
+        });
         tree.append_child(tree.document(), root);
         tree.append_child(root, first);
         tree.append_child(first, nested);
@@ -2141,10 +2117,18 @@ mod tests {
         // `first` must land on `second`, not descend into `nested` — that is
         // what NodeFilter.FILTER_REJECT needs.
         let tree = DomTree::new();
-        let root = tree.new_node(NodeData::Text { contents: "root".into() });
-        let first = tree.new_node(NodeData::Text { contents: "first".into() });
-        let nested = tree.new_node(NodeData::Text { contents: "nested".into() });
-        let second = tree.new_node(NodeData::Text { contents: "second".into() });
+        let root = tree.new_node(NodeData::Text {
+            contents: "root".into(),
+        });
+        let first = tree.new_node(NodeData::Text {
+            contents: "first".into(),
+        });
+        let nested = tree.new_node(NodeData::Text {
+            contents: "nested".into(),
+        });
+        let second = tree.new_node(NodeData::Text {
+            contents: "second".into(),
+        });
         tree.append_child(tree.document(), root);
         tree.append_child(root, first);
         tree.append_child(first, nested);
@@ -2163,10 +2147,18 @@ mod tests {
         // root > [first > nested, second]; document order is root, first,
         // nested, second, so the reverse walk must retrace it exactly.
         let tree = DomTree::new();
-        let root = tree.new_node(NodeData::Text { contents: "root".into() });
-        let first = tree.new_node(NodeData::Text { contents: "first".into() });
-        let nested = tree.new_node(NodeData::Text { contents: "nested".into() });
-        let second = tree.new_node(NodeData::Text { contents: "second".into() });
+        let root = tree.new_node(NodeData::Text {
+            contents: "root".into(),
+        });
+        let first = tree.new_node(NodeData::Text {
+            contents: "first".into(),
+        });
+        let nested = tree.new_node(NodeData::Text {
+            contents: "nested".into(),
+        });
+        let second = tree.new_node(NodeData::Text {
+            contents: "second".into(),
+        });
         tree.append_child(tree.document(), root);
         tree.append_child(root, first);
         tree.append_child(first, nested);
@@ -2242,5 +2234,30 @@ mod tests {
         dest.import_children_from(dest_doc, &source, source.document());
 
         assert!(dest.len() >= 100_000);
+    }
+
+    #[test]
+    fn stale_node_id_does_not_alias_reused_slot() {
+        let tree = DomTree::new();
+        let doc = tree.document();
+        let old = tree.new_node(NodeData::Text {
+            contents: "old".into(),
+        });
+        tree.append_child(doc, old);
+        tree.remove(old);
+        let new = tree.new_node(NodeData::Text {
+            contents: "new".into(),
+        });
+        assert!(
+            tree.get_node(old).is_none(),
+            "stale NodeId must not observe a node allocated into a recycled slot"
+        );
+        assert_eq!(
+            tree.get_node(new)
+                .and_then(|n| n.text_content_of_text_node().map(str::to_owned))
+                .as_deref(),
+            Some("new")
+        );
+        assert_ne!(old, new);
     }
 }

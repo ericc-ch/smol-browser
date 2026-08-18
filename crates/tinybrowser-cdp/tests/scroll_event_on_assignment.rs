@@ -15,9 +15,9 @@
 //! scroll. The fixture therefore has explicit viewport and content dimensions;
 //! Chromium clamps a non-overflowing element to zero and dispatches no event.
 
+use serde_json::{json, Value};
 use tinybrowser_cdp::dispatch::{dispatch, CdpContext};
 use tinybrowser_cdp::types::CdpRequest;
-use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -43,7 +43,13 @@ async fn serve_once() -> String {
     format!("http://{addr}/")
 }
 
-async fn cdp(ctx: &mut CdpContext, id: u64, method: &str, params: Value, session_id: &str) -> Value {
+async fn cdp(
+    ctx: &mut CdpContext,
+    id: u64,
+    method: &str,
+    params: Value,
+    session_id: &str,
+) -> Value {
     let resp = dispatch(
         &CdpRequest {
             id,
@@ -54,7 +60,11 @@ async fn cdp(ctx: &mut CdpContext, id: u64, method: &str, params: Value, session
         ctx,
     )
     .await;
-    assert!(resp.error.is_none(), "CDP {method} failed: {:?}", resp.error);
+    assert!(
+        resp.error.is_none(),
+        "CDP {method} failed: {:?}",
+        resp.error
+    );
     resp.result.unwrap_or_else(|| json!({}))
 }
 
@@ -78,7 +88,14 @@ async fn setup() -> (CdpContext, String) {
     let page_id = ctx.create_page();
     let session_id = "session-1";
     ctx.sessions.insert(session_id.to_string(), page_id.clone());
-    cdp(&mut ctx, 1, "Page.navigate", json!({"url": url, "waitUntil": "load"}), session_id).await;
+    cdp(
+        &mut ctx,
+        1,
+        "Page.navigate",
+        json!({"url": url, "waitUntil": "load"}),
+        session_id,
+    )
+    .await;
     (ctx, session_id.to_string())
 }
 
@@ -102,16 +119,28 @@ async fn probe(ctx: &mut CdpContext, sid: &str, body: &str) -> Value {
 async fn assigning_scroll_top_fires_one_scroll_event() {
     let (mut ctx, sid) = setup().await;
     let r = probe(&mut ctx, &sid, "el.scrollTop = 100;").await;
-    assert_eq!(r["fired"], 1, "scrollTop assignment must fire exactly one scroll event");
-    assert_eq!(r["top"], 100, "scrollTop must round-trip the assigned value");
+    assert_eq!(
+        r["fired"], 1,
+        "scrollTop assignment must fire exactly one scroll event"
+    );
+    assert_eq!(
+        r["top"], 100,
+        "scrollTop must round-trip the assigned value"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn assigning_scroll_left_fires_one_scroll_event() {
     let (mut ctx, sid) = setup().await;
     let r = probe(&mut ctx, &sid, "el.scrollLeft = 40;").await;
-    assert_eq!(r["fired"], 1, "scrollLeft assignment must fire exactly one scroll event");
-    assert_eq!(r["left"], 40, "scrollLeft must round-trip the assigned value");
+    assert_eq!(
+        r["fired"], 1,
+        "scrollLeft assignment must fire exactly one scroll event"
+    );
+    assert_eq!(
+        r["left"], 40,
+        "scrollLeft must round-trip the assigned value"
+    );
 }
 
 /// Re-assigning the same offset is not a scroll, so it must stay silent —
@@ -120,7 +149,10 @@ async fn assigning_scroll_left_fires_one_scroll_event() {
 async fn reassigning_the_same_offset_is_silent() {
     let (mut ctx, sid) = setup().await;
     let r = probe(&mut ctx, &sid, "el.scrollTop = 100; el.scrollTop = 100;").await;
-    assert_eq!(r["fired"], 1, "only the offset change fires; the repeat must not");
+    assert_eq!(
+        r["fired"], 1,
+        "only the offset change fires; the repeat must not"
+    );
 }
 
 /// `scrollTo` moves both axes, and a real browser reports one scroll per
@@ -130,7 +162,10 @@ async fn reassigning_the_same_offset_is_silent() {
 async fn scroll_to_coalesces_both_axes_into_one_event() {
     let (mut ctx, sid) = setup().await;
     let r = probe(&mut ctx, &sid, "el.scrollTo(30, 60);").await;
-    assert_eq!(r["fired"], 1, "scrollTo must fire one event, not one per axis");
+    assert_eq!(
+        r["fired"], 1,
+        "scrollTo must fire one event, not one per axis"
+    );
     assert_eq!(r["top"], 60);
     assert_eq!(r["left"], 30);
 }

@@ -4,8 +4,8 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use tinybrowser_dom::{parse_html, DomTree};
 use tinybrowser_js::runtime::JsRuntime;
 use tinybrowser_net::{
-    CallbackRegistry, HttpClient, NetError, RequestCallback, ResourceRequest,
-    ResourceType, Response, ResponseCallback,
+    CallbackRegistry, HttpClient, NetError, RequestCallback, ResourceRequest, ResourceType,
+    Response, ResponseCallback,
 };
 use url::Url;
 
@@ -256,16 +256,13 @@ pub struct Page {
     pub intercept_enabled: bool,
     pub intercept_block_patterns: Vec<String>,
     pub blocked_url_patterns: Vec<String>,
-    intercept_tx: Option<tokio::sync::mpsc::UnboundedSender<tinybrowser_js::ops::InterceptedRequest>>,
+    intercept_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<tinybrowser_js::ops::InterceptedRequest>>,
     // Scripts to execute in the page's JS context BEFORE any of the page's
     // own scripts run — the CDP `Page.addScriptToEvaluateOnNewDocument`
     // contract. Includes `Runtime.addBinding` shims so puppeteer's
     // `exposeFunction` bindings exist before inline `<script>` tags execute.
     preload_scripts: Vec<String>,
-    /// Document-owned HTML script preparation flags saved while the JS realm
-    /// is suspended for CDP tab switching.  These are restored only when
-    /// the same surviving DomTree is resumed; navigation clears them.
-    suspended_started_script_ids: Vec<u32>,
     /// Passive on_request/on_response callbacks, scoped to this page (issue
     /// #408): they fire only for requests this page drives and die with it.
     /// Arc because the JS runtime state holds a second handle for fetch()/XHR.
@@ -826,7 +823,9 @@ fn inline_stylesheet_import_requests(dom: &DomTree) -> Vec<(usize, StylesheetImp
         if node
             .get_attribute("data-tinybrowser-external-stylesheets")
             .is_some()
-            || node.get_attribute("data-tinybrowser-inline-import").is_some()
+            || node
+                .get_attribute("data-tinybrowser-inline-import")
+                .is_some()
         {
             continue;
         }
@@ -892,7 +891,6 @@ impl Page {
             blocked_url_patterns: Vec::new(),
             intercept_tx: None,
             preload_scripts: Vec::new(),
-            suspended_started_script_ids: Vec::new(),
             callbacks: Arc::new(CallbackRegistry::new()),
             stealth_client,
         }
@@ -1032,14 +1030,9 @@ impl Page {
             .fetch_with_callbacks(url, Some(&self.callbacks))
             .await
     }
-    fn init_js(&mut self) {
-        // init_js is also the new-document path.  Only resume_js explicitly
-        // takes these IDs out before entering here and restores them after the
-        // same DomTree is installed; a navigation must never inherit IDs from
-        // a suspended prior document whose allocator may reuse them.
-        self.suspended_started_script_ids.clear();
+    pub fn init_js(&mut self) {
         // Drop any existing runtime so the JS realm starts clean on
-        // every navigation. The old code reused the V8 isolate and
+        // every navigation. The old code reused the isolate and
         // only re-bound `globalThis.document`, leaving window.onload,
         // custom window properties and event handlers from the prior
         // page in place. That made it possible for a page to set
@@ -1053,10 +1046,8 @@ impl Page {
         // and op_fetch_url so dynamic imports and JS fetch() honour the
         // configured upstream proxy (#139). When proxy_url is None this is
         // equivalent to with_base_url() (direct connection).
-        let mut rt = JsRuntime::with_base_url_and_proxy(
-            &self.url_string(),
-            self.context.proxy_url.clone(),
-        );
+        let mut rt =
+            JsRuntime::with_base_url_and_proxy(&self.url_string(), self.context.proxy_url.clone());
         rt.set_url(&self.url_string());
         rt.set_encoding(&self.encoding);
         rt.set_title(&self.title);
@@ -1177,7 +1168,11 @@ impl Page {
                 tracing::info!("Blocked stylesheet by interception: {}", resolved);
                 continue;
             }
-            roots.push((AuthorStylesheetTarget::Linked(link_index), key.clone(), None));
+            roots.push((
+                AuthorStylesheetTarget::Linked(link_index),
+                key.clone(),
+                None,
+            ));
             if scheduled.insert(key.clone()) {
                 if scheduled.len() <= MAX_STYLESHEET_RESOURCES {
                     pending.push((key, resolved, 0u8));
@@ -1361,12 +1356,7 @@ impl Page {
                 return false;
             }
             let poll_budget = remaining.min(tokio::time::Duration::from_millis(25));
-            match tokio::time::timeout(
-                poll_budget,
-                js.run_load_delaying_event_loop_tick(),
-            )
-            .await
-            {
+            match tokio::time::timeout(poll_budget, js.run_load_delaying_event_loop_tick()).await {
                 Ok(Ok(_idle)) => {
                     if js.has_pending_load_delaying_scripts() {
                         tokio::task::yield_now().await;
@@ -1436,7 +1426,7 @@ impl Page {
             is_defer: bool,
             is_async: bool,
             kind: ScriptKind,
-            nid: u32,
+            nid: u64,
             /// Document base URL at this element's parser encounter point.
             base_url: String,
         }
@@ -1662,8 +1652,10 @@ impl Page {
             }
         };
 
-        let mut fetched: std::collections::HashMap<usize, (String, String, tinybrowser_net::Response)> =
-            std::collections::HashMap::new();
+        let mut fetched: std::collections::HashMap<
+            usize,
+            (String, String, tinybrowser_net::Response),
+        > = std::collections::HashMap::new();
         for result in fetch_results {
             if let Some((idx, url, resp)) = result {
                 if !script_response_is_executable(resp.status) {
@@ -1708,7 +1700,9 @@ impl Page {
         let preload_sources = self.preload_scripts.clone();
         if let Some(js) = &mut self.js {
             for source in &preload_sources {
-                if let Err(e) = js.execute_script_guarded_no_checkpoint("<preload>", source.as_str()) {
+                if let Err(e) =
+                    js.execute_script_guarded_no_checkpoint("<preload>", source.as_str())
+                {
                     tracing::debug!("Preload script error: {}", e);
                 }
             }
@@ -1819,7 +1813,9 @@ impl Page {
                                 "<current-script>",
                                 &format!("globalThis.__currentScriptNid={};", script.nid),
                             );
-                            if let Err(error) = js.execute_script_guarded_no_checkpoint(&execution_url, &code) {
+                            if let Err(error) =
+                                js.execute_script_guarded_no_checkpoint(&execution_url, &code)
+                            {
                                 tracing::warn!("Script error ({}): {}", execution_url, error);
                             }
                             let _ = js.execute_script_no_checkpoint(
@@ -1834,13 +1830,15 @@ impl Page {
                             "<current-script>",
                             &format!("globalThis.__currentScriptNid={};", script.nid),
                         );
-                        if let Err(error) =
-                            js.execute_script_guarded_no_checkpoint(&script.base_url, &script.inline)
+                        if let Err(error) = js
+                            .execute_script_guarded_no_checkpoint(&script.base_url, &script.inline)
                         {
                             tracing::warn!("Inline script error: {}", error);
                         }
-                        let _ = js
-                            .execute_script_no_checkpoint("<current-script>", "globalThis.__currentScriptNid=0;");
+                        let _ = js.execute_script_no_checkpoint(
+                            "<current-script>",
+                            "globalThis.__currentScriptNid=0;",
+                        );
                     }
                 }
             };
@@ -2381,7 +2379,6 @@ impl Page {
 
         self.lifecycle = LifecycleState::Loading;
         self.referrer = referrer.to_string();
-        self.url = Some(url.clone());
         self.network_events.clear();
 
         if self.context.obey_robots {
@@ -2417,6 +2414,7 @@ impl Page {
         }
 
         if url.scheme() == "about" {
+            self.url = Some(url.clone());
             self.navigate_blank();
             self.init_js();
             // Preloads (Page.addScriptToEvaluateOnNewDocument, the
@@ -2465,6 +2463,9 @@ impl Page {
             PageError::NetworkError(e.to_string())
         })?;
 
+        // Headers (and the final URL after redirects) are the commit point.
+        self.url = Some(response.url.clone());
+
         // Store binary main resources (images, PDFs, octet-stream) base64 so
         // Network.getResponseBody returns intact bytes. A UTF-8-lossy text store
         // corrupts them (issue #340). Text-like types stay as text.
@@ -2478,10 +2479,6 @@ impl Page {
             &response.body,
             main_is_binary,
         );
-
-        if !response.redirected_from.is_empty() {
-            self.url = Some(response.url.clone());
-        }
 
         // Honor the response charset: HTTP Content-Type → <meta charset> sniff
         // in the first 1KB → UTF-8 fallback. Without this, every non-UTF-8
@@ -3091,32 +3088,6 @@ impl Page {
         }
     }
 
-    pub fn suspend_js(&mut self) {
-        let Some(js) = &self.js else {
-            return;
-        };
-        let started_script_ids = js.started_script_ids();
-        let dom = js.take_dom();
-        if let Some(dom) = dom {
-            self.dom = Some(dom);
-            self.suspended_started_script_ids = started_script_ids;
-        } else {
-            self.suspended_started_script_ids.clear();
-        }
-        self.js = None;
-    }
-
-    pub fn resume_js(&mut self) {
-        if self.js.is_some() {
-            return;
-        }
-        let started_script_ids = std::mem::take(&mut self.suspended_started_script_ids);
-        self.init_js();
-        if let Some(js) = &self.js {
-            js.restore_started_script_ids(&started_script_ids);
-        }
-    }
-
     pub fn has_js(&self) -> bool {
         self.js.is_some()
     }
@@ -3682,7 +3653,8 @@ mod tests {
                     .map(|nid| {
                         let node = dom.get_node(nid).unwrap();
                         (
-                            node.get_attribute("data-tinybrowser-inline-import").is_some(),
+                            node.get_attribute("data-tinybrowser-inline-import")
+                                .is_some(),
                             node.get_attribute("media").map(str::to_string),
                             dom.text_content(nid),
                         )
@@ -3698,7 +3670,6 @@ mod tests {
         assert_eq!(styles[1].1.as_deref(), Some("screen, print"));
         assert!(styles[0].2.starts_with("@media print {\n"));
         assert!(styles[1].2.starts_with("@media print {\n"));
-
     }
 
     fn client_replacement_page(name: &str, deferred: bool) -> super::Page {
@@ -4029,10 +4000,6 @@ mod tests {
             .unwrap();
         assert_eq!(before, serde_json::json!(["1", "1", "0"]));
 
-        page.suspend_js();
-        page.suspend_js();
-        page.resume_js();
-
         let after = page
             .js
             .as_mut()
@@ -4078,8 +4045,6 @@ mod tests {
                 "var setup = true; const old = document.getElementById('old'); globalThis.__markParserScripts([old._nid]); return old._nid;",
             )
             .unwrap();
-        page.suspend_js();
-
         page.url = Some(url::Url::parse("http://example.com/new.html").unwrap());
         page.dom = Some(parse_html(
             "<html><head></head><body data-fresh-runs=0><script id=fresh>document.body.setAttribute('data-fresh-runs', '1')</script></body></html>",
@@ -4423,11 +4388,8 @@ mod tests {
                 document.head.appendChild(script);
             </script></body></html>"#,
         );
-        let mut page = import_map_test_page(
-            "preload-dynamic-lifecycle",
-            "http://127.0.0.1:9",
-            &html,
-        );
+        let mut page =
+            import_map_test_page("preload-dynamic-lifecycle", "http://127.0.0.1:9", &html);
 
         page.execute_scripts().await;
 
@@ -4547,11 +4509,8 @@ mod tests {
         let started = std::time::Instant::now();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(125);
 
-        let completed = super::Page::drive_load_delaying_scripts(
-            page.js.as_mut().unwrap(),
-            deadline,
-        )
-        .await;
+        let completed =
+            super::Page::drive_load_delaying_scripts(page.js.as_mut().unwrap(), deadline).await;
 
         let elapsed = started.elapsed();
         assert!(!completed, "the delayed resource must exceed the deadline");
@@ -4693,9 +4652,7 @@ mod tests {
                     .and_then(|line| line.split_ascii_whitespace().nth(1))
                     .unwrap_or("/");
                 let body = match path {
-                    "/app/lazy.js" => {
-                        "import { ready } from './lazy-child.js'; export { ready };"
-                    }
+                    "/app/lazy.js" => "import { ready } from './lazy-child.js'; export { ready };",
                     "/app/lazy-child.js" => {
                         // Cross the lifecycle's 500ms fast-settle floor on a
                         // descendant edge. deno_core must propagate the lazy
@@ -4764,8 +4721,7 @@ mod tests {
             let _ = accepted_tx.send(());
             let mut request = [0u8; 2048];
             let length = stream.read(&mut request).unwrap();
-            assert!(String::from_utf8_lossy(&request[..length])
-                .starts_with("GET /app/analytics "));
+            assert!(String::from_utf8_lossy(&request[..length]).starts_with("GET /app/analytics "));
             std::thread::sleep(std::time::Duration::from_secs(2));
             let body = "{}";
             let response = format!(
@@ -4784,11 +4740,7 @@ mod tests {
                 }});
             </script></body></html>"#,
         );
-        let mut page = import_map_test_page(
-            "ordinary-fetch-readiness",
-            &base,
-            &html,
-        );
+        let mut page = import_map_test_page("ordinary-fetch-readiness", &base, &html);
         let started = std::time::Instant::now();
         page.execute_scripts().await;
         let elapsed = started.elapsed();
@@ -5002,9 +4954,9 @@ mod tests {
         .expect("materialized graph");
 
         assert!(materialized.starts_with("@media print {\n"));
-        assert!(materialized.contains(
-            r#".print{background:url("https://example.test/css/mark.svg")}"#
-        ));
+        assert!(
+            materialized.contains(r#".print{background:url("https://example.test/css/mark.svg")}"#)
+        );
         assert!(materialized.ends_with(".root{color:red}"));
     }
 

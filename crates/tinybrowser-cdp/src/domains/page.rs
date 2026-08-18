@@ -1,5 +1,5 @@
-use tinybrowser_core::lifecycle::WaitUntil;
 use serde_json::{json, Value};
+use tinybrowser_core::lifecycle::WaitUntil;
 
 use crate::dispatch::CdpContext;
 use crate::types::CdpEvent;
@@ -550,12 +550,10 @@ pub async fn handle(
             ctx.preload_scripts.retain(|(id, _)| id != identifier);
             Ok(json!({}))
         }
-        "setInterceptFileChooserDialog" => {
-            Err(crate::util::cdp_unimplemented("Page.setInterceptFileChooserDialog"))
-        }
-        "setDownloadBehavior" => {
-            Err(crate::util::cdp_unimplemented("Page.setDownloadBehavior"))
-        }
+        "setInterceptFileChooserDialog" => Err(crate::util::cdp_unimplemented(
+            "Page.setInterceptFileChooserDialog",
+        )),
+        "setDownloadBehavior" => Err(crate::util::cdp_unimplemented("Page.setDownloadBehavior")),
         "getLayoutMetrics" => {
             // Playwright calls this before every page.screenshot(). Report the
             // same live CSS viewport that responsive page code and paint use.

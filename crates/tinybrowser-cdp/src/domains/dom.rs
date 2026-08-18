@@ -1,6 +1,6 @@
+use serde_json::{json, Value};
 use tinybrowser_core::Page;
 use tinybrowser_dom::{DomTree, NodeData, NodeId};
-use serde_json::{json, Value};
 
 use crate::dispatch::CdpContext;
 
@@ -43,8 +43,16 @@ fn encode_base64(input: &[u8]) -> String {
         let n = (b0 << 16) | (b1 << 8) | b2;
         out.push(T[((n >> 18) & 63) as usize] as char);
         out.push(T[((n >> 12) & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { T[((n >> 6) & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -101,41 +109,61 @@ pub async fn handle(
             page.with_dom(|dom| {
                 let node = serialize_node(dom, dom.document(), depth as u32, 0);
                 json!({ "root": node })
-            }).ok_or_else(|| "No DOM loaded".to_string())
+            })
+            .ok_or_else(|| "No DOM loaded".to_string())
         }
         "querySelector" => {
             let page = ctx.get_session_page(session_id).ok_or("No page")?;
-            let selector = params.get("selector").and_then(|v| v.as_str()).ok_or("selector required")?;
-            let result = page.with_dom(|dom| {
-                dom.query_selector(selector).ok().flatten().map(|id| id.index()).unwrap_or(0)
-            }).unwrap_or(0);
+            let selector = params
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .ok_or("selector required")?;
+            let result = page
+                .with_dom(|dom| {
+                    dom.query_selector(selector)
+                        .ok()
+                        .flatten()
+                        .map(|id| id.raw())
+                        .unwrap_or(0)
+                })
+                .unwrap_or(0);
             Ok(json!({ "nodeId": result }))
         }
         "querySelectorAll" => {
             let page = ctx.get_session_page(session_id).ok_or("No page")?;
-            let selector = params.get("selector").and_then(|v| v.as_str()).ok_or("selector required")?;
-            let ids = page.with_dom(|dom| {
-                dom.query_selector_all(selector).ok()
-                    .map(|ids| ids.iter().map(|id| id.index() as u64).collect::<Vec<_>>())
-                    .unwrap_or_default()
-            }).unwrap_or_default();
+            let selector = params
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .ok_or("selector required")?;
+            let ids = page
+                .with_dom(|dom| {
+                    dom.query_selector_all(selector)
+                        .ok()
+                        .map(|ids| ids.iter().map(|id| id.raw() as u64).collect::<Vec<_>>())
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
             Ok(json!({ "nodeIds": ids }))
         }
         "getOuterHTML" => {
             let page = ctx.get_session_page(session_id).ok_or("No page")?;
-            let node_id = params.get("nodeId").and_then(|v| v.as_u64())
+            let node_id = params
+                .get("nodeId")
+                .and_then(|v| v.as_u64())
                 .or_else(|| params.get("backendNodeId").and_then(|v| v.as_u64()))
                 .ok_or("nodeId required")?;
-            let html = page.with_dom(|dom| {
-                dom.outer_html(NodeId::new(node_id as u32))
-            }).unwrap_or_default();
+            let html = page
+                .with_dom(|dom| dom.outer_html(NodeId::new(node_id)))
+                .unwrap_or_default();
             Ok(json!({ "outerHTML": html }))
         }
         "describeNode" => {
             let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
             let depth = params.get("depth").and_then(|v| v.as_i64()).unwrap_or(0);
 
-            let node_id = if let Some(nid) = params.get("nodeId").and_then(|v| v.as_u64())
+            let node_id = if let Some(nid) = params
+                .get("nodeId")
+                .and_then(|v| v.as_u64())
                 .or_else(|| params.get("backendNodeId").and_then(|v| v.as_u64()))
             {
                 nid
@@ -151,14 +179,16 @@ pub async fn handle(
                 return Err("nodeId or objectId required".to_string());
             };
 
-            let node = page.with_dom(|dom| {
-                serialize_node(dom, NodeId::new(node_id as u32), depth as u32, 0)
-            }).unwrap_or(json!(null));
+            let node = page
+                .with_dom(|dom| serialize_node(dom, NodeId::new(node_id), depth as u32, 0))
+                .unwrap_or(json!(null));
             Ok(json!({ "node": node }))
         }
         "resolveNode" => {
             let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
-            let node_id = if let Some(nid) = params.get("nodeId").and_then(|v| v.as_u64())
+            let node_id = if let Some(nid) = params
+                .get("nodeId")
+                .and_then(|v| v.as_u64())
                 .or_else(|| params.get("backendNodeId").and_then(|v| v.as_u64()))
             {
                 nid
@@ -173,23 +203,14 @@ pub async fn handle(
                 return Err("nodeId or objectId required".to_string());
             };
 
-            let js_code = format!(
-                "(function() {{\
-                    var nid = {};\
-                    var node = null;\
-                    if (globalThis._cache && globalThis._cache.has(nid)) {{\
-                        node = globalThis._cache.get(nid);\
-                    }} else {{\
-                        var t = +Deno.core.ops.op_dom('node_type', String(nid), '');\
-                        if (t === 1) node = new Element(nid);\
-                        else if (t === 9) node = globalThis.document;\
-                        else node = new Node(nid);\
-                        if (globalThis._cache) globalThis._cache.set(nid, node);\
-                    }}\
-                    return node;\
-                }})()",
-                node_id,
-            );
+            // Reuse the shim's `_wrap` helper: it returns the cached wrapper
+            // (or builds one) for a numeric nid, and every wrapper exposes the
+            // `_nid` field that `resolve_node_id` reads back from the object
+            // store. Building the wrapper by hand via `Deno.core.ops.op_dom`
+            // is dead — `globalThis.Deno` is gone (stealth) — so the produced
+            // object had no `_nid` and a later `scrollIntoViewIfNeeded` /
+            // `describeNode` round-trip via `objectId` failed to resolve.
+            let js_code = format!("globalThis._wrap && globalThis._wrap({})", node_id);
 
             let info = if let Some(js) = &mut page.js {
                 match js.store_object_with_meta(&js_code) {
@@ -266,7 +287,11 @@ pub async fn handle(
             let paths: Vec<String> = params
                 .get("files")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
 
             let mut specs = Vec::with_capacity(paths.len());
@@ -278,7 +303,9 @@ pub async fn handle(
                     .and_then(|n| n.to_str())
                     .unwrap_or("file")
                     .to_string();
-                specs.push(json!({ "name": name, "type": guess_mime(p), "b64": encode_base64(&bytes) }));
+                specs.push(
+                    json!({ "name": name, "type": guess_mime(p), "b64": encode_base64(&bytes) }),
+                );
             }
 
             let specs_json = serde_json::to_string(&specs).unwrap_or_else(|_| "[]".to_string());
@@ -313,10 +340,36 @@ pub async fn handle(
                     let q: Vec<Value> = nums[..8].iter().map(|n| json!(n)).collect();
                     (q, nums[8], nums[9])
                 } else {
-                    (vec![json!(8),json!(8),json!(108),json!(8),json!(108),json!(28),json!(8),json!(28)], 100.0, 20.0)
+                    (
+                        vec![
+                            json!(8),
+                            json!(8),
+                            json!(108),
+                            json!(8),
+                            json!(108),
+                            json!(28),
+                            json!(8),
+                            json!(28),
+                        ],
+                        100.0,
+                        20.0,
+                    )
                 }
             } else {
-                (vec![json!(8),json!(8),json!(108),json!(8),json!(108),json!(28),json!(8),json!(28)], 100.0, 20.0)
+                (
+                    vec![
+                        json!(8),
+                        json!(8),
+                        json!(108),
+                        json!(8),
+                        json!(108),
+                        json!(28),
+                        json!(8),
+                        json!(28),
+                    ],
+                    100.0,
+                    20.0,
+                )
             };
             Ok(json!({
                 "model": {
@@ -346,10 +399,31 @@ pub async fn handle(
             let val = page.evaluate(&code);
             let quad = if let Some(arr) = val.as_array() {
                 let nums: Vec<f64> = arr.iter().filter_map(|v| v.as_f64()).collect();
-                if nums.len() == 8 { nums.iter().map(|n| json!(n)).collect::<Vec<_>>() }
-                else { vec![json!(8),json!(8),json!(108),json!(8),json!(108),json!(28),json!(8),json!(28)] }
+                if nums.len() == 8 {
+                    nums.iter().map(|n| json!(n)).collect::<Vec<_>>()
+                } else {
+                    vec![
+                        json!(8),
+                        json!(8),
+                        json!(108),
+                        json!(8),
+                        json!(108),
+                        json!(28),
+                        json!(8),
+                        json!(28),
+                    ]
+                }
             } else {
-                vec![json!(8),json!(8),json!(108),json!(8),json!(108),json!(28),json!(8),json!(28)]
+                vec![
+                    json!(8),
+                    json!(8),
+                    json!(108),
+                    json!(8),
+                    json!(108),
+                    json!(28),
+                    json!(8),
+                    json!(28),
+                ]
             };
             Ok(json!({ "quads": [quad] }))
         }
@@ -383,39 +457,58 @@ fn node_value(dom: &DomTree, node_id: NodeId) -> Option<(Value, Vec<NodeId>)> {
     let node = dom.get_node(node_id)?;
     let children_ids = dom.children(node_id);
     let child_count = children_ids.len();
-    let mut result = json!({ "nodeId": node_id.index(), "backendNodeId": node_id.index(), "childNodeCount": child_count });
+    let mut result = json!({ "nodeId": node_id.raw(), "backendNodeId": node_id.raw(), "childNodeCount": child_count });
 
     match &node.data {
         NodeData::Document => {
-            result["nodeType"] = json!(9); result["nodeName"] = json!("#document");
-            result["localName"] = json!(""); result["nodeValue"] = json!("");
-            result["documentURL"] = json!(""); result["baseURL"] = json!(""); result["xmlVersion"] = json!("");
+            result["nodeType"] = json!(9);
+            result["nodeName"] = json!("#document");
+            result["localName"] = json!("");
+            result["nodeValue"] = json!("");
+            result["documentURL"] = json!("");
+            result["baseURL"] = json!("");
+            result["xmlVersion"] = json!("");
         }
-        NodeData::Doctype { name, public_id, system_id } => {
-            result["nodeType"] = json!(10); result["nodeName"] = json!(name);
-            result["localName"] = json!(""); result["nodeValue"] = json!("");
-            result["publicId"] = json!(public_id); result["systemId"] = json!(system_id);
+        NodeData::Doctype {
+            name,
+            public_id,
+            system_id,
+        } => {
+            result["nodeType"] = json!(10);
+            result["nodeName"] = json!(name);
+            result["localName"] = json!("");
+            result["nodeValue"] = json!("");
+            result["publicId"] = json!(public_id);
+            result["systemId"] = json!(system_id);
         }
         NodeData::Element { name, attrs, .. } => {
             result["nodeType"] = json!(1);
             result["nodeName"] = json!(name.local.as_ref().to_ascii_uppercase());
             result["localName"] = json!(name.local.as_ref());
             result["nodeValue"] = json!("");
-            let cdp_attrs: Vec<String> = attrs.iter()
-                .flat_map(|a| vec![a.name.local.to_string(), a.value.clone()]).collect();
+            let cdp_attrs: Vec<String> = attrs
+                .iter()
+                .flat_map(|a| vec![a.name.local.to_string(), a.value.clone()])
+                .collect();
             result["attributes"] = json!(cdp_attrs);
         }
         NodeData::Text { contents } => {
-            result["nodeType"] = json!(3); result["nodeName"] = json!("#text");
-            result["localName"] = json!(""); result["nodeValue"] = json!(contents);
+            result["nodeType"] = json!(3);
+            result["nodeName"] = json!("#text");
+            result["localName"] = json!("");
+            result["nodeValue"] = json!(contents);
         }
         NodeData::Comment { contents } => {
-            result["nodeType"] = json!(8); result["nodeName"] = json!("#comment");
-            result["localName"] = json!(""); result["nodeValue"] = json!(contents);
+            result["nodeType"] = json!(8);
+            result["nodeName"] = json!("#comment");
+            result["localName"] = json!("");
+            result["nodeValue"] = json!(contents);
         }
         NodeData::ProcessingInstruction { target, data } => {
-            result["nodeType"] = json!(7); result["nodeName"] = json!(target);
-            result["localName"] = json!(""); result["nodeValue"] = json!(data);
+            result["nodeType"] = json!(7);
+            result["nodeName"] = json!(target);
+            result["localName"] = json!("");
+            result["nodeValue"] = json!(data);
         }
     }
 
@@ -513,7 +606,8 @@ mod tests {
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
         let session = Some(format!("{page_id}-session"));
-        ctx.sessions.insert(session.clone().unwrap(), page_id.clone());
+        ctx.sessions
+            .insert(session.clone().unwrap(), page_id.clone());
 
         crate::domains::page::handle(
             "navigate",
@@ -524,9 +618,14 @@ mod tests {
         .await
         .expect("navigate should succeed");
 
-        let qs = handle("querySelector", &json!({ "selector": "input" }), &mut ctx, &session)
-            .await
-            .expect("querySelector should succeed");
+        let qs = handle(
+            "querySelector",
+            &json!({ "selector": "input" }),
+            &mut ctx,
+            &session,
+        )
+        .await
+        .expect("querySelector should succeed");
         let nid = qs["nodeId"].as_u64().expect("input nodeId");
         assert!(nid > 0, "the input element should be found");
 
@@ -534,10 +633,9 @@ mod tests {
             .await
             .expect("DOM.focus should succeed");
 
-        let active = ctx
-            .get_session_page_mut(&session)
-            .unwrap()
-            .evaluate("(function(){return document.activeElement?document.activeElement.tagName:'NONE';})()");
+        let active = ctx.get_session_page_mut(&session).unwrap().evaluate(
+            "(function(){return document.activeElement?document.activeElement.tagName:'NONE';})()",
+        );
         assert_eq!(
             active,
             json!("INPUT"),
@@ -600,10 +698,9 @@ mod tests {
                 .await
                 .expect("scrollIntoViewIfNeeded should succeed");
 
-            let target_id = ctx
-                .get_session_page_mut(&session)
-                .unwrap()
-                .evaluate("globalThis.__tinybrowser_click_target && globalThis.__tinybrowser_click_target.id");
+            let target_id = ctx.get_session_page_mut(&session).unwrap().evaluate(
+                "globalThis.__tinybrowser_click_target && globalThis.__tinybrowser_click_target.id",
+            );
             assert_eq!(target_id, json!("target"));
         }
     }
@@ -615,14 +712,9 @@ mod tests {
         let session = Some(format!("{page_id}-session"));
         ctx.sessions.insert(session.clone().unwrap(), page_id);
 
-        let error = handle(
-            "scrollIntoViewIfNeeded",
-            &json!({}),
-            &mut ctx,
-            &session,
-        )
-        .await
-        .expect_err("missing node identifier should fail");
+        let error = handle("scrollIntoViewIfNeeded", &json!({}), &mut ctx, &session)
+            .await
+            .expect_err("missing node identifier should fail");
 
         assert_eq!(error, "nodeId, backendNodeId, or objectId required");
 
@@ -660,7 +752,9 @@ mod tests {
         let mut parent = dom.document();
         let depth = 50_000usize;
         for _ in 0..depth {
-            let n = dom.new_node(NodeData::Text { contents: String::new() });
+            let n = dom.new_node(NodeData::Text {
+                contents: String::new(),
+            });
             dom.append_child(parent, n);
             parent = n;
         }
@@ -683,7 +777,10 @@ mod tests {
             cur = first;
             levels += 1;
         }
-        assert!(levels >= 100, "should serialize a deep prefix, got {levels}");
+        assert!(
+            levels >= 100,
+            "should serialize a deep prefix, got {levels}"
+        );
         assert!(
             levels < depth,
             "nesting must be bounded below the tree's true depth, got {levels}"
