@@ -4,11 +4,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use tinybrowser_dom::{DomTree, NodeData, NodeId};
 use tinybrowser_dom::tree::{AttachShadowError, ShadowRootMode};
-use tinybrowser_net::StealthHttpClient;
+use tinybrowser_dom::{DomTree, NodeData, NodeId};
 use tinybrowser_net::{
-    CallbackRegistry, CookieJar, HttpClient, RequestInfo, ResourceType, Response,
+    validate_url, CallbackRegistry, CookieJar, HttpClient, NetError, RequestCredentials,
+    RequestMode, ResourceRequest,
 };
 use tokio::sync::Mutex;
 
@@ -90,10 +90,6 @@ pub struct RuntimeState {
     /// #408). Page-scoped, so scripted fetch()/XHR observation stays local to
     /// the page that registered it.
     pub callbacks: Option<Arc<CallbackRegistry>>,
-    /// When set (stealth mode), scripted fetch()/XHR is routed through the wreq
-    /// client so the request carries the Chrome TLS fingerprint and client
-    /// hints instead of the rustls ClientHello op_fetch_url would otherwise send.
-    pub stealth_client: Option<Arc<StealthHttpClient>>,
     pub pending_navigation: Option<(String, String, String)>,
     pub intercept_tx: Option<tokio::sync::mpsc::UnboundedSender<InterceptedRequest>>,
     pub intercept_counter: u64,
@@ -146,7 +142,6 @@ impl RuntimeState {
             cookie_jar: None,
             http_client: None,
             callbacks: None,
-            stealth_client: None,
             pending_navigation: None,
             intercept_tx: None,
             intercept_counter: 0,
@@ -291,7 +286,7 @@ fn render_mutation_impact(
     arg1: &str,
     arg2: &str,
 ) -> RenderMutationImpact {
-    let node = |value: &str| value.parse::<u32>().ok().map(NodeId::new);
+    let node = |value: &str| value.parse::<u64>().ok().map(NodeId::new);
     match cmd {
         "set_attribute" => {
             let Some(target) = node(arg1) else {
@@ -484,7 +479,14 @@ fn fragment_context_and_html(arg: &str) -> (html5ever::QualName, &str) {
         Some((prefix, local)) if !prefix.is_empty() && !local.is_empty() => {
             (Some(html5ever::Prefix::from(prefix)), local)
         }
-        _ => (None, if qualified.is_empty() { "body" } else { qualified }),
+        _ => (
+            None,
+            if qualified.is_empty() {
+                "body"
+            } else {
+                qualified
+            },
+        ),
     };
     (
         html5ever::QualName::new(
@@ -495,7 +497,7 @@ fn fragment_context_and_html(arg: &str) -> (html5ever::QualName, &str) {
         html,
     )
 }
-pub(crate) fn op_script_mark_started_inner(shared: &SharedState, nid: u32) -> bool {
+pub(crate) fn op_script_mark_started_inner(shared: &SharedState, nid: u64) -> bool {
     let state = shared.borrow();
     let Some(dom) = state.dom.as_ref() else {
         return false;
@@ -510,7 +512,7 @@ pub(crate) fn op_script_mark_started_inner(shared: &SharedState, nid: u32) -> bo
 
 /// Atomically claim an executable script.  A false result means the node was
 /// created inert by an HTML-string API or has already been prepared once.
-pub(crate) fn op_script_try_start_inner(shared: &SharedState, nid: u32) -> bool {
+pub(crate) fn op_script_try_start_inner(shared: &SharedState, nid: u64) -> bool {
     let state = shared.borrow();
     let Some(dom) = state.dom.as_ref() else {
         return false;
@@ -526,7 +528,7 @@ pub(crate) fn op_script_try_start_inner(shared: &SharedState, nid: u32) -> bool 
 /// Attach one native shadow-tree scope without making it part of the light
 /// tree. Layout intentionally remains unaware of the detached root until
 /// scoped style, slot assignment, and composed-tree paint are implemented.
-pub(crate) fn op_shadow_attach_inner(shared: &SharedState, host_nid: u32, mode: String) -> i32 {
+pub(crate) fn op_shadow_attach_inner(shared: &SharedState, host_nid: u64, mode: String) -> i64 {
     let mode = match mode.as_str() {
         "open" => ShadowRootMode::Open,
         "closed" => ShadowRootMode::Closed,
@@ -537,7 +539,7 @@ pub(crate) fn op_shadow_attach_inner(shared: &SharedState, host_nid: u32, mode: 
         return -1;
     };
     match dom.attach_shadow_root(NodeId::new(host_nid), mode) {
-        Ok(root) => root.raw() as i32,
+        Ok(root) => root.raw() as i64,
         Err(AttachShadowError::HostAlreadyHasShadowRoot) => -2,
         Err(_) => -1,
     }
@@ -546,7 +548,7 @@ pub(crate) fn op_shadow_attach_inner(shared: &SharedState, host_nid: u32, mode: 
 /// Return native host-owned shadow identity as `root-id\0mode`. Closed roots
 /// are included here; the Web-facing `Element.shadowRoot` getter applies mode
 /// visibility in bootstrap.js.
-pub(crate) fn op_shadow_root_info_inner(shared: &SharedState, host_nid: u32) -> String {
+pub(crate) fn op_shadow_root_info_inner(shared: &SharedState, host_nid: u64) -> String {
     let state = shared.borrow();
     let Some(dom) = state.dom.as_ref() else {
         return String::new();
@@ -565,7 +567,7 @@ pub(crate) fn op_shadow_root_info_inner(shared: &SharedState, host_nid: u32) -> 
 /// Read-only parent/sibling walks used by MutationObserver ancestor checks.
 /// Returns the neighbor node id, or -1 when the edge is empty. `None` means
 /// `cmd` is not a tree-edge read.
-pub(crate) fn op_dom_tree_query(shared: &SharedState, cmd: &str, nid: u32) -> Option<i32> {
+pub(crate) fn op_dom_tree_query(shared: &SharedState, cmd: &str, nid: u64) -> Option<i64> {
     if !matches!(
         cmd,
         "parent_node" | "first_child" | "last_child" | "next_sibling" | "prev_sibling"
@@ -586,7 +588,7 @@ pub(crate) fn op_dom_tree_query(shared: &SharedState, cmd: &str, nid: u32) -> Op
             _ => None,
         })
         .flatten();
-    Some(id.map(|id| id.index() as i32).unwrap_or(-1))
+    Some(id.map(|id| id.raw() as i64).unwrap_or(-1))
 }
 
 pub(crate) fn op_dom_inner(
@@ -596,7 +598,7 @@ pub(crate) fn op_dom_inner(
     arg2: String,
 ) -> String {
     if let Some(fast) = arg1
-        .parse::<u32>()
+        .parse::<u64>()
         .ok()
         .and_then(|nid| op_dom_tree_query(shared, cmd.as_str(), nid))
     {
@@ -630,7 +632,7 @@ pub(crate) fn op_dom_inner(
     };
 
     match cmd.as_str() {
-        "document_node_id" => dom.document().index().to_string(),
+        "document_node_id" => dom.document().raw().to_string(),
         "document_title" => {
             // The DOM is authoritative after parsing. In particular, script
             // changes through title.textContent must be reflected by
@@ -659,7 +661,7 @@ pub(crate) fn op_dom_inner(
                         .map(|name| name.local.as_ref() == "html")
                         .unwrap_or(false)
                     {
-                        return cid.index().to_string();
+                        return cid.raw().to_string();
                     }
                 }
             }
@@ -678,7 +680,7 @@ pub(crate) fn op_dom_inner(
                             "name": name,
                             "publicId": public_id,
                             "systemId": system_id,
-                            "nodeId": cid.index(),
+                            "nodeId": cid.raw(),
                         })
                         .to_string();
                     }
@@ -694,7 +696,7 @@ pub(crate) fn op_dom_inner(
             let nid = dom.get_element_by_id(&arg1);
             let live = nid.filter(|&n| dom.ancestors(n).contains(&doc));
             match live {
-                Some(n) => n.index().to_string(),
+                Some(n) => n.raw().to_string(),
                 None => {
                     // Fall back to full scan for the live document.
                     let sel = format!(
@@ -704,7 +706,7 @@ pub(crate) fn op_dom_inner(
                     dom.query_selector(&sel)
                         .ok()
                         .flatten()
-                        .map(|id| id.index().to_string())
+                        .map(|id| id.raw().to_string())
                         .unwrap_or("-1".into())
                 }
             }
@@ -713,41 +715,41 @@ pub(crate) fn op_dom_inner(
             .query_selector(&arg1)
             .ok()
             .flatten()
-            .map(|id| id.index().to_string())
+            .map(|id| id.raw().to_string())
             .unwrap_or("-1".into()),
         "query_selector_all" => {
-            let ids: Vec<i32> = dom
+            let ids: Vec<i64> = dom
                 .query_selector_all(&arg1)
                 .ok()
-                .map(|ids| ids.iter().map(|id| id.index() as i32).collect())
+                .map(|ids| ids.iter().map(|id| id.raw() as i64).collect::<Vec<i64>>())
                 .unwrap_or_default();
             serde_json::to_string(&ids).unwrap_or("[]".into())
         }
         "query_selector_scoped" => {
-            let root_nid = arg1.parse::<u32>().unwrap_or(0);
+            let root_nid = arg1.parse::<u64>().unwrap_or(0);
             dom.query_selector_from(NodeId::new(root_nid), &arg2)
                 .ok()
                 .flatten()
-                .map(|id| id.index().to_string())
+                .map(|id| id.raw().to_string())
                 .unwrap_or("-1".into())
         }
         "query_selector_all_scoped" => {
-            let root_nid = arg1.parse::<u32>().unwrap_or(0);
-            let ids: Vec<i32> = dom
+            let root_nid = arg1.parse::<u64>().unwrap_or(0);
+            let ids: Vec<i64> = dom
                 .query_selector_all_from(NodeId::new(root_nid), &arg2)
                 .ok()
-                .map(|ids| ids.iter().map(|id| id.index() as i32).collect())
+                .map(|ids| ids.iter().map(|id| id.raw() as i64).collect::<Vec<i64>>())
                 .unwrap_or_default();
             serde_json::to_string(&ids).unwrap_or("[]".into())
         }
         "matches_selector" => {
-            let nid = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
+            let nid = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
             dom.matches_selector(nid, &arg2)
                 .unwrap_or(false)
                 .to_string()
         }
         "node_type" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             dom.with_node(NodeId::new(nid), |n| match &n.data {
                 NodeData::Document => "9",
                 NodeData::Element { .. } => "1",
@@ -760,7 +762,7 @@ pub(crate) fn op_dom_inner(
             .into()
         }
         "node_name" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let name: String = dom
                 .with_node(NodeId::new(nid), |n| match &n.data {
                     NodeData::Document => "#document".to_string(),
@@ -774,11 +776,11 @@ pub(crate) fn op_dom_inner(
             serde_json::to_string(&name).unwrap_or("\"\"".into())
         }
         "text_content" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             serde_json::to_string(&dom.text_content(NodeId::new(nid))).unwrap_or("\"\"".into())
         }
         "parent_node" | "first_child" | "last_child" | "next_sibling" | "prev_sibling" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             dom.with_node(NodeId::new(nid), |n| match cmd.as_str() {
                 "parent_node" => n.parent,
                 "first_child" => n.first_child,
@@ -788,45 +790,45 @@ pub(crate) fn op_dom_inner(
                 _ => None,
             })
             .flatten()
-            .map(|id| id.index().to_string())
+            .map(|id| id.raw().to_string())
             .unwrap_or("-1".into())
         }
         "next_in_subtree" => {
-            let root = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
-            let current = NodeId::new(arg2.parse::<u32>().unwrap_or(0));
+            let root = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
+            let current = NodeId::new(arg2.parse::<u64>().unwrap_or(0));
             dom.next_in_subtree(root, current)
-                .map(|id| id.index().to_string())
+                .map(|id| id.raw().to_string())
                 .unwrap_or("-1".into())
         }
         // Reverse document order within a subtree, for NodeIterator's backward
         // walk (which prunes nothing, so the whole step fits in the DOM layer).
         "prev_in_subtree" => {
-            let root = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
-            let current = NodeId::new(arg2.parse::<u32>().unwrap_or(0));
+            let root = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
+            let current = NodeId::new(arg2.parse::<u64>().unwrap_or(0));
             dom.prev_in_subtree(root, current)
-                .map(|id| id.index().to_string())
+                .map(|id| id.raw().to_string())
                 .unwrap_or("-1".into())
         }
         // Step past a whole subtree rather than into it: NodeFilter.FILTER_REJECT
         // prunes the rejected node's descendants, unlike FILTER_SKIP.
         "next_after_subtree" => {
-            let root = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
-            let current = NodeId::new(arg2.parse::<u32>().unwrap_or(0));
+            let root = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
+            let current = NodeId::new(arg2.parse::<u64>().unwrap_or(0));
             dom.next_after_subtree(root, current)
-                .map(|id| id.index().to_string())
+                .map(|id| id.raw().to_string())
                 .unwrap_or("-1".into())
         }
         "child_nodes" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
-            let ids: Vec<i32> = dom
+            let nid = arg1.parse::<u64>().unwrap_or(0);
+            let ids: Vec<i64> = dom
                 .children(NodeId::new(nid))
                 .iter()
-                .map(|id| id.index() as i32)
+                .map(|id| id.raw() as i64)
                 .collect();
             serde_json::to_string(&ids).unwrap_or("[]".into())
         }
         "tag_name" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let name = dom
                 .with_node(NodeId::new(nid), |n| {
                     n.as_element().map(|name| {
@@ -845,7 +847,7 @@ pub(crate) fn op_dom_inner(
             serde_json::to_string(&name).unwrap_or("\"\"".into())
         }
         "local_name" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let name = dom
                 .with_node(NodeId::new(nid), |n| {
                     n.as_element().map(|name| name.local.to_string())
@@ -858,7 +860,7 @@ pub(crate) fn op_dom_inner(
         // subtree) its own namespace; expose it so JS does not have to guess
         // the namespace from the tag name.
         "namespace_uri" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let ns = dom
                 .with_node(NodeId::new(nid), |n| {
                     n.as_element().map(|name| name.ns.as_ref().to_string())
@@ -868,7 +870,7 @@ pub(crate) fn op_dom_inner(
             serde_json::to_string(&ns).unwrap_or("\"\"".into())
         }
         "get_attribute" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let val = dom
                 .with_node(NodeId::new(nid), |n| {
                     n.get_attribute(&arg2).map(|s| s.to_string())
@@ -877,7 +879,7 @@ pub(crate) fn op_dom_inner(
             serde_json::to_string(&val).unwrap_or("null".into())
         }
         "attribute_names" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let names: Vec<String> = dom
                 .with_node(NodeId::new(nid), |n| {
                     n.attrs()
@@ -888,7 +890,7 @@ pub(crate) fn op_dom_inner(
             serde_json::to_string(&names).unwrap_or("[]".into())
         }
         "set_attribute" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let node_id = NodeId::new(nid);
             if let Some((name, value)) = arg2.split_once('\0') {
                 if name == "id" {
@@ -904,22 +906,22 @@ pub(crate) fn op_dom_inner(
             "true".into()
         }
         "inner_html" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             serde_json::to_string(&dom.inner_html(NodeId::new(nid))).unwrap_or("\"\"".into())
         }
         "outer_html" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             serde_json::to_string(&dom.outer_html(NodeId::new(nid))).unwrap_or("\"\"".into())
         }
         "append_child" => {
             // Reject if either nid failed to parse (was "undefined"/empty) — those
             // default to 0 which is the document root, and silently operating on it
             // corrupts the tree. Require both args to be valid positive integers.
-            let parent = match arg1.parse::<u32>() {
+            let parent = match arg1.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => return "false".into(),
             };
-            let child = match arg2.parse::<u32>() {
+            let child = match arg2.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => return "false".into(),
             };
@@ -929,21 +931,27 @@ pub(crate) fn op_dom_inner(
             (dom.get_node(child).and_then(|node| node.parent) == Some(parent)).to_string()
         }
         "remove_child" => {
-            let child = match arg1.parse::<u32>() {
+            let child = match arg1.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => return "false".into(),
             };
             let child = NodeId::new(child);
-            let had_parent = dom.get_node(child).is_some_and(|node| node.parent.is_some());
+            let had_parent = dom
+                .get_node(child)
+                .is_some_and(|node| node.parent.is_some());
             dom.remove_child(child);
-            (had_parent && dom.get_node(child).is_some_and(|node| node.parent.is_none())).to_string()
+            (had_parent
+                && dom
+                    .get_node(child)
+                    .is_some_and(|node| node.parent.is_none()))
+            .to_string()
         }
         "insert_before" => {
-            let new_node = match arg1.parse::<u32>() {
+            let new_node = match arg1.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => return "false".into(),
             };
-            let ref_node = match arg2.parse::<u32>() {
+            let ref_node = match arg2.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => return "false".into(),
             };
@@ -956,7 +964,7 @@ pub(crate) fn op_dom_inner(
                 .to_string()
         }
         "remove_attribute" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             dom.with_node_mut(NodeId::new(nid), |n| {
                 if let NodeData::Element { attrs, .. } = &mut n.data {
                     attrs.retain(|a| !a.qualified_name_eq(&arg2));
@@ -968,15 +976,17 @@ pub(crate) fn op_dom_inner(
         //   get/remove: "<namespace>\0<localName>"
         //   set:        "<namespace>\0<qualifiedName>\0<value>"
         "get_attribute_ns" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let (ns, local) = arg2.split_once('\0').unwrap_or(("", arg2.as_str()));
             let val = dom
-                .with_node(NodeId::new(nid), |n| n.get_attribute_ns(ns, local).map(|s| s.to_string()))
+                .with_node(NodeId::new(nid), |n| {
+                    n.get_attribute_ns(ns, local).map(|s| s.to_string())
+                })
                 .flatten();
             serde_json::to_string(&val).unwrap_or("null".into())
         }
         "set_attribute_ns" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let node_id = NodeId::new(nid);
             let mut parts = arg2.splitn(3, '\0');
             let ns = parts.next().unwrap_or("");
@@ -1004,7 +1014,7 @@ pub(crate) fn op_dom_inner(
             "true".into()
         }
         "remove_attribute_ns" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let node_id = NodeId::new(nid);
             let (ns, local) = arg2.split_once('\0').unwrap_or(("", arg2.as_str()));
             if ns.is_empty() && local == "id" {
@@ -1019,7 +1029,7 @@ pub(crate) fn op_dom_inner(
             "true".into()
         }
         "set_inner_html" => {
-            let nid = match arg1.parse::<u32>() {
+            let nid = match arg1.parse::<u64>() {
                 Ok(n) if n > 0 => n,
                 // nid=0 is the document root; never allow innerHTML to clear it.
                 // nid parse failure (e.g. "undefined") also falls here.
@@ -1050,7 +1060,7 @@ pub(crate) fn op_dom_inner(
             "true".into()
         }
         "set_inner_html_context" => {
-            let nid = match arg1.parse::<u32>() {
+            let nid = match arg1.parse::<u64>() {
                 Ok(n) if n > 0 => n,
                 _ => return "false".into(),
             };
@@ -1073,7 +1083,7 @@ pub(crate) fn op_dom_inner(
         // policy from innerHTML: scripts remain eligible and are prepared when
         // the returned fragment is inserted into a connected document.
         "set_fragment_html_executable" => {
-            let nid = match arg1.parse::<u32>() {
+            let nid = match arg1.parse::<u64>() {
                 Ok(n) if n > 0 => n,
                 _ => return "false".into(),
             };
@@ -1090,7 +1100,7 @@ pub(crate) fn op_dom_inner(
             "true".into()
         }
         "set_text_content" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             dom.with_node_mut(NodeId::new(nid), |n| match &mut n.data {
                 NodeData::Text { contents } => {
                     *contents = arg2.clone();
@@ -1109,14 +1119,14 @@ pub(crate) fn op_dom_inner(
         // is the only route to them from JS. Allocates one on demand for
         // templates built via createElement.
         "template_contents" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             dom.template_contents(NodeId::new(nid))
-                .map(|id| id.index().to_string())
+                .map(|id| id.raw().to_string())
                 .unwrap_or("-1".into())
         }
-        "create_document_fragment" => dom.new_node(NodeData::Document).index().to_string(),
+        "create_document_fragment" => dom.new_node(NodeData::Document).raw().to_string(),
         "clone_node" => {
-            let nid = match arg1.parse::<u32>() {
+            let nid = match arg1.parse::<u64>() {
                 Ok(n) => n,
                 Err(_) => return "-1".into(),
             };
@@ -1124,7 +1134,7 @@ pub(crate) fn op_dom_inner(
             match dom.clone_node(source, arg2 == "true") {
                 Some(cloned) => {
                     propagate_script_start_state(dom, source, cloned, &gs.already_started_scripts);
-                    cloned.index().to_string()
+                    cloned.raw().to_string()
                 }
                 None => "-1".into(),
             }
@@ -1140,7 +1150,7 @@ pub(crate) fn op_dom_inner(
                 template_contents: None,
                 mathml_annotation_xml_integration_point: false,
             })
-            .index()
+            .raw()
             .to_string(),
         "create_element_ns" => {
             let (namespace, qualified) = arg1.split_once('\0').unwrap_or(("", arg1.as_str()));
@@ -1161,20 +1171,20 @@ pub(crate) fn op_dom_inner(
                 template_contents: None,
                 mathml_annotation_xml_integration_point: false,
             })
-            .index()
+            .raw()
             .to_string()
         }
         "create_text_node" => dom
             .new_node(NodeData::Text {
                 contents: arg1.clone(),
             })
-            .index()
+            .raw()
             .to_string(),
         "create_comment_node" => dom
             .new_node(NodeData::Comment {
                 contents: arg1.clone(),
             })
-            .index()
+            .raw()
             .to_string(),
         "create_processing_instruction" => {
             // arg1 = target, arg2 = data
@@ -1182,7 +1192,7 @@ pub(crate) fn op_dom_inner(
                 target: arg1.clone(),
                 data: arg2.clone(),
             })
-            .index()
+            .raw()
             .to_string()
         }
         "create_doctype" => {
@@ -1194,11 +1204,11 @@ pub(crate) fn op_dom_inner(
                 public_id: arg2.clone(),
                 system_id: String::new(),
             })
-            .index()
+            .raw()
             .to_string()
         }
         "pi_target" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let val = dom
                 .with_node(NodeId::new(nid), |n| match &n.data {
                     NodeData::ProcessingInstruction { target, .. } => Some(target.clone()),
@@ -1209,7 +1219,7 @@ pub(crate) fn op_dom_inner(
             serde_json::to_string(&val).unwrap_or("\"\"".into())
         }
         "doctype_name" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let val = dom
                 .with_node(NodeId::new(nid), |n| match &n.data {
                     NodeData::Doctype { name, .. } => Some(name.clone()),
@@ -1220,7 +1230,7 @@ pub(crate) fn op_dom_inner(
             serde_json::to_string(&val).unwrap_or("\"\"".into())
         }
         "doctype_public_id" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             let val = dom
                 .with_node(NodeId::new(nid), |n| match &n.data {
                     NodeData::Doctype { public_id, .. } => Some(public_id.clone()),
@@ -1231,24 +1241,24 @@ pub(crate) fn op_dom_inner(
             serde_json::to_string(&val).unwrap_or("\"\"".into())
         }
         "element_children" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
-            let ids: Vec<i32> = dom
+            let nid = arg1.parse::<u64>().unwrap_or(0);
+            let ids: Vec<i64> = dom
                 .children(NodeId::new(nid))
                 .iter()
                 .filter(|&&id| dom.get_node(id).map(|n| n.is_element()).unwrap_or(false))
-                .map(|id| id.index() as i32)
+                .map(|id| id.raw() as i64)
                 .collect();
             serde_json::to_string(&ids).unwrap_or("[]".into())
         }
         "has_child_nodes" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             dom.with_node(NodeId::new(nid), |n| n.first_child.is_some())
                 .unwrap_or(false)
                 .to_string()
         }
         "contains" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
-            let other = arg2.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
+            let other = arg2.parse::<u64>().unwrap_or(0);
             dom.descendants(NodeId::new(nid))
                 .contains(&NodeId::new(other))
                 .to_string()
@@ -1257,37 +1267,37 @@ pub(crate) fn op_dom_inner(
         // cached bit avoids an ancestor op crossing for every level when JS
         // builds a deep detached subtree.
         "is_connected" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             dom.is_connected(NodeId::new(nid)).to_string()
         }
         // Index of a node among its parent's children. Walks prev siblings in
         // Rust, avoiding the per-step JS->op round trips a Range comparison
         // would otherwise make.
         "node_index" => {
-            let nid = arg1.parse::<u32>().unwrap_or(0);
+            let nid = arg1.parse::<u64>().unwrap_or(0);
             node_child_index(dom, NodeId::new(nid)).to_string()
         }
         // Document (preorder) tree order of two nodes: -1 if a precedes b, 1 if
         // a follows b, 0 if equal. Used by the Range boundary-point algorithms.
         "compare_order" => {
-            let a = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
-            let b = NodeId::new(arg2.parse::<u32>().unwrap_or(0));
+            let a = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
+            let b = NodeId::new(arg2.parse::<u64>().unwrap_or(0));
             compare_node_order(dom, a, b).to_string()
         }
         // Root (topmost ancestor) of a node, in one op rather than an O(depth)
         // walk of parentNode ops from JS.
         "node_root" => {
-            let mut cur = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
+            let mut cur = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
             while let Some(p) = dom.with_node(cur, |x| x.parent).flatten() {
                 cur = p;
             }
-            cur.index().to_string()
+            cur.raw().to_string()
         }
         // Inclusive ancestor test in one op so MutationObserver subtree
         // matching does not walk parentNode in JS (quadratic on deep trees).
         "is_inclusive_ancestor" => {
-            let ancestor = NodeId::new(arg1.parse::<u32>().unwrap_or(0));
-            let mut cur = NodeId::new(arg2.parse::<u32>().unwrap_or(0));
+            let ancestor = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
+            let mut cur = NodeId::new(arg2.parse::<u64>().unwrap_or(0));
             let mut hops = 0u32;
             loop {
                 if cur == ancestor {
@@ -1339,7 +1349,7 @@ fn compare_node_order(dom: &DomTree, a: NodeId, b: NodeId) -> i32 {
     let bb = node_ancestors_root_first(dom, b);
     // Different roots: order is undefined per spec; keep it stable by node id.
     if aa[0] != bb[0] {
-        return if a.index() < b.index() { -1 } else { 1 };
+        return if a.raw() < b.raw() { -1 } else { 1 };
     }
     let mut i = 0usize;
     while i < aa.len() && i < bb.len() && aa[i] == bb[i] {
@@ -1357,126 +1367,12 @@ fn compare_node_order(dom: &DomTree, a: NodeId, b: NodeId) -> i32 {
         1
     }
 }
-// Fallback cache for runtimes that have no owning HttpClient, such as
-// a standalone module loader. Browser pages use their context-scoped client
-// below so sequential V8 runtimes never share an async network pool (#453).
-static FETCH_CLIENT_CACHE: std::sync::OnceLock<
-    std::sync::RwLock<std::collections::HashMap<String, reqwest::Client>>,
-> = std::sync::OnceLock::new();
-
-/// Shared HTTP client cache for any code in tinybrowser-js that needs a
-/// reqwest::Client (op_fetch_url for JS-side fetch/XHR, the ES module
-/// loader for dynamic imports). Keyed by proxy URL ("" = direct).
-/// One client per distinct proxy, reused for every request, so the
-/// connection pool actually warms up.
-pub fn cached_request_client(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
-    let key = proxy_url.unwrap_or("").to_string();
-    let cache =
-        FETCH_CLIENT_CACHE.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()));
-    if let Ok(read) = cache.read() {
-        if let Some(client) = read.get(&key) {
-            return Ok(client.clone());
-        }
-    }
-    let client = build_request_client(proxy_url)?;
-    if let Ok(mut write) = cache.write() {
-        write.entry(key).or_insert_with(|| client.clone());
-    }
-    Ok(client)
-}
-
-fn build_request_client(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
-    // Redirects are followed manually below so each hop can be re-validated
-    // against the same SSRF policy as the initial URL (GHSA-8v6v-g4rh-jmcm).
-    // With reqwest's default auto-follow, an attacker-controlled origin can
-    // 302 to http://127.0.0.1 and read the internal-service body.
-    // Per-request timeout so a scripted fetch()/XHR, or a CORS preflight OPTIONS
-    // (issue #251), to a server that accepts the connection but never responds
-    // cannot hang forever. Without it op_fetch_url never returns, the fetch
-    // promise never settles, and the JS XHR is stuck at readyState 1 with no
-    // completion event (which stranded Angular HttpClient). On timeout reqwest's
-    // send().await errors, which op_fetch_url propagates and the fetch shim turns
-    // into an XHR `error`/`loadend`. 30s matches the other clients in the
-    // workspace; TINYBROWSER_FETCH_TIMEOUT_MS overrides it for tighter cloud limits.
-    let mut builder = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(fetch_timeout())
-        // SSRF guard: also reject hostnames that resolve to a private/loopback IP.
-        .dns_resolver(std::sync::Arc::new(tinybrowser_net::SsrfGuardResolver::new(
-            false,
-        )))
-        // Be explicit about pool size: default is unbounded which is fine,
-        // but pool_idle_timeout default (90s) is short for SPA-heavy
-        // workloads where the same origin is hit dozens of times across
-        // a navigation. Keep connections warm longer.
-        .pool_idle_timeout(std::time::Duration::from_secs(300))
-        .tcp_keepalive(std::time::Duration::from_secs(60));
-    if let Some(proxy) = proxy_url {
-        let p = reqwest::Proxy::all(proxy)
-            .map_err(|e| format!("Invalid op_fetch_url proxy '{}': {}", proxy, e))?;
-        builder = builder.proxy(p);
-    }
-    builder
-        .build()
-        .map_err(|e| format!("failed to build reqwest::Client: {}", e))
-}
-
 pub(crate) fn fetch_timeout() -> std::time::Duration {
     let timeout_ms = std::env::var("TINYBROWSER_FETCH_TIMEOUT_MS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(30_000);
     std::time::Duration::from_millis(timeout_ms)
-}
-
-/// Cap on the number of redirect hops op_fetch_url will follow.
-/// Matches reqwest's default policy of 10.
-const FETCH_REDIRECT_LIMIT: usize = 10;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FetchCredentials {
-    Omit,
-    SameOrigin,
-    Include,
-}
-
-impl FetchCredentials {
-    fn parse(value: &str) -> Self {
-        match value {
-            "omit" => Self::Omit,
-            "include" => Self::Include,
-            _ => Self::SameOrigin,
-        }
-    }
-
-    fn allows(self, page_origin: &str, request_url: &str) -> bool {
-        match self {
-            Self::Omit => false,
-            Self::Include => true,
-            Self::SameOrigin => request_origin(request_url)
-                .map(|origin| origin == page_origin)
-                .unwrap_or(false),
-        }
-    }
-}
-
-fn request_origin(request_url: &str) -> Option<String> {
-    url::Url::parse(request_url)
-        .ok()
-        .map(|url| url.origin().ascii_serialization())
-}
-
-fn cors_response_allows(
-    credentials: FetchCredentials,
-    page_origin: &str,
-    allowed_origin: &str,
-    allow_credentials: &str,
-) -> bool {
-    if credentials == FetchCredentials::Include {
-        allowed_origin == page_origin && allow_credentials == "true"
-    } else {
-        allowed_origin == "*" || allowed_origin == page_origin
-    }
 }
 
 /// Snapshot of page state a fetch needs on the network thread. `RuntimeState`
@@ -1491,11 +1387,12 @@ pub(crate) struct FetchJob {
     pub credentials: String,
     pub cookie_jar: Option<Arc<CookieJar>>,
     pub http_client: Option<Arc<HttpClient>>,
-    pub intercept: Option<(tokio::sync::mpsc::UnboundedSender<InterceptedRequest>, String)>,
+    pub intercept: Option<(
+        tokio::sync::mpsc::UnboundedSender<InterceptedRequest>,
+        String,
+    )>,
     pub callbacks: Option<Arc<CallbackRegistry>>,
-    pub in_flight: Option<Arc<std::sync::atomic::AtomicU32>>,
     pub page_in_flight: Arc<std::sync::atomic::AtomicU32>,
-    pub stealth_client: Option<Arc<StealthHttpClient>>,
 }
 
 pub(crate) struct FetchStore {
@@ -1558,8 +1455,8 @@ pub(crate) fn start_fetch(
         .as_ref()
         .is_some_and(|client| client.allow_private_network);
     if let Ok(parsed_url) = url::Url::parse(&url) {
-        if let Err(e) = validate_fetch_url(&parsed_url, allow_private_network) {
-            return FetchStart::Immediate(FetchOutcome::blocked(&url, Some(e)));
+        if let Err(e) = validate_url(&parsed_url, allow_private_network) {
+            return FetchStart::Immediate(FetchOutcome::blocked(&url, Some(e.to_string())));
         }
     }
     tracing::debug!(
@@ -1577,12 +1474,10 @@ pub(crate) fn start_fetch(
     };
     FetchStart::Pending(FetchJob {
         cookie_jar: gs.cookie_jar.clone(),
-        in_flight: gs.http_client.as_ref().map(|c| c.in_flight.clone()),
         page_in_flight: Arc::clone(&gs.page_in_flight),
         intercept,
         callbacks: gs.callbacks.clone(),
         http_client: gs.http_client.clone(),
-        stealth_client: gs.stealth_client.clone(),
         url,
         method,
         headers_json,
@@ -1649,9 +1544,7 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
         http_client,
         intercept: intercept_tx,
         callbacks,
-        in_flight,
         page_in_flight,
-        stealth_client,
     } = job;
     let proxy_url = http_client
         .as_ref()
@@ -1739,10 +1632,10 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
     // A Continue rewrite of the URL must pass the same SSRF / private-network
     // gate as the original request (checked above) and as redirects (checked
     // below). Without this re-validation a rewrite to an internal address would
-    // bypass validate_fetch_url entirely.
+    // bypass validate_url entirely.
     let url = if let Some(new_url) = override_url {
         if let Ok(parsed) = url::Url::parse(&new_url) {
-            if let Err(reason) = validate_fetch_url(&parsed, allow_private_network) {
+            if let Err(reason) = validate_url(&parsed, allow_private_network) {
                 return Ok(json_outcome(serde_json::json!({
                     "status": 0,
                     "body": "",
@@ -1759,311 +1652,82 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
     let method = override_method.unwrap_or(method);
     let body = override_body.unwrap_or(body);
 
-    let client = match &http_client {
-        Some(client) => client.request_client().await,
-        None => {
-            cached_request_client(proxy_url.as_deref())?
-        }
-    };
+    let custom_headers: HashMap<String, String> =
+        override_headers.unwrap_or_else(|| serde_json::from_str(&headers_json).unwrap_or_default());
 
-    let initial_request_origin = request_origin(&url).unwrap_or_default();
     let page_origin = if origin.is_empty() {
-        initial_request_origin.clone()
+        request_origin(&url).unwrap_or_default()
     } else {
         origin.clone()
     };
-    let is_cross_origin = !page_origin.is_empty() && initial_request_origin != page_origin;
-    let credentials = FetchCredentials::parse(&credentials);
-
-    let req_method: reqwest::Method = method.parse().unwrap_or(reqwest::Method::GET);
-
-    let custom_headers: std::collections::HashMap<String, String> =
-        override_headers.unwrap_or_else(|| serde_json::from_str(&headers_json).unwrap_or_default());
-
-    // Passive request observation (non-blocking). Fires for every request that
-    // reaches the network (Fulfill/Fail from the interception channel short-
-    // circuit earlier). on_request/on_response previously fired only for
-    // navigation; this wires them for JS fetch()/XHR too.
-    if let Some(ref cbs) = callbacks {
-        if cbs.has_request_callbacks().await {
-            if let Ok(parsed) = url::Url::parse(&url) {
-                let info = RequestInfo {
-                    url: parsed,
-                    method: method.clone(),
-                    headers: custom_headers.clone(),
-                    resource_type: ResourceType::Fetch,
-                };
-                cbs.fire_request(&info).await;
-            }
-        }
-    }
-
-    let needs_preflight = is_cross_origin
-        && mode == "cors"
-        && (req_method != reqwest::Method::GET
-            && req_method != reqwest::Method::HEAD
-            && req_method != reqwest::Method::POST
-            || custom_headers.keys().any(|k| {
-                let kl = k.to_lowercase();
-                kl != "accept"
-                    && kl != "accept-language"
-                    && kl != "content-language"
-                    && kl != "content-type"
-            }));
-
-    if needs_preflight {
-        let preflight = client
-            .request(reqwest::Method::OPTIONS, &url)
-            .timeout(fetch_timeout())
-            .header("Origin", &page_origin)
-            .header("Access-Control-Request-Method", method.as_str())
-            .header(
-                "Access-Control-Request-Headers",
-                custom_headers
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )
-            .send()
-            .await
-            .map_err(|e| format!("CORS preflight failed: {}", e))?;
-
-        let allowed_origin = preflight
-            .headers()
-            .get("access-control-allow-origin")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        let allow_credentials = preflight
-            .headers()
-            .get("access-control-allow-credentials")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if !cors_response_allows(credentials, &page_origin, allowed_origin, allow_credentials) {
-            return Err(format!(
-                "CORS preflight: Origin '{}' not allowed by Access-Control-Allow-Origin '{}'",
-                page_origin, allowed_origin
-            ));
-        }
-    }
-
-    // Stealth mode: route scripted requests through wreq after the CORS
-    // preflight. stealth_fetch_all applies the credentials decision to each
-    // redirect hop without losing the Chrome TLS/client-hint transport.
-    if let Some(stealth) = stealth_client {
-        return stealth_fetch_all(
-            stealth,
-            url.clone(),
-            req_method.as_str().to_string(),
-            custom_headers.clone(),
-            body.clone(),
-            page_origin.clone(),
-            mode.clone(),
-            credentials,
-            callbacks.clone(),
-            allow_private_network,
-        )
-        .await
-        .map_err(|e| e.to_string());
-    }
-
-    // Follow redirects manually so the SSRF policy applies to every hop.
-    // reqwest's auto-follow would bypass validate_fetch_url on the redirect
-    // target and let an attacker-allowed origin 302 to http://127.0.0.1
-    // (GHSA-8v6v-g4rh-jmcm).
-    let mut current_url = url.clone();
-    let mut current_method = req_method;
-    let mut current_body = body;
-    let mut redirects_followed: usize = 0;
-    let response = loop {
-        let mut req = client
-            .request(current_method.clone(), &current_url)
-            .timeout(fetch_timeout());
-
-        let current_is_cross_origin = request_origin(&current_url)
-            .map(|request_origin| request_origin != page_origin)
-            .unwrap_or(false);
-        if current_is_cross_origin {
-            req = req.header("Origin", &page_origin);
-        }
-
-        let credentials_allowed = credentials.allows(&page_origin, &current_url);
-        if credentials_allowed {
-            if let Some(ref jar) = cookie_jar {
-                if let Ok(parsed_url) = url::Url::parse(&current_url) {
-                    let cookie_header = jar.get_cookie_header(&parsed_url);
-                    if !cookie_header.is_empty() {
-                        req = req.header("Cookie", &cookie_header);
-                    }
-                }
-            }
-        }
-
-        // Send a default User-Agent on fetch()/XHR requests (the navigation path
-        // sets one, but this op did not, so scripted requests went out with no UA
-        // and UA-gated servers rejected them). Honor an explicit override.
-        if !custom_headers
-            .keys()
-            .any(|k| k.eq_ignore_ascii_case("user-agent"))
-        {
-            req = req.header(
-                "User-Agent",
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-            );
-        }
-
-        for (k, v) in &custom_headers {
-            req = req.header(k.as_str(), v.as_str());
-        }
-
-        if !current_body.is_empty() {
-            req = req.body(current_body.clone());
-        }
-
-        if let Some(ref counter) = in_flight {
-            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        let resp = req.send().await.map_err(|e| {
-            if let Some(ref counter) = in_flight {
-                counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            e.to_string()
-        })?;
-
-        if let Some(ref counter) = in_flight {
-            counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        if credentials_allowed {
-            if let Some(ref jar) = cookie_jar {
-                if let Ok(parsed_url) = url::Url::parse(&current_url) {
-                    for val in resp.headers().get_all(reqwest::header::SET_COOKIE) {
-                        if let Ok(s) = val.to_str() {
-                            jar.set_cookie(s, &parsed_url);
-                        }
-                    }
-                }
-            }
-        }
-
-        if !resp.status().is_redirection() {
-            break resp;
-        }
-
-        let location_header = resp
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        let Some(location) = location_header else {
-            // 3xx without a Location header is not actually a redirect.
-            break resp;
-        };
-
-        let base = match url::Url::parse(&current_url) {
-            Ok(b) => b,
-            Err(_) => break resp,
-        };
-        let next_url = match base.join(&location) {
-            Ok(u) => u,
-            Err(_) => break resp,
-        };
-
-        // Re-validate every redirect target against the SSRF policy.
-        if let Err(reason) = validate_fetch_url(&next_url, allow_private_network) {
+    let initiator = url::Url::parse(&page_origin)
+        .ok()
+        .or_else(|| url::Url::parse(&url).ok());
+    let parsed = match url::Url::parse(&url) {
+        Ok(u) => u,
+        Err(_) => {
             return Ok(json_outcome(serde_json::json!({
-                "status": 0,
-                "body": "",
-                "url": next_url.to_string(),
-                "headers": {},
-                "blocked": true,
-                "error": format!("Redirect to forbidden URL blocked: {}", reason),
+                "status": 0, "body": "", "url": url, "headers": {},
             })));
         }
-
-        redirects_followed += 1;
-        if redirects_followed > FETCH_REDIRECT_LIMIT {
-            return Ok(json_outcome(serde_json::json!({
-                "status": 0,
-                "body": "",
-                "url": next_url.to_string(),
-                "headers": {},
-                "blocked": true,
-                "error": format!("Too many redirects (>{})", FETCH_REDIRECT_LIMIT),
-            })));
-        }
-
-        // Browser semantics: 301/302/303 downgrade to GET with no body.
-        // 307/308 preserve method and body.
-        let status_code = resp.status().as_u16();
-        if status_code == 301 || status_code == 302 || status_code == 303 {
-            current_method = reqwest::Method::GET;
-            current_body.clear();
-        }
-
-        current_url = next_url.to_string();
     };
 
-    let status = response.status().as_u16();
+    let client = match http_client {
+        Some(client) => client,
+        None => Arc::new(HttpClient::with_full_options(
+            cookie_jar.unwrap_or_else(|| Arc::new(CookieJar::new())),
+            proxy_url.as_deref(),
+            allow_private_network,
+        )),
+    };
 
-    let resp_headers: std::collections::HashMap<String, String> = response
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect();
+    let request = ResourceRequest::scripted_fetch(
+        initiator,
+        method.clone(),
+        custom_headers,
+        if body.is_empty() {
+            None
+        } else {
+            Some(body.into_bytes())
+        },
+        RequestMode::from_fetch_mode(&mode),
+        RequestCredentials::from_fetch_credentials(&credentials),
+    );
 
-    let final_is_cross_origin = request_origin(&current_url)
-        .map(|request_origin| request_origin != page_origin)
-        .unwrap_or(false);
-    if final_is_cross_origin && mode == "cors" {
-        let allowed = resp_headers
-            .get("access-control-allow-origin")
-            .map(|s| s.as_str())
-            .unwrap_or("");
-
-        let allow_credentials = resp_headers
-            .get("access-control-allow-credentials")
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        if !cors_response_allows(credentials, &page_origin, allowed, allow_credentials) {
+    let response = match client
+        .fetch_resource_with_callbacks(&parsed, request, callbacks.as_deref())
+        .await
+    {
+        Ok(response) => response,
+        Err(NetError::Cors(msg)) => {
             return Ok(json_outcome(serde_json::json!({
                 "status": 0,
                 "body": "",
                 "url": url,
                 "headers": {},
                 "corsBlocked": true,
-                "corsError": if credentials == FetchCredentials::Include {
-                    format!(
-                        "CORS error: credentialed request requires Access-Control-Allow-Origin '{}' and Access-Control-Allow-Credentials 'true'",
-                        page_origin
-                    )
-                } else {
-                    format!("CORS error: Origin '{}' not in Access-Control-Allow-Origin '{}'", page_origin, allowed)
-                },
+                "corsError": msg,
             })));
         }
-    }
+        Err(NetError::TooManyRedirects(u)) => {
+            return Ok(FetchOutcome::blocked(
+                &u,
+                Some("Too many redirects".to_string()),
+            ));
+        }
+        Err(e @ (NetError::Ssrf(_) | NetError::UnsupportedProxy { .. })) => {
+            return Ok(FetchOutcome::blocked(&url, Some(e.to_string())));
+        }
+        Err(e) => {
+            return Err(e.to_string());
+        }
+    };
 
-    let resp_bytes = response
-        .bytes()
-        .await
-        .map_err(|e| e.to_string())?;
+    let status = response.status;
+    let resp_headers = response.headers.clone();
+    let resp_bytes = response.body;
     let resp_body = String::from_utf8_lossy(&resp_bytes).to_string();
     let resp_body_base64 = BASE64.encode(&resp_bytes);
-    if let Some(ref cbs) = callbacks {
-        if cbs.has_response_callbacks().await {
-            let resp = fetch_response(&url, status, resp_headers.clone(), resp_bytes.to_vec());
-            let info = RequestInfo {
-                url: resp.url.clone(),
-                method: method.clone(),
-                headers: resp_headers.clone(),
-                resource_type: ResourceType::Fetch,
-            };
-            cbs.fire_response(&info, &resp).await;
-        }
-    }
 
     tracing::debug!(
         "op_fetch_url completed: {} {} ({} bytes)",
@@ -2077,13 +1741,13 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
             "status": status,
             "body": resp_body,
             "bodyBase64": resp_body_base64,
-            "url": url,
+            "url": response.url.to_string(),
             "headers": resp_headers,
         }),
         store: Some(FetchStore {
             body: resp_body,
             body_len: resp_bytes.len(),
-            url,
+            url: response.url.to_string(),
             method,
             status,
             response_headers: resp_headers,
@@ -2091,177 +1755,10 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
     })
 }
 
-/// Assemble a `Response` for the on_response interception callbacks from the
-/// parts op_fetch_url already holds. Navigation gets a Response straight from
-/// the http client, but the JS fetch path builds the pieces itself.
-fn fetch_response(
-    url: &str,
-    status: u16,
-    headers: HashMap<String, String>,
-    body: Vec<u8>,
-) -> Response {
-    Response {
-        url: url::Url::parse(url).unwrap_or_else(|_| url::Url::parse("http://0.0.0.0/").unwrap()),
-        status,
-        headers,
-        body,
-        redirected_from: Vec::new(),
-    }
-}
-
-/// Stealth-mode scripted fetch()/XHR: mirrors op_fetch_url's redirect, SSRF,
-/// CORS, and CDP Network-event semantics but sends every hop through the wreq
-/// stealth client so the request carries the Chrome TLS fingerprint and client
-/// hints. Cookie handling lives inside StealthHttpClient::send_single, which
-/// shares the context jar.
-async fn stealth_fetch_all(
-    stealth: Arc<StealthHttpClient>,
-    url: String,
-    method: String,
-    custom_headers: HashMap<String, String>,
-    body: String,
-    page_origin: String,
-    mode: String,
-    credentials: FetchCredentials,
-    callbacks: Option<Arc<CallbackRegistry>>,
-    allow_private_network: bool,
-) -> Result<FetchOutcome, deno_error::JsErrorBox> {
-    let mut current_url = url.clone();
-    let original_method = method.clone();
-    let mut current_method = method;
-    let mut current_body = body;
-    let mut redirects_followed: usize = 0;
-
-    let (status, resp_headers, resp_bytes): (u16, HashMap<String, String>, Vec<u8>) = loop {
-        let parsed_current = match url::Url::parse(&current_url) {
-            Ok(u) => u,
-            Err(_) => {
-                return Ok(json_outcome(serde_json::json!({
-                    "status": 0, "body": "", "url": current_url, "headers": {},
-                })));
-            }
-        };
-
-        let mut req_headers: HashMap<String, String> = HashMap::new();
-        let current_is_cross_origin = parsed_current.origin().ascii_serialization() != page_origin;
-        if current_is_cross_origin {
-            req_headers.insert("origin".to_string(), page_origin.clone());
-        }
-        for (k, v) in &custom_headers {
-            req_headers.insert(k.to_lowercase(), v.clone());
-        }
-
-        let credentials_allowed = credentials.allows(&page_origin, &current_url);
-        let r = stealth
-            .send_single(
-                &current_method,
-                &parsed_current,
-                &req_headers,
-                &current_body,
-                credentials_allowed,
-                credentials_allowed,
-            )
-            .await
-            .map_err(|e| deno_error::JsErrorBox::generic(e.to_string()))?;
-
-        if !(300..400).contains(&r.status) {
-            break (r.status, r.headers, r.body);
-        }
-        let Some(location) = r.headers.get("location").cloned() else {
-            break (r.status, r.headers, r.body);
-        };
-        let next_url = match parsed_current.join(&location) {
-            Ok(u) => u,
-            Err(_) => break (r.status, r.headers, r.body),
-        };
-        // Re-validate every redirect target against the SSRF policy, matching
-        // op_fetch_url (GHSA-8v6v-g4rh-jmcm).
-        if let Err(reason) = validate_fetch_url(&next_url, allow_private_network) {
-            return Ok(json_outcome(serde_json::json!({
-                "status": 0, "body": "", "url": next_url.to_string(), "headers": {},
-                "blocked": true,
-                "error": format!("Redirect to forbidden URL blocked: {}", reason),
-            })));
-        }
-        redirects_followed += 1;
-        if redirects_followed > FETCH_REDIRECT_LIMIT {
-            return Ok(json_outcome(serde_json::json!({
-                "status": 0, "body": "", "url": next_url.to_string(), "headers": {},
-                "blocked": true,
-                "error": format!("Too many redirects (>{})", FETCH_REDIRECT_LIMIT),
-            })));
-        }
-        // Browser semantics: 301/302/303 downgrade to GET with no body.
-        if r.status == 301 || r.status == 302 || r.status == 303 {
-            current_method = "GET".to_string();
-            current_body.clear();
-        }
-        current_url = next_url.to_string();
-    };
-
-    let final_is_cross_origin = request_origin(&current_url)
-        .map(|request_origin| request_origin != page_origin)
-        .unwrap_or(false);
-    if final_is_cross_origin && mode == "cors" {
-        let allowed = resp_headers
-            .get("access-control-allow-origin")
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        let allow_credentials = resp_headers
-            .get("access-control-allow-credentials")
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        if !cors_response_allows(credentials, &page_origin, allowed, allow_credentials) {
-            return Ok(json_outcome(serde_json::json!({
-                "status": 0, "body": "", "url": url, "headers": {},
-                "corsBlocked": true,
-                "corsError": if credentials == FetchCredentials::Include {
-                    format!(
-                        "CORS error: credentialed request requires Access-Control-Allow-Origin '{}' and Access-Control-Allow-Credentials 'true'",
-                        page_origin
-                    )
-                } else {
-                    format!(
-                        "CORS error: Origin '{}' not in Access-Control-Allow-Origin '{}'",
-                        page_origin, allowed
-                    )
-                },
-            })));
-        }
-    }
-
-    let resp_body = String::from_utf8_lossy(&resp_bytes).to_string();
-    let resp_body_base64 = BASE64.encode(&resp_bytes);
-    if let Some(ref cbs) = callbacks {
-        if cbs.has_response_callbacks().await {
-            let resp = fetch_response(&url, status, resp_headers.clone(), resp_bytes.clone());
-            let info = RequestInfo {
-                url: resp.url.clone(),
-                method: current_method.clone(),
-                headers: resp_headers.clone(),
-                resource_type: ResourceType::Fetch,
-            };
-            cbs.fire_response(&info, &resp).await;
-        }
-    }
-
-    Ok(FetchOutcome {
-        json: serde_json::json!({
-            "status": status,
-            "body": resp_body,
-            "bodyBase64": resp_body_base64,
-            "url": url,
-            "headers": resp_headers,
-        }),
-        store: Some(FetchStore {
-            body: resp_body,
-            body_len: resp_bytes.len(),
-            url,
-            method: original_method,
-            status,
-            response_headers: resp_headers,
-        }),
-    })
+fn request_origin(request_url: &str) -> Option<String> {
+    url::Url::parse(request_url)
+        .ok()
+        .map(|url| url.origin().ascii_serialization())
 }
 
 fn glob_match(pattern: &str, url: &str) -> bool {
@@ -2293,7 +1790,7 @@ fn glob_match(pattern: &str, url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{cors_response_allows, glob_match, validate_fetch_url, FetchCredentials};
+    use super::glob_match;
     use crate::runtime::JsRuntime;
     use tinybrowser_dom::parse_html;
 
@@ -2322,57 +1819,9 @@ mod tests {
     }
 
     #[test]
-    fn fetch_credentials_gate_cookie_send_and_storage_per_request_origin() {
-        let page_origin = "https://www.example.com";
-        let same_origin_url = "https://www.example.com/api";
-        let explicit_default_port = "https://www.example.com:443/api";
-        let cross_origin_url = "https://api.example.com/data";
-
-        assert!(!FetchCredentials::Omit.allows(page_origin, same_origin_url));
-        assert!(!FetchCredentials::Omit.allows(page_origin, cross_origin_url));
-
-        assert!(FetchCredentials::SameOrigin.allows(page_origin, same_origin_url));
-        assert!(FetchCredentials::SameOrigin.allows(page_origin, explicit_default_port));
-        assert!(!FetchCredentials::SameOrigin.allows(page_origin, cross_origin_url));
-
-        assert!(FetchCredentials::Include.allows(page_origin, same_origin_url));
-        assert!(FetchCredentials::Include.allows(page_origin, cross_origin_url));
-    }
-
-    #[test]
-    fn credentialed_cors_requires_exact_origin_and_allow_credentials() {
-        let page_origin = "https://www.example.com";
-
-        assert!(cors_response_allows(
-            FetchCredentials::SameOrigin,
-            page_origin,
-            "*",
-            "",
-        ));
-        assert!(!cors_response_allows(
-            FetchCredentials::Include,
-            page_origin,
-            "*",
-            "true",
-        ));
-        assert!(!cors_response_allows(
-            FetchCredentials::Include,
-            page_origin,
-            page_origin,
-            "",
-        ));
-        assert!(cors_response_allows(
-            FetchCredentials::Include,
-            page_origin,
-            page_origin,
-            "true",
-        ));
-    }
-
-    #[test]
     fn fetch_url_validation_honors_per_context_private_network_opt_in() {
         let loopback = url::Url::parse("http://127.0.0.1:8080/resource").unwrap();
-        assert!(validate_fetch_url(&loopback, true).is_ok());
+        assert!(tinybrowser_net::validate_url(&loopback, true).is_ok());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2439,11 +1888,15 @@ mod tests {
             .unwrap();
         let values = result.as_array().unwrap();
         assert!(
-            values[..3].iter().all(|value| value.as_f64() == Some(100.0)),
+            values[..3]
+                .iter()
+                .all(|value| value.as_f64() == Some(100.0)),
             "posted-task chains did not finish inside the 100ms pump: {result}",
         );
         assert!(
-            values[3].as_f64().is_some_and(|elapsed| elapsed >= 0.0 && elapsed < 75.0),
+            values[3]
+                .as_f64()
+                .is_some_and(|elapsed| elapsed >= 0.0 && elapsed < 75.0),
             "300 chained posted-task deliveries retained timer-wheel latency: {result}",
         );
     }
@@ -2502,61 +1955,8 @@ mod tests {
             ]),
         );
     }
-
 }
 
-fn validate_fetch_url(url: &url::Url, allow_private_network: bool) -> Result<(), String> {
-    let scheme = url.scheme();
-    if scheme != "http" && scheme != "https" && scheme != "file" {
-        return Err(format!(
-            "Forbidden URL scheme '{}' - only http, https, and file are allowed",
-            scheme
-        ));
-    }
-
-    if scheme == "file"
-        || allow_private_network
-        || tinybrowser_net::env_allows_private_network()
-    {
-        return Ok(());
-    }
-
-    if let Some(host) = url.host() {
-        match host {
-            url::Host::Ipv4(ip) => {
-                if tinybrowser_net::is_forbidden_ip(std::net::IpAddr::V4(ip)) {
-                    return Err(format!(
-                        "Access to private/internal IP address {} is not allowed",
-                        ip
-                    ));
-                }
-            }
-            url::Host::Ipv6(ip) => {
-                if tinybrowser_net::is_forbidden_ip(std::net::IpAddr::V6(ip)) {
-                    return Err(format!(
-                        "Access to private/internal IPv6 address {} is not allowed",
-                        ip
-                    ));
-                }
-            }
-            url::Host::Domain(domain) => {
-                let lower_domain = domain.to_lowercase();
-                if lower_domain == "localhost"
-                    || lower_domain.ends_with(".localhost")
-                    || lower_domain == "127.0.0.1"
-                    || lower_domain == "::1"
-                {
-                    return Err(format!(
-                        "Access to localhost domain '{}' is not allowed",
-                        domain
-                    ));
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
 pub(crate) fn op_get_cookies_inner(shared: &SharedState) -> String {
     let gs = shared.borrow();
     let jar = match &gs.cookie_jar {
@@ -2583,7 +1983,9 @@ pub(crate) fn op_set_cookie_inner(shared: &SharedState, cookie_str: &str) {
 }
 pub(crate) fn op_navigate_inner(shared: &SharedState, url: &str, method: &str, body: &str) {
     let mut gs = shared.borrow_mut();
-    gs.url = url.to_string();
+    // Document URL / origin stay on the committed document until navigation
+    // headers commit. Mutating `gs.url` here would let `document.cookie` read
+    // the destination origin before the new response exists.
     gs.pending_navigation = Some((url.to_string(), method.to_string(), body.to_string()));
 }
 
@@ -3067,19 +2469,19 @@ pub(crate) fn op_add_import_map_inner(
 /// Canonical (lowercased) WHATWG name for a TextDecoder label, or "" if the
 /// label is unknown (the JS constructor turns "" into a RangeError).
 pub(crate) fn encoding_for_label(label: &str) -> String {
-    tinybrowser_net::label_name(label).unwrap_or_default()
+    tinybrowser_net::TextDecoder::new(label, tinybrowser_net::TextDecoderOptions::default())
+        .map(|decoder| decoder.encoding_name().to_ascii_lowercase())
+        .unwrap_or_default()
 }
 
 /// Decode bytes with a legacy/explicit encoding via encoding_rs. Returns
 /// {"ok":true,"v":<string>} or {"ok":false} (unknown label, or a fatal decode
 /// error). The UTF-8 non-fatal common case is handled in JS without this op.
-pub(crate) fn text_decode(
-    label: &str,
-    bytes: &[u8],
-    fatal: bool,
-    ignore_bom: bool,
-) -> String {
-    match tinybrowser_net::decode_with_label(label, bytes, fatal, ignore_bom) {
+pub(crate) fn text_decode(label: &str, bytes: &[u8], fatal: bool, ignore_bom: bool) -> String {
+    let options = tinybrowser_net::TextDecoderOptions { fatal, ignore_bom };
+    match tinybrowser_net::TextDecoder::new(label, options)
+        .and_then(|decoder| decoder.decode(bytes))
+    {
         Some(s) => serde_json::json!({ "ok": true, "v": s }).to_string(),
         None => "{\"ok\":false}".to_string(),
     }
@@ -3094,4 +2496,3 @@ pub(crate) fn text_decode(
 pub(crate) fn url_encode_query(query: &str, label: &str, special: bool) -> String {
     tinybrowser_net::url_encode_query(query, label, special).unwrap_or_else(|| query.to_string())
 }
-

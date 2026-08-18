@@ -1,4 +1,5 @@
 pub mod cdp_watchdog;
+pub mod dom_bindings;
 mod import_map;
 pub mod markdown;
 pub mod module_loader;

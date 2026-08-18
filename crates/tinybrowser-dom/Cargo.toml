@@ -12,5 +12,6 @@ cssparser = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 precomputed-hash = "0.1"
+slotmap = { workspace = true }
 
 [dev-dependencies]

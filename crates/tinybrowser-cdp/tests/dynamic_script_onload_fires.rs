@@ -1,11 +1,11 @@
 // Regression for issue #474: external scripts inserted after a timer must be
 // fetched and execute before an explicit post-navigation settle completes.
 
-use tinybrowser_cdp::dispatch::{dispatch, CdpContext};
-use tinybrowser_cdp::types::CdpRequest;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use tinybrowser_cdp::dispatch::{dispatch, CdpContext};
+use tinybrowser_cdp::types::CdpRequest;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -187,8 +187,7 @@ async fn navigate_dynamic_order_fixture(explicitly_in_order: bool) -> (Vec<Strin
 async fn dynamic_classic_fetch_concurrency_matches_force_async_state() {
     std::env::set_var("TINYBROWSER_ALLOW_PRIVATE_NETWORK", "1");
 
-    let (async_order, async_peak, async_elapsed_ms) =
-        navigate_dynamic_order_fixture(false).await;
+    let (async_order, async_peak, async_elapsed_ms) = navigate_dynamic_order_fixture(false).await;
     assert_eq!(async_order, ["fast", "slow"]);
     assert_eq!(
         async_peak, 2,

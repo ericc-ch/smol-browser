@@ -4,9 +4,9 @@
 // loaders) resolve instead of hanging forever. On main the link neither fires
 // load nor error, so the page stays on stage1.
 
+use serde_json::{json, Value};
 use tinybrowser_cdp::dispatch::{dispatch, CdpContext};
 use tinybrowser_cdp::types::CdpRequest;
-use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -54,7 +54,13 @@ window.__loaded = new Promise(function (resolve, reject) {
     format!("http://{addr}/")
 }
 
-async fn cdp(ctx: &mut CdpContext, id: u64, method: &str, params: Value, session_id: &str) -> Value {
+async fn cdp(
+    ctx: &mut CdpContext,
+    id: u64,
+    method: &str,
+    params: Value,
+    session_id: &str,
+) -> Value {
     let resp = dispatch(
         &CdpRequest {
             id,
@@ -65,7 +71,11 @@ async fn cdp(ctx: &mut CdpContext, id: u64, method: &str, params: Value, session
         ctx,
     )
     .await;
-    assert!(resp.error.is_none(), "CDP {method} failed: {:?}", resp.error);
+    assert!(
+        resp.error.is_none(),
+        "CDP {method} failed: {:?}",
+        resp.error
+    );
     resp.result.unwrap_or_else(|| json!({}))
 }
 
@@ -102,7 +112,11 @@ async fn dynamic_stylesheet_fires_load() {
     )
     .await;
     let value = v["result"]["value"].as_str().unwrap_or("");
-    assert_eq!(value, "ok", "dynamic <link rel=stylesheet> must fire load (got {:?})", value);
+    assert_eq!(
+        value, "ok",
+        "dynamic <link rel=stylesheet> must fire load (got {:?})",
+        value
+    );
 
     let text = cdp(
         &mut ctx,

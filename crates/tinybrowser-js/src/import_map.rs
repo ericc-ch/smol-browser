@@ -118,11 +118,7 @@ impl ImportMap {
         self.scopes.sort_by(|left, right| right.0.cmp(&left.0));
     }
 
-    pub(crate) fn resolve(
-        &mut self,
-        specifier: &str,
-        referrer: &Url,
-    ) -> Result<Url, String> {
+    pub(crate) fn resolve(&mut self, specifier: &str, referrer: &Url) -> Result<Url, String> {
         let as_url = resolve_url_like(specifier, referrer);
         let normalized = as_url
             .as_ref()
@@ -155,12 +151,7 @@ impl ImportMap {
         }
     }
 
-    fn remember_resolution(
-        &mut self,
-        referrer: String,
-        specifier: String,
-        as_url: Option<&Url>,
-    ) {
+    fn remember_resolution(&mut self, referrer: String, specifier: String, as_url: Option<&Url>) {
         let resolution = ResolvedModule {
             referrer,
             specifier,
@@ -214,11 +205,7 @@ impl SpecifierMap {
             .retain(|key| self.entries.contains_key(key.as_str()));
     }
 
-    fn resolve_match(
-        &self,
-        normalized: &str,
-        as_url: Option<&Url>,
-    ) -> Result<Option<Url>, String> {
+    fn resolve_match(&self, normalized: &str, as_url: Option<&Url>) -> Result<Option<Url>, String> {
         if let Some(address) = self.entries.get(normalized) {
             return address.clone().map(Some).ok_or_else(|| {
                 format!(
@@ -313,8 +300,7 @@ mod tests {
             "https://example.test/app/maps/import-map.json",
         )
         .unwrap();
-        let referrer =
-            url::Url::parse("https://example.test/app/main.js").unwrap();
+        let referrer = url::Url::parse("https://example.test/app/main.js").unwrap();
 
         assert_eq!(
             map.resolve("pkg", &referrer).unwrap().as_str(),
@@ -351,9 +337,7 @@ mod tests {
         )
         .unwrap();
 
-        let nested =
-            url::Url::parse("https://example.test/feature/nested/main.js")
-                .unwrap();
+        let nested = url::Url::parse("https://example.test/feature/nested/main.js").unwrap();
         assert_eq!(
             map.resolve("shared", &nested).unwrap().as_str(),
             "https://example.test/nested.js",
@@ -371,8 +355,7 @@ mod tests {
             "https://example.test/app/index.html",
         )
         .unwrap();
-        let referrer =
-            url::Url::parse("https://example.test/app/main.js").unwrap();
+        let referrer = url::Url::parse("https://example.test/app/main.js").unwrap();
 
         assert_eq!(
             map.resolve("fixed", &referrer).unwrap().as_str(),
@@ -399,8 +382,7 @@ mod tests {
     #[test]
     fn later_prefix_rules_cannot_capture_an_already_resolved_specifier() {
         let mut map = ImportMap::default();
-        let referrer =
-            url::Url::parse("https://example.test/app/main.js").unwrap();
+        let referrer = url::Url::parse("https://example.test/app/main.js").unwrap();
         assert_eq!(
             map.resolve("./pkg/item.js", &referrer).unwrap().as_str(),
             "https://example.test/app/pkg/item.js",
@@ -431,8 +413,7 @@ mod tests {
             "https://example.test/app/index.html",
         )
         .unwrap();
-        let referrer =
-            url::Url::parse("https://example.test/app/feature/main.js").unwrap();
+        let referrer = url::Url::parse("https://example.test/app/feature/main.js").unwrap();
         assert_eq!(
             map.resolve("pkg", &referrer).unwrap().as_str(),
             "https://example.test/scoped.js",

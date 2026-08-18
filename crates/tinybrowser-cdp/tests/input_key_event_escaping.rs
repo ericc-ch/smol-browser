@@ -6,9 +6,9 @@
 //! and the whole `page.evaluate` is a syntax error, so the `keydown` is
 //! silently never dispatched. Regression test: the backslash key must arrive.
 
+use serde_json::{json, Value};
 use tinybrowser_cdp::dispatch::{dispatch, CdpContext};
 use tinybrowser_cdp::types::CdpRequest;
-use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -38,7 +38,13 @@ document.body.addEventListener('keydown', function (e) { window.__keys.push(e.ke
     format!("http://{addr}/")
 }
 
-async fn cdp(ctx: &mut CdpContext, id: u64, method: &str, params: Value, session_id: &str) -> Value {
+async fn cdp(
+    ctx: &mut CdpContext,
+    id: u64,
+    method: &str,
+    params: Value,
+    session_id: &str,
+) -> Value {
     let resp = dispatch(
         &CdpRequest {
             id,
@@ -49,7 +55,11 @@ async fn cdp(ctx: &mut CdpContext, id: u64, method: &str, params: Value, session
         ctx,
     )
     .await;
-    assert!(resp.error.is_none(), "CDP {method} failed: {:?}", resp.error);
+    assert!(
+        resp.error.is_none(),
+        "CDP {method} failed: {:?}",
+        resp.error
+    );
     resp.result.unwrap_or_else(|| json!({}))
 }
 
@@ -62,7 +72,14 @@ async fn dispatch_key_event_escapes_backslash_in_key_and_code() {
     let session_id = "session-1";
     ctx.sessions.insert(session_id.to_string(), page_id.clone());
 
-    cdp(&mut ctx, 1, "Page.navigate", json!({"url": url, "waitUntil": "load"}), session_id).await;
+    cdp(
+        &mut ctx,
+        1,
+        "Page.navigate",
+        json!({"url": url, "waitUntil": "load"}),
+        session_id,
+    )
+    .await;
 
     // The backslash key: Chrome sends key="\" (a single backslash) code="Backslash".
     cdp(
@@ -94,8 +111,7 @@ async fn dispatch_key_event_escapes_backslash_in_key_and_code() {
     )
     .await;
 
-    let keys: Vec<String> =
-        serde_json::from_str(v["result"]["value"].as_str().unwrap()).unwrap();
+    let keys: Vec<String> = serde_json::from_str(v["result"]["value"].as_str().unwrap()).unwrap();
     assert_eq!(
         keys,
         vec!["\\|Backslash".to_string(), "a|KeyA".to_string()],

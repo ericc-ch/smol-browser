@@ -37,7 +37,10 @@ fn navigation_prunes_stale_execution_context_ids() {
         !ctx.valid_context_ids.contains(&999),
         "stale execution context id must be pruned on navigation"
     );
-    assert!(ctx.valid_context_ids.contains(&2), "default world id 2 must be re-registered");
+    assert!(
+        ctx.valid_context_ids.contains(&2),
+        "default world id 2 must be re-registered"
+    );
     assert!(
         ctx.valid_context_ids.contains(&100),
         "isolated world id 100 must be registered: {:?}",
@@ -52,8 +55,14 @@ fn navigation_prunes_stale_execution_context_ids() {
         !ctx.valid_context_ids.contains(&100),
         "previous navigation's isolated context id must be pruned"
     );
-    assert!(ctx.valid_context_ids.contains(&101), "fresh isolated id 101 must be registered");
-    assert!(ctx.valid_context_ids.contains(&2), "default world id 2 must survive navigation");
+    assert!(
+        ctx.valid_context_ids.contains(&101),
+        "fresh isolated id 101 must be registered"
+    );
+    assert!(
+        ctx.valid_context_ids.contains(&2),
+        "default world id 2 must survive navigation"
+    );
 
     // Unbounded-growth check: two navigations leave exactly the default world
     // plus the current isolated world(s), not an accumulating union.

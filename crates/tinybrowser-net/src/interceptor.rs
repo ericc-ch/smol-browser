@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::client::{RequestInfo, Response};
+use crate::types::{RequestInfo, Response};
 
 pub enum InterceptAction {
     Continue,

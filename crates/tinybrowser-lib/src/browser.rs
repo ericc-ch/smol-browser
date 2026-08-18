@@ -1,7 +1,7 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
-use tinybrowser_core::BrowserContext;
+use tinybrowser_core::{page_actor_channel, run_page_actor, BrowserContext, PageActorHandle};
 use tinybrowser_net::CookieJar;
 
 use crate::config::BrowserConfig;
@@ -30,32 +30,36 @@ impl Browser {
                 Some(dir.clone()),
             )
         } else {
-            BrowserContext::with_full_options(
-                "api".to_string(),
-                config.proxy,
-                config.user_agent,
-            )
+            BrowserContext::with_full_options("api".to_string(), config.proxy, config.user_agent)
         };
 
         let context = Arc::new(context);
         let cookie_jar = context.cookie_jar.clone();
 
-        Ok(Browser { context, cookie_jar })
+        Ok(Browser {
+            context,
+            cookie_jar,
+        })
     }
 
     pub fn builder() -> BrowserBuilder {
         BrowserBuilder::default()
     }
 
+    /// Spawn a `PageActor` on the current LocalSet. The handle is `Send`; the
+    /// page's QuickJS runtime stays on this task.
+    pub fn spawn_page_actor(&self) -> PageActorHandle {
+        let id = NEXT_PAGE_ID.fetch_add(1, Ordering::Relaxed);
+        let page = tinybrowser_core::Page::new(format!("page-{}", id), self.context.clone());
+        let (handle, rx) = page_actor_channel();
+        tokio::task::spawn_local(run_page_actor(page, rx));
+        handle
+    }
+
     pub async fn new_page(&self) -> Result<Page, Error> {
         let id = NEXT_PAGE_ID.fetch_add(1, Ordering::Relaxed);
-        let page = tinybrowser_core::Page::new(
-            format!("page-{}", id),
-            self.context.clone(),
-        );
-        Ok(Page {
-            inner: page,
-        })
+        let page = tinybrowser_core::Page::new(format!("page-{}", id), self.context.clone());
+        Ok(Page { inner: page })
     }
 
     /// Access the cookie store for this browser session.

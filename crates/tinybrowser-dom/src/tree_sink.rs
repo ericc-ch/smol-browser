@@ -114,8 +114,8 @@ impl TreeSink for DomTree {
 
     fn elem_name<'a>(&'a self, target: &'a NodeId) -> HtmlElemName<'a> {
         let borrow = self.borrow_inner();
-        let node = borrow.nodes.get(target.index())
-            .and_then(|n| n.as_ref())
+        let node = borrow
+            .get(*target)
             .expect("elem_name called on invalid node");
         let name_ptr: *const QualName = match &node.data {
             NodeData::Element { name, .. } => name as *const QualName,
@@ -152,7 +152,10 @@ impl TreeSink for DomTree {
         if flags.template {
             let template_doc = self.new_node(NodeData::Document);
             self.with_node_mut(id, |node| {
-                if let NodeData::Element { template_contents, .. } = &mut node.data {
+                if let NodeData::Element {
+                    template_contents, ..
+                } = &mut node.data
+                {
                     *template_contents = Some(template_doc);
                 }
             });
@@ -191,7 +194,9 @@ impl TreeSink for DomTree {
         prev_element: &NodeId,
         child: NodeOrText<NodeId>,
     ) {
-        let has_parent = self.with_node(*element, |n| n.parent.is_some()).unwrap_or(false);
+        let has_parent = self
+            .with_node(*element, |n| n.parent.is_some())
+            .unwrap_or(false);
         if has_parent {
             self.append_before_sibling(element, child);
         } else {
@@ -216,7 +221,10 @@ impl TreeSink for DomTree {
 
     fn add_attrs_if_missing(&self, target: &NodeId, attrs: Vec<HtmlAttribute>) {
         self.with_node_mut(*target, |node| {
-            if let NodeData::Element { attrs: existing, .. } = &mut node.data {
+            if let NodeData::Element {
+                attrs: existing, ..
+            } = &mut node.data
+            {
                 for attr in attrs {
                     let dominated = existing.iter().any(|a| a.name == attr.name);
                     if !dominated {
@@ -274,7 +282,9 @@ impl TreeSink for DomTree {
 
     fn get_template_contents(&self, target: &NodeId) -> NodeId {
         self.with_node(*target, |n| match &n.data {
-            NodeData::Element { template_contents, .. } => *template_contents,
+            NodeData::Element {
+                template_contents, ..
+            } => *template_contents,
             _ => None,
         })
         .flatten()
@@ -341,9 +351,10 @@ impl TreeSink for DomTree {
 
     fn is_mathml_annotation_xml_integration_point(&self, target: &NodeId) -> bool {
         self.with_node(*target, |n| match &n.data {
-            NodeData::Element { mathml_annotation_xml_integration_point, .. } => {
-                *mathml_annotation_xml_integration_point
-            }
+            NodeData::Element {
+                mathml_annotation_xml_integration_point,
+                ..
+            } => *mathml_annotation_xml_integration_point,
             _ => false,
         })
         .unwrap_or(false)
@@ -507,16 +518,14 @@ mod tests {
         assert_eq!(element_children(&tree, closed_host), vec![closed_light]);
         assert!(tree.get_element_by_id("open-template").is_none());
         assert!(tree.get_element_by_id("closed-template").is_none());
-        assert!(
-            tree.query_selector_from(open_root, "#open-content")
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            tree.query_selector_from(closed_root, "#closed-content")
-                .unwrap()
-                .is_some()
-        );
+        assert!(tree
+            .query_selector_from(open_root, "#open-content")
+            .unwrap()
+            .is_some());
+        assert!(tree
+            .query_selector_from(closed_root, "#closed-content")
+            .unwrap()
+            .is_some());
         assert!(
             tree.get_element_by_id("open-content").is_none()
                 && tree.get_element_by_id("closed-content").is_none(),
@@ -565,7 +574,10 @@ mod tests {
         let second = tree.get_element_by_id("second").unwrap();
         let root = tree.shadow_root(host).unwrap();
 
-        assert_eq!(tree.shadow_root_info(root).unwrap().mode, ShadowRootMode::Open);
+        assert_eq!(
+            tree.shadow_root_info(root).unwrap().mode,
+            ShadowRootMode::Open
+        );
         assert!(tree.query_selector_from(root, "#first").unwrap().is_some());
         assert_eq!(element_children(&tree, host), vec![duplicate, light]);
         assert_eq!(element_children(&tree, duplicate_contents), vec![second]);
@@ -592,23 +604,24 @@ mod tests {
         let inner_root = tree.shadow_root(inner_host).unwrap();
 
         assert_eq!(tree.containing_shadow_root(inner_host), Some(outer_root));
-        assert_eq!(tree.shadow_root_info(inner_root).unwrap().mode, ShadowRootMode::Closed);
+        assert_eq!(
+            tree.shadow_root_info(inner_root).unwrap().mode,
+            ShadowRootMode::Closed
+        );
         assert!(
             tree.query_selector_from(outer_root, "#inner-shadow")
                 .unwrap()
                 .is_none(),
             "an outer-tree query must not pierce a nested root"
         );
-        assert!(
-            tree.query_selector_from(inner_root, "#inner-shadow")
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            tree.query_selector_from(outer_root, "#inner-light")
-                .unwrap()
-                .is_some()
-        );
+        assert!(tree
+            .query_selector_from(inner_root, "#inner-shadow")
+            .unwrap()
+            .is_some());
+        assert!(tree
+            .query_selector_from(outer_root, "#inner-light")
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -682,10 +695,7 @@ mod tests {
 
         assert!(!TreeSink::allow_declarative_shadow_roots(&tree, &host));
         assert!(TreeSink::attach_declarative_shadow(
-            &tree,
-            &host,
-            &template,
-            &attrs,
+            &tree, &host, &template, &attrs,
         ));
         assert_eq!(tree.shadow_root(host), Some(contents));
         assert!(tree.children(host).is_empty());

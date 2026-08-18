@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-use tinybrowser_core::{BrowserContext, Page};
+use tinybrowser_core::{page_actor_channel, run_page_actor, BrowserContext, Page};
 use tokio::io::AsyncWriteExt;
 use tokio::time::{timeout, Duration};
 
@@ -62,10 +62,8 @@ enum Command {
         #[arg(long)]
         user_agent: Option<String>,
 
-        /// Maximum live CDP connections. Each connection runs on its own OS
-        /// thread with its own JS runtimes, so this bounds the server's thread
-        /// and memory footprint. Connections beyond the limit are refused with
-        /// a 503 rather than queued.
+        /// Maximum live CDP connections. Connections beyond the limit are
+        /// refused with a 503 rather than queued.
         #[arg(long, default_value_t = tinybrowser_cdp::DEFAULT_MAX_CONNECTIONS)]
         max_connections: usize,
 
@@ -305,9 +303,7 @@ async fn main() -> anyhow::Result<()> {
                 // Batch mode is raw HTTP only.
                 match dump {
                     None | Some(DumpFormat::Original) => {}
-                    Some(_) => anyhow::bail!(
-                        "batch mode (--file) only supports --dump original."
-                    ),
+                    Some(_) => anyhow::bail!("batch mode (--file) only supports --dump original."),
                 }
                 let urls = read_urls_from_file(&file)?;
                 run_batch_fetch(
@@ -358,15 +354,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn settle_page(page: &mut Page, wait_secs: u64, fixed: bool) {
-    let wait_ms = wait_secs.saturating_mul(1000);
-    if fixed {
-        page.settle_for_duration(wait_ms).await;
-    } else {
-        page.settle(wait_ms).await;
-    }
-}
-
 fn configure_fetch_navigation_timeout(page: &mut Page, timeout_secs: u64) {
     page.set_navigation_timeout(Duration::from_secs(timeout_secs));
 }
@@ -410,29 +397,17 @@ async fn run_fetch(
         storage_dir.clone(),
         allow_private_network,
     ));
-    let mut page = Page::new("fetch-page".to_string(), context.clone());
-    // Keep the browser's end-to-end navigation ceiling aligned with the CLI
-    // request deadline. Previously Page retained its independent 30s default,
-    // so `fetch --timeout 50` could still fail after 30 seconds.
-    configure_fetch_navigation_timeout(&mut page, timeout_secs);
-
-    if let Some(ref ua) = user_agent {
-        page.http_client.set_user_agent(ua).await;
-    }
-
     let wait_condition = tinybrowser_core::lifecycle::WaitUntil::from_str(wait_until);
+    let url_owned = url_str.to_string();
+    let eval = eval.clone();
+    let selector = selector.clone();
+    let output = output.clone();
+    let user_agent = user_agent.clone();
 
     if !quiet {
         eprintln!("Fetching {}...", url_str);
     }
 
-    // Process-level hard deadline. A synchronous hang inside a Rust op invoked
-    // from page JS cannot be cancelled by tokio (there is no await to interrupt)
-    // nor by the JS watchdog (interrupt only stops JS bytecode, not
-    // native Rust running beneath a JS->op call). As an absolute backstop so one
-    // fetch can never wedge the process, a daemon thread force-exits if the whole
-    // operation overruns navigation + every configured settle pass + grace. A
-    // normal fetch returns first and the process exits before this fires.
     {
         let settle_passes = if eval.is_some() && (selector.is_some() || dump_specified) {
             2
@@ -454,82 +429,101 @@ async fn run_fetch(
         });
     }
 
-    match timeout(
-        Duration::from_secs(timeout_secs),
-        page.navigate_with_wait(url_str, wait_condition),
-    )
-    .await
-    {
-        Ok(result) => {
-            result.map_err(|e| anyhow::anyhow!("Failed to navigate to {}: {}", url_str, e))?
-        }
-        Err(_) => anyhow::bail!(
-            "Timed out navigating to {} after {}s",
-            url_str,
-            timeout_secs
-        ),
-    }
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            let mut page = Page::new("fetch-page".to_string(), context.clone());
+            configure_fetch_navigation_timeout(&mut page, timeout_secs);
+            if let Some(ref ua) = user_agent {
+                page.http_client.set_user_agent(ua).await;
+            }
+            let (handle, rx) = page_actor_channel();
+            tokio::task::spawn_local(run_page_actor(page, rx));
 
-    if !quiet {
-        eprintln!("Page loaded: {} - \"{}\"", page.url_string(), page.title);
-    }
+            match timeout(
+                Duration::from_secs(timeout_secs),
+                handle.navigate_with_wait(&url_owned, wait_condition),
+            )
+            .await
+            {
+                Ok(result) => result
+                    .map_err(|e| anyhow::anyhow!("Failed to navigate to {}: {}", url_owned, e))?,
+                Err(_) => anyhow::bail!(
+                    "Timed out navigating to {} after {}s",
+                    url_owned,
+                    timeout_secs
+                ),
+            }
 
-    // --wait is a post-load settle: drive the event loop so timers, async work,
-    // and completion callbacks (e.g. testharness's add_completion_callback) run
-    // before we read the page. Returns early once the loop is idle, so static
-    // pages stay fast.
-    settle_page(&mut page, wait_secs, wait_is_fixed).await;
+            if !quiet {
+                let (url, title) = handle
+                    .with_page(|p| (p.url_string(), p.title.clone()))
+                    .await
+                    .unwrap_or_default();
+                eprintln!("Page loaded: {} - \"{}\"", url, title);
+            }
 
-    if let Some(ref expr) = eval {
-        // Bound the eval by the same budget as navigation so a runaway
-        // expression (infinite loop, never-settling sync work) cannot hang.
-        let result = page.evaluate_with_timeout(expr, Duration::from_secs(timeout_secs));
+            let wait_ms = wait_secs.saturating_mul(1000);
+            if wait_is_fixed {
+                handle.settle_for_duration(wait_ms).await;
+            } else {
+                handle.settle(wait_ms).await;
+            }
 
-        // A bare --eval (no --selector or --dump) returns the eval value
-        // directly, so synchronous expressions (JSON.stringify, ...) are
-        // unchanged.
-        if !dump_specified && selector.is_none() {
-            let rendered = match result {
-                serde_json::Value::String(s) => s,
-                serde_json::Value::Null => "null".to_string(),
-                other => other.to_string(),
-            };
+            if let Some(ref expr) = eval {
+                let timeout = Duration::from_secs(timeout_secs);
+                let expr = expr.clone();
+                let result = handle
+                    .with_page(move |p| p.evaluate_with_timeout(&expr, timeout))
+                    .await
+                    .unwrap_or(serde_json::Value::Null);
+
+                if !dump_specified && selector.is_none() {
+                    let rendered = match result {
+                        serde_json::Value::String(s) => s,
+                        serde_json::Value::Null => "null".to_string(),
+                        other => other.to_string(),
+                    };
+                    write_or_print(rendered, output.as_ref()).await?;
+                    context.save_cookies();
+                    handle.shutdown();
+                    return Ok(());
+                }
+
+                if wait_is_fixed {
+                    handle.settle_for_duration(wait_ms).await;
+                } else {
+                    handle.settle(wait_ms).await;
+                }
+            }
+
+            if let Some(ref sel) = selector {
+                let found = wait_for_selector_actor(&handle, sel, wait_secs).await;
+                if !found {
+                    eprintln!("Warning: selector '{}' not found after {}s", sel, wait_secs);
+                }
+            }
+
+            let rendered = handle
+                .with_page(move |page| match dump {
+                    DumpFormat::Html => dump_html(page),
+                    DumpFormat::Text => dump_text(page),
+                    DumpFormat::Links => dump_links(page),
+                    DumpFormat::Markdown => dump_markdown(page),
+                    DumpFormat::Assets => dump_assets(page),
+                    DumpFormat::Cookies => dump_cookies(page),
+                    DumpFormat::Original => {
+                        unreachable!("Original dump handled before page navigation")
+                    }
+                })
+                .await
+                .unwrap_or_default();
             write_or_print(rendered, output.as_ref()).await?;
             context.save_cookies();
-            return Ok(());
-        }
-
-        // --eval combined with --selector or --dump typically kicks off async
-        // work (a fetch promise, a timer, a scroll listener) that writes the
-        // DOM. Drive the event loop again so that work completes, then fall
-        // through to selector/dump instead of returning the still-pending eval
-        // value (issue #248).
-        settle_page(&mut page, wait_secs, wait_is_fixed).await;
-    }
-
-    if let Some(ref sel) = selector {
-        let found = wait_for_selector(&mut page, sel, wait_secs).await;
-        if !found {
-            eprintln!("Warning: selector '{}' not found after {}s", sel, wait_secs);
-        }
-    }
-
-    let rendered = match dump {
-        DumpFormat::Html => dump_html(&page),
-        DumpFormat::Text => dump_text(&mut page),
-        DumpFormat::Links => dump_links(&page),
-        DumpFormat::Markdown => dump_markdown(&mut page),
-        DumpFormat::Assets => dump_assets(&page),
-        DumpFormat::Cookies => dump_cookies(&page),
-        // Handled above via the short-circuit branch; unreachable here.
-        DumpFormat::Original => unreachable!("Original dump handled before page navigation"),
-    };
-    write_or_print(rendered, output.as_ref()).await?;
-
-    // Save cookies to disk if storage_dir is configured
-    context.save_cookies();
-
-    Ok(())
+            handle.shutdown();
+            Ok(())
+        })
+        .await
 }
 
 async fn fetch_original_response(
@@ -747,28 +741,29 @@ async fn write_or_print_bytes(
     Ok(())
 }
 
-async fn wait_for_selector(page: &mut Page, selector: &str, timeout_secs: u64) -> bool {
+async fn wait_for_selector_actor(
+    handle: &tinybrowser_core::PageActorHandle,
+    selector: &str,
+    timeout_secs: u64,
+) -> bool {
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
     loop {
-        let found = page
-            .with_dom(|dom| dom.query_selector(selector).ok().flatten().is_some())
+        let sel = selector.to_string();
+        let found = handle
+            .with_page(move |page| {
+                page.with_dom(|dom| dom.query_selector(&sel).ok().flatten().is_some())
+                    .unwrap_or(false)
+            })
+            .await
             .unwrap_or(false);
-
         if found {
             return true;
         }
-
         if tokio::time::Instant::now() >= deadline {
             return false;
         }
-
-        // The selector may be created by a timer, dynamic import, or fetch
-        // completion. Sleeping without pumping V8 makes those callbacks unable
-        // to run, so a valid selector wait always times out. Drive one bounded
-        // event-loop slice, then retain a 100ms polling cadence if it returned
-        // idle immediately.
         let slice_started = tokio::time::Instant::now();
-        page.settle(100).await;
+        handle.settle(100).await;
         let spent = slice_started.elapsed();
         let cadence = tokio::time::Duration::from_millis(100);
         if spent < cadence {
@@ -812,7 +807,10 @@ fn dump_markdown(page: &mut Page) -> String {
     result.as_str().unwrap_or_default().to_string()
 }
 
-fn extract_readable_text(dom: &tinybrowser_dom::DomTree, node_id: tinybrowser_dom::NodeId) -> String {
+fn extract_readable_text(
+    dom: &tinybrowser_dom::DomTree,
+    node_id: tinybrowser_dom::NodeId,
+) -> String {
     use tinybrowser_dom::NodeData;
 
     // Iterative DFS over an explicit work stack. A recursive walk overflowed the
@@ -929,7 +927,6 @@ fn extract_readable_text(dom: &tinybrowser_dom::DomTree, node_id: tinybrowser_do
 
     result
 }
-
 
 fn dump_links(page: &Page) -> String {
     let base_url = page.url.clone();
@@ -1164,8 +1161,14 @@ mod tests {
     fn concurrency_rejects_zero() {
         // NonZeroUsize means --concurrency 0 is a parse error, not a silent hang
         // on a zero-permit semaphore.
-        let err =
-            Args::try_parse_from(["tinybrowser", "fetch", "--file", "u.txt", "--concurrency", "0"]);
+        let err = Args::try_parse_from([
+            "tinybrowser",
+            "fetch",
+            "--file",
+            "u.txt",
+            "--concurrency",
+            "0",
+        ]);
         assert!(err.is_err());
     }
 
@@ -1307,7 +1310,8 @@ mod tests {
 
     #[test]
     fn parsed_serve_command_is_not_quiet() {
-        let args = Args::try_parse_from(["tinybrowser", "serve"]).expect("clap should accept serve");
+        let args =
+            Args::try_parse_from(["tinybrowser", "serve"]).expect("clap should accept serve");
         assert!(!is_quiet_command(&args.command));
     }
 
@@ -1318,15 +1322,16 @@ mod tests {
 
     #[test]
     fn parsed_fetch_quiet_resolves_to_off_filter() {
-        let args =
-            Args::try_parse_from(["tinybrowser", "fetch", "--quiet", "https://example.com"]).unwrap();
+        let args = Args::try_parse_from(["tinybrowser", "fetch", "--quiet", "https://example.com"])
+            .unwrap();
         let filter = select_log_filter(args.verbose, is_quiet_command(&args.command));
         assert_eq!(filter, "off");
     }
 
     #[test]
     fn fetch_wait_distinguishes_adaptive_default_from_fixed_delay() {
-        let default = Args::try_parse_from(["tinybrowser", "fetch", "https://example.com"]).unwrap();
+        let default =
+            Args::try_parse_from(["tinybrowser", "fetch", "https://example.com"]).unwrap();
         match default.command {
             Some(Command::Fetch { wait, .. }) => assert_eq!(wait, None),
             _ => panic!("expected Fetch command"),
@@ -1346,15 +1351,14 @@ mod tests {
             Some(Command::Fetch { timeout, .. }) => timeout,
             _ => panic!("expected Fetch command"),
         };
-        let context = std::sync::Arc::new(
-            tinybrowser_core::BrowserContext::with_storage_and_network(
+        let context =
+            std::sync::Arc::new(tinybrowser_core::BrowserContext::with_storage_and_network(
                 "cli-timeout-test".to_string(),
                 None,
                 None,
                 None,
                 true,
-            ),
-        );
+            ));
         let mut page = tinybrowser_core::Page::new("cli-timeout-test".to_string(), context);
         configure_fetch_navigation_timeout(&mut page, timeout);
         page.navigation_timeout()

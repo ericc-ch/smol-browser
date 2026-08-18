@@ -1,5 +1,6 @@
 "use strict";
-(function () {
+(function (host) {
+var Deno = host;
 
 // Pre-declare all internal globals as non-enumerable so they are invisible
 // to Object.keys(window) / for-in enumeration. Must run before any var
@@ -1830,6 +1831,14 @@ function _seedUnchangedConnection(node, connected) {
   node._treeConnectedEpoch = _treeMutationEpoch;
 }
 
+function _sameNode(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  const an = a._nid, bn = b._nid;
+  return an != null && bn != null && Number(an) === Number(bn);
+}
+
+const _NativeNode = globalThis.Node;
 class Node {
   static ELEMENT_NODE = 1;
   static ATTRIBUTE_NODE = 2;
@@ -1961,7 +1970,7 @@ class Node {
     return c;
   }
   removeChild(c) {
-    if (!c || c.parentNode !== this) {
+    if (!c || !_sameNode(c.parentNode, this)) {
       throw new DOMException(
         "Failed to execute 'removeChild' on 'Node': The node to be removed is not a child of this node.",
         'NotFoundError'
@@ -1992,7 +2001,7 @@ class Node {
   }
   replaceChild(newChild, oldChild) {
     if (!oldChild || !newChild) return oldChild;
-    if (oldChild.parentNode !== this) {
+    if (!_sameNode(oldChild.parentNode, this)) {
       throw new DOMException(
         "Failed to execute 'replaceChild' on 'Node': The node to be replaced is not a child of this node.",
         "NotFoundError",
@@ -2030,13 +2039,13 @@ class Node {
   insertBefore(n, ref) {
     if (!n) return n;
     if (!ref) { this.appendChild(n); return n; }
-    if (ref.parentNode !== this) {
+    if (!_sameNode(ref.parentNode, this)) {
       throw new DOMException(
         "Failed to execute 'insertBefore' on 'Node': The reference node is not a child of this node.",
         "NotFoundError",
       );
     }
-    if (n === ref) return n;
+    if (_sameNode(n, ref)) return n;
     if (n instanceof DocumentFragment) {
       const children = Array.from(n.childNodes);
       for (const child of children) this.insertBefore(child, ref);
@@ -2178,7 +2187,32 @@ class Node {
     return _eventTargetDispatch(this, event);
   }
 }
-class CharacterData extends Node {
+// Keep the native rquickjs Node constructor. Copy JS-only behavior onto its
+// prototype so Element/Document can extend it without replacing compiled methods.
+if (_NativeNode) {
+  const nativeWins = new Set([
+    "nodeType", "nodeName", "isConnected", "hasChildNodes", "contains",
+    "getAttribute", "hasAttribute", "matches",
+    "addEventListener", "removeEventListener", "dispatchEvent",
+    "_nid",
+  ]);
+  for (const key of Object.getOwnPropertyNames(Node.prototype)) {
+    if (key === "constructor") continue;
+    if (nativeWins.has(key) && Object.prototype.hasOwnProperty.call(_NativeNode.prototype, key)) {
+      continue;
+    }
+    Object.defineProperty(
+      _NativeNode.prototype,
+      key,
+      Object.getOwnPropertyDescriptor(Node.prototype, key),
+    );
+  }
+  for (const key of Object.getOwnPropertyNames(Node)) {
+    if (key === "prototype" || key === "length" || key === "name") continue;
+    try { _NativeNode[key] = Node[key]; } catch (e) {}
+  }
+}
+class CharacterData extends (_NativeNode || Node) {
   get data() {
     return _domParse("text_content", this._nid) ?? "";
   }
@@ -2885,7 +2919,7 @@ function _animationsForTarget(target) {
   });
 }
 
-class Element extends Node {
+class Element extends (_NativeNode || Node) {
   constructor(nid) {
     const entry = _customElementConstructionStack[_customElementConstructionStack.length - 1];
     const matchesUpgrade = entry && new.target === entry.constructor;
@@ -4650,7 +4684,7 @@ function _throwDocumentDomainSecurityError() {
   throw new DOMException("Failed to set the 'domain' property on 'Document'", "SecurityError");
 }
 
-class Document extends Node {
+class Document extends (_NativeNode || Node) {
   get timeline() {
     if (!this._timeline) {
       this._timeline = new DocumentTimeline();
@@ -5237,7 +5271,7 @@ class Document extends Node {
   execCommand() { return false; }
 }
 
-class DocumentFragment extends Node {
+class DocumentFragment extends (_NativeNode || Node) {
   constructor(nid) {
     const created = nid === undefined;
     super(created ? +_dom("create_document_fragment") : nid);
@@ -5285,7 +5319,7 @@ class DocumentFragment extends Node {
   }
 }
 
-class DocumentType extends Node {
+class DocumentType extends (_NativeNode || Node) {
   constructor(nid, name, publicId, systemId) {
     super(nid);
     this._name = name;
@@ -5336,7 +5370,7 @@ class TextTrackCueList extends Array {
   }
   item(index) { return this[index] || null; }
 }
-class TextTrack extends Node {
+class TextTrack extends (_NativeNode || Node) {
   constructor(element, kind, label, language) {
     super();
     this._element = element || null;
@@ -10829,7 +10863,7 @@ function _isValidPITarget(target) {
 }
 globalThis.DocumentFragment = DocumentFragment;
 globalThis.DocumentType = DocumentType;
-globalThis.Node = Node;
+globalThis.Node = _NativeNode || Node;
 globalThis.Element = Element;
 globalThis.Document = Document;
 // CSSStyleDeclaration is the type of element.style and getComputedStyle(); it is
@@ -14615,4 +14649,4 @@ if (typeof Response !== 'undefined' && Response.prototype && !Response.prototype
   }
 })();
 
-})();
+})

@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rquickjs::{
-    CatchResultExt, Context, Ctx, Function, Module, Object, Persistent, Promise,
-    Runtime, TypedArray,
     function::Rest,
     loader::{ImportAttributes, Loader, Resolver},
+    CatchResultExt, Context, Ctx, Function, Module, Object, Persistent, Promise, Runtime,
+    TypedArray,
 };
 
 use tinybrowser_dom::DomTree;
@@ -245,20 +245,20 @@ impl Resolver for QjsModuleResolver {
     ) -> rquickjs::Result<String> {
         let host = self.0.borrow();
         let state = host.state.upgrade().ok_or_else(|| {
-            rquickjs::Error::new_resolving_message(base, name, "module loader page state was dropped")
+            rquickjs::Error::new_resolving_message(
+                base,
+                name,
+                "module loader page state was dropped",
+            )
         })?;
         let document_base = state.borrow().url.clone();
         let import_map_cell = state.borrow().import_map.clone();
         let mut import_map = import_map_cell.try_borrow_mut().map_err(|_| {
             rquickjs::Error::new_resolving_message(base, name, "Import map is already borrowed")
         })?;
-        let resolved = module_loader::resolve_module_specifier(
-            &mut import_map,
-            name,
-            base,
-            &document_base,
-        )
-        .map_err(|e| rquickjs::Error::new_resolving_message(base, name, e))?;
+        let resolved =
+            module_loader::resolve_module_specifier(&mut import_map, name, base, &document_base)
+                .map_err(|e| rquickjs::Error::new_resolving_message(base, name, e))?;
         drop(import_map);
         drop(state);
         drop(host);
@@ -278,9 +278,9 @@ impl Loader for QjsModuleSourceLoader {
         name: &str,
         _attributes: Option<ImportAttributes<'js>>,
     ) -> rquickjs::Result<Module<'js>> {
-        let source = self.load_source(name).map_err(|e| {
-            rquickjs::Error::new_loading_message(name, e)
-        })?;
+        let source = self
+            .load_source(name)
+            .map_err(|e| rquickjs::Error::new_loading_message(name, e))?;
         Module::declare(ctx.clone(), name, source)
     }
 }
@@ -332,8 +332,7 @@ fn request_module_source(
     callbacks: Option<std::sync::Arc<tinybrowser_net::CallbackRegistry>>,
     budget: Duration,
 ) -> Result<String, String> {
-    let parsed = url::Url::parse(url)
-        .map_err(|e| format!("Invalid module URL {url}: {e}"))?;
+    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid module URL {url}: {e}"))?;
     let (reply_tx, reply_rx) = std::sync::mpsc::channel();
     fetch_tx
         .send(NetworkWork::Module {
@@ -361,11 +360,10 @@ fn request_module_source(
 /// through QuickJS's C frames (mirror of the V8 `op_dom` catch in ops.rs).
 /// The panic is logged and the caller gets a default value.
 fn guarded<R: Default>(f: impl FnOnce() -> R) -> R {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
-        .unwrap_or_else(|_| {
-            tracing::error!("QuickJS op panicked; returning default");
-            R::default()
-        })
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| {
+        tracing::error!("QuickJS op panicked; returning default");
+        R::default()
+    })
 }
 
 /// Fallible ops return a JS exception on panic instead of unwinding.
@@ -409,9 +407,7 @@ impl QuickJsRuntime {
         let interrupt = Arc::new(AtomicBool::new(false));
         {
             let interrupt = interrupt.clone();
-            runtime.set_interrupt_handler(Some(Box::new(move || {
-                interrupt.load(Ordering::SeqCst)
-            })));
+            runtime.set_interrupt_handler(Some(Box::new(move || interrupt.load(Ordering::SeqCst))));
         }
         let context = Context::full(&runtime).map_err(|e| e.to_string())?;
         let state = Rc::new(RefCell::new(ops::RuntimeState::new()));
@@ -445,51 +441,66 @@ impl QuickJsRuntime {
         Ok(this)
     }
 
+    fn with_ctx<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(Ctx<'_>) -> R,
+    {
+        let state = self.state.clone();
+        self.context
+            .with(|ctx| crate::dom_bindings::enter_shared(state.clone(), || f(ctx)))
+    }
+
     fn install_ops(&self) -> Result<(), String> {
-        self.context.with(|ctx| self.install_ops_in(ctx))
+        self.with_ctx(|ctx| self.install_ops_in(ctx))
     }
 
     fn install_ops_in<'js>(&self, ctx: Ctx<'js>) -> Result<(), String> {
         let ops = Object::new(ctx.clone()).map_err(|e| e.to_string())?;
         macro_rules! set_op {
             ($name:literal, $f:expr) => {
-                ops.set($name, Function::new(ctx.clone(), $f).map_err(|e| e.to_string())?)
-                    .map_err(|e| e.to_string())?
+                ops.set(
+                    $name,
+                    Function::new(ctx.clone(), $f).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())?
             };
         }
 
         let s = self.state.clone();
-        set_op!("op_dom", move |cmd: String, arg1: String, arg2: String| -> String {
+        set_op!("op_dom", move |cmd: String,
+                                arg1: String,
+                                arg2: String|
+              -> String {
             guarded(|| ops::op_dom_inner(&s, cmd, arg1, arg2))
         });
 
         let s = self.state.clone();
-        set_op!("op_script_mark_started", move |nid: u32| -> bool {
-            guarded(|| ops::op_script_mark_started_inner(&s, nid))
+        set_op!("op_script_mark_started", move |nid: f64| -> bool {
+            guarded(|| ops::op_script_mark_started_inner(&s, nid as u64))
         });
 
         let s = self.state.clone();
-        set_op!("op_script_try_start", move |nid: u32| -> bool {
-            guarded(|| ops::op_script_try_start_inner(&s, nid))
+        set_op!("op_script_try_start", move |nid: f64| -> bool {
+            guarded(|| ops::op_script_try_start_inner(&s, nid as u64))
         });
 
         let s = self.state.clone();
-        set_op!("op_shadow_attach", move |host_nid: u32, mode: String| -> i32 {
-            guarded(|| ops::op_shadow_attach_inner(&s, host_nid, mode))
+        set_op!("op_shadow_attach", move |host_nid: f64,
+                                          mode: String|
+              -> i64 {
+            guarded(|| ops::op_shadow_attach_inner(&s, host_nid as u64, mode))
         });
 
         let s = self.state.clone();
-        set_op!("op_shadow_root_info", move |host_nid: u32| -> String {
-            guarded(|| ops::op_shadow_root_info_inner(&s, host_nid))
+        set_op!("op_shadow_root_info", move |host_nid: f64| -> String {
+            guarded(|| ops::op_shadow_root_info_inner(&s, host_nid as u64))
         });
 
         set_op!("op_console_msg", |level: String, msg: String| {
-            guarded(|| {
-                match level.as_str() {
-                    "warn" => tracing::warn!(target: "tinybrowser::console", "{}", msg),
-                    "error" => tracing::error!(target: "tinybrowser::console", "{}", msg),
-                    _ => tracing::info!(target: "tinybrowser::console", "{}", msg),
-                }
+            guarded(|| match level.as_str() {
+                "warn" => tracing::warn!(target: "tinybrowser::console", "{}", msg),
+                "error" => tracing::error!(target: "tinybrowser::console", "{}", msg),
+                _ => tracing::info!(target: "tinybrowser::console", "{}", msg),
             })
         });
 
@@ -504,14 +515,20 @@ impl QuickJsRuntime {
         });
 
         let s = self.state.clone();
-        set_op!("op_navigate", move |url: String, method: String, body: String| {
-            guarded(|| ops::op_navigate_inner(&s, &url, &method, &body))
-        });
+        set_op!(
+            "op_navigate",
+            move |url: String, method: String, body: String| {
+                guarded(|| ops::op_navigate_inner(&s, &url, &method, &body))
+            }
+        );
 
         set_op!("op_async_runtime_available", || -> bool { true });
 
         let host_posted = self.host.clone();
-        set_op!("op_posted_task", move |ctx: Ctx<'js>| -> Result<Promise<'js>, rquickjs::Error> {
+        set_op!("op_posted_task", move |ctx: Ctx<'js>| -> Result<
+            Promise<'js>,
+            rquickjs::Error,
+        > {
             let (promise, resolve, _reject) = Promise::new(&ctx)?;
             host_posted
                 .borrow_mut()
@@ -522,65 +539,74 @@ impl QuickJsRuntime {
         let fetch_state = self.state.clone();
         let fetch_host = self.host.clone();
         let fetch_tx = self.fetch_tx.clone();
-        set_op!(
-            "op_fetch_url",
-            move |ctx: Ctx<'js>, args: Rest<String>| -> Result<Promise<'js>, rquickjs::Error> {
-                let get = |i: usize| args.0.get(i).cloned().unwrap_or_default();
-                let (promise, resolve, reject) = Promise::new(&ctx)?;
-                let mut gs = fetch_state.borrow_mut();
-                match ops::start_fetch(
-                    &mut gs,
-                    get(0),
-                    get(1),
-                    get(2),
-                    get(3),
-                    get(4),
-                    get(5),
-                    get(6),
-                ) {
-                    ops::FetchStart::Immediate(outcome) => {
-                        let json = ops::apply_fetch_outcome(&mut gs, outcome);
-                        drop(gs);
-                        resolve
-                            .call::<(String,), ()>((json,))
-                            .catch(&ctx)
-                            .map_err(|e| rquickjs::Error::new_from_js_message(
+        set_op!("op_fetch_url", move |ctx: Ctx<'js>,
+                                      args: Rest<String>|
+              -> Result<
+            Promise<'js>,
+            rquickjs::Error,
+        > {
+            let get = |i: usize| args.0.get(i).cloned().unwrap_or_default();
+            let (promise, resolve, reject) = Promise::new(&ctx)?;
+            let mut gs = fetch_state.borrow_mut();
+            match ops::start_fetch(
+                &mut gs,
+                get(0),
+                get(1),
+                get(2),
+                get(3),
+                get(4),
+                get(5),
+                get(6),
+            ) {
+                ops::FetchStart::Immediate(outcome) => {
+                    let json = ops::apply_fetch_outcome(&mut gs, outcome);
+                    drop(gs);
+                    resolve
+                        .call::<(String,), ()>((json,))
+                        .catch(&ctx)
+                        .map_err(|e| {
+                            rquickjs::Error::new_from_js_message(
                                 "tinybrowser op",
                                 "operation",
                                 e.to_string(),
-                            ))?;
-                    }
-                    ops::FetchStart::Pending(job) => {
-                        drop(gs);
-                        let id = fetch_host.borrow_mut().push_fetch(
-                            Persistent::save(&ctx, resolve),
-                            Persistent::save(&ctx, reject),
-                        );
-                        if fetch_tx.send(NetworkWork::Fetch(FetchWork { id, job })).is_err() {
-                            let Some((_, reject)) = fetch_host.borrow_mut().take_fetch(id) else {
-                                return Ok(promise);
-                            };
-                            let reject = reject.restore(&ctx).map_err(|e| {
+                            )
+                        })?;
+                }
+                ops::FetchStart::Pending(job) => {
+                    drop(gs);
+                    let id = fetch_host.borrow_mut().push_fetch(
+                        Persistent::save(&ctx, resolve),
+                        Persistent::save(&ctx, reject),
+                    );
+                    if fetch_tx
+                        .send(NetworkWork::Fetch(FetchWork { id, job }))
+                        .is_err()
+                    {
+                        let Some((_, reject)) = fetch_host.borrow_mut().take_fetch(id) else {
+                            return Ok(promise);
+                        };
+                        let reject = reject.restore(&ctx).map_err(|e| {
+                            rquickjs::Error::new_from_js_message(
+                                "tinybrowser op",
+                                "operation",
+                                e.to_string(),
+                            )
+                        })?;
+                        reject
+                            .call::<(String,), ()>(("network thread closed".into(),))
+                            .catch(&ctx)
+                            .map_err(|e| {
                                 rquickjs::Error::new_from_js_message(
                                     "tinybrowser op",
                                     "operation",
                                     e.to_string(),
                                 )
                             })?;
-                            reject
-                                .call::<(String,), ()>(("network thread closed".into(),))
-                                .catch(&ctx)
-                                .map_err(|e| rquickjs::Error::new_from_js_message(
-                                    "tinybrowser op",
-                                    "operation",
-                                    e.to_string(),
-                                ))?;
-                        }
                     }
                 }
-                Ok(promise)
             }
-        );
+            Ok(promise)
+        });
 
         let s = self.state.clone();
         set_op!("op_binding_called", move |name: String, payload: String| {
@@ -588,26 +614,44 @@ impl QuickJsRuntime {
         });
 
         let s = self.state.clone();
-        set_op!("op_add_import_map", move |source: String, base_url: String| -> String {
+        set_op!("op_add_import_map", move |source: String,
+                                           base_url: String|
+              -> String {
             guarded(|| ops::op_add_import_map_inner(&s, source, base_url))
         });
 
-        set_op!("op_subtle_digest", |algorithm: String, data: TypedArray<'_, u8>| -> Vec<u8> {
+        set_op!("op_subtle_digest", |algorithm: String,
+                                     data: TypedArray<'_, u8>|
+         -> Vec<u8> {
             guarded(|| {
                 let bytes = data.as_bytes().unwrap_or(&[]);
                 ops::subtle_digest(&algorithm, bytes)
             })
         });
 
-        set_op!("op_subtle_hmac", |hash: String, key: TypedArray<'_, u8>, data: TypedArray<'_, u8>| -> Result<Vec<u8>, rquickjs::Error> {
-            guarded_result(|| {
-                let key = key.as_bytes().unwrap_or(&[]);
-                let data = data.as_bytes().unwrap_or(&[]);
-                ops::subtle_hmac(&hash, key, data).map_err(op_err)
-            })
-        });
+        set_op!(
+            "op_subtle_hmac",
+            |hash: String,
+             key: TypedArray<'_, u8>,
+             data: TypedArray<'_, u8>|
+             -> Result<Vec<u8>, rquickjs::Error> {
+                guarded_result(|| {
+                    let key = key.as_bytes().unwrap_or(&[]);
+                    let data = data.as_bytes().unwrap_or(&[]);
+                    ops::subtle_hmac(&hash, key, data).map_err(op_err)
+                })
+            }
+        );
 
-        set_op!("op_subtle_aes_gcm", |encrypt: bool, key: TypedArray<'_, u8>, iv: TypedArray<'_, u8>, aad: TypedArray<'_, u8>, data: TypedArray<'_, u8>| -> Result<Vec<u8>, rquickjs::Error> {
+        set_op!("op_subtle_aes_gcm", |encrypt: bool,
+                                      key: TypedArray<'_, u8>,
+                                      iv: TypedArray<'_, u8>,
+                                      aad: TypedArray<'_, u8>,
+                                      data: TypedArray<'_, u8>|
+         -> Result<
+            Vec<u8>,
+            rquickjs::Error,
+        > {
             guarded_result(|| {
                 let key = key.as_bytes().unwrap_or(&[]);
                 let iv = iv.as_bytes().unwrap_or(&[]);
@@ -617,7 +661,14 @@ impl QuickJsRuntime {
             })
         });
 
-        set_op!("op_subtle_aes_cbc", |encrypt: bool, key: TypedArray<'_, u8>, iv: TypedArray<'_, u8>, data: TypedArray<'_, u8>| -> Result<Vec<u8>, rquickjs::Error> {
+        set_op!("op_subtle_aes_cbc", |encrypt: bool,
+                                      key: TypedArray<'_, u8>,
+                                      iv: TypedArray<'_, u8>,
+                                      data: TypedArray<'_, u8>|
+         -> Result<
+            Vec<u8>,
+            rquickjs::Error,
+        > {
             guarded_result(|| {
                 let key = key.as_bytes().unwrap_or(&[]);
                 let iv = iv.as_bytes().unwrap_or(&[]);
@@ -626,7 +677,14 @@ impl QuickJsRuntime {
             })
         });
 
-        set_op!("op_subtle_aes_ctr", |key: TypedArray<'_, u8>, counter: TypedArray<'_, u8>, counter_length: u32, data: TypedArray<'_, u8>| -> Result<Vec<u8>, rquickjs::Error> {
+        set_op!("op_subtle_aes_ctr", |key: TypedArray<'_, u8>,
+                                      counter: TypedArray<'_, u8>,
+                                      counter_length: u32,
+                                      data: TypedArray<'_, u8>|
+         -> Result<
+            Vec<u8>,
+            rquickjs::Error,
+        > {
             guarded_result(|| {
                 let key = key.as_bytes().unwrap_or(&[]);
                 let counter = counter.as_bytes().unwrap_or(&[]);
@@ -635,32 +693,54 @@ impl QuickJsRuntime {
             })
         });
 
-        set_op!("op_subtle_pbkdf2", |hash: String, password: TypedArray<'_, u8>, salt: TypedArray<'_, u8>, iterations: u32, len: u32| -> Result<Vec<u8>, rquickjs::Error> {
-            guarded_result(|| {
-                let password = password.as_bytes().unwrap_or(&[]);
-                let salt = salt.as_bytes().unwrap_or(&[]);
-                ops::subtle_pbkdf2(&hash, password, salt, iterations, len).map_err(op_err)
-            })
-        });
+        set_op!(
+            "op_subtle_pbkdf2",
+            |hash: String,
+             password: TypedArray<'_, u8>,
+             salt: TypedArray<'_, u8>,
+             iterations: u32,
+             len: u32|
+             -> Result<Vec<u8>, rquickjs::Error> {
+                guarded_result(|| {
+                    let password = password.as_bytes().unwrap_or(&[]);
+                    let salt = salt.as_bytes().unwrap_or(&[]);
+                    ops::subtle_pbkdf2(&hash, password, salt, iterations, len).map_err(op_err)
+                })
+            }
+        );
 
-        set_op!("op_subtle_hkdf", |hash: String, ikm: TypedArray<'_, u8>, salt: TypedArray<'_, u8>, info: TypedArray<'_, u8>, len: u32| -> Result<Vec<u8>, rquickjs::Error> {
-            guarded_result(|| {
-                let ikm = ikm.as_bytes().unwrap_or(&[]);
-                let salt = salt.as_bytes().unwrap_or(&[]);
-                let info = info.as_bytes().unwrap_or(&[]);
-                ops::subtle_hkdf(&hash, ikm, salt, info, len).map_err(op_err)
-            })
-        });
+        set_op!(
+            "op_subtle_hkdf",
+            |hash: String,
+             ikm: TypedArray<'_, u8>,
+             salt: TypedArray<'_, u8>,
+             info: TypedArray<'_, u8>,
+             len: u32|
+             -> Result<Vec<u8>, rquickjs::Error> {
+                guarded_result(|| {
+                    let ikm = ikm.as_bytes().unwrap_or(&[]);
+                    let salt = salt.as_bytes().unwrap_or(&[]);
+                    let info = info.as_bytes().unwrap_or(&[]);
+                    ops::subtle_hkdf(&hash, ikm, salt, info, len).map_err(op_err)
+                })
+            }
+        );
 
-        set_op!("op_random_bytes", |len: u32| -> Result<Vec<u8>, rquickjs::Error> {
-            guarded_result(|| ops::random_bytes(len).map_err(op_err))
-        });
+        set_op!(
+            "op_random_bytes",
+            |len: u32| -> Result<Vec<u8>, rquickjs::Error> {
+                guarded_result(|| ops::random_bytes(len).map_err(op_err))
+            }
+        );
 
         set_op!("op_url_parse", |href: String, base: String| -> String {
             guarded(|| ops::url_parse(&href, &base))
         });
 
-        set_op!("op_url_set", |href: String, part: String, value: String| -> String {
+        set_op!("op_url_set", |href: String,
+                               part: String,
+                               value: String|
+         -> String {
             guarded(|| ops::url_set(&href, &part, &value))
         });
 
@@ -668,7 +748,9 @@ impl QuickJsRuntime {
             guarded(|| ops::url_resolve(&href, &base))
         });
 
-        set_op!("op_document_domain_candidate", |current: String, input: String| -> String {
+        set_op!("op_document_domain_candidate", |current: String,
+                                                 input: String|
+         -> String {
             guarded(|| ops::document_domain_candidate(&current, &input))
         });
 
@@ -676,43 +758,68 @@ impl QuickJsRuntime {
             guarded(|| ops::encoding_for_label(&label))
         });
 
-        set_op!("op_text_decode", |label: String, bytes: TypedArray<'_, u8>, fatal: bool, ignore_bom: bool| -> String {
+        set_op!("op_text_decode", |label: String,
+                                   bytes: TypedArray<'_, u8>,
+                                   fatal: bool,
+                                   ignore_bom: bool|
+         -> String {
             let bytes = bytes.as_bytes().unwrap_or(&[]);
             guarded(|| ops::text_decode(&label, bytes, fatal, ignore_bom))
         });
 
-        set_op!("op_url_encode_query", |query: String, label: String, special: bool| -> String {
+        set_op!("op_url_encode_query", |query: String,
+                                        label: String,
+                                        special: bool|
+         -> String {
             guarded(|| ops::url_encode_query(&query, &label, special))
         });
 
         // Any op the shim probes that is not registered here (the whole
         // render family) falls back to the no-op stub, so bootstrap.js
         // boots unmodified on no-render builds.
+        crate::dom_bindings::register_dom_classes(&ctx, self.state.clone())?;
+
         ctx.globals()
             .set("__tinybrowser_ops", ops)
             .map_err(|e| e.to_string())?;
-        // Missing ops stay undefined so bootstrap.js typeof-guards (render
-        // family, CSS.supports, layout) take the no-render JS fallbacks.
-        // A stub function would make every `typeof op === "function"` check
-        // succeed and skip those fallbacks.
+        // Host stays off `window` after boot. The shim IIFE receives it as
+        // `host` / local `Deno`; page script never sees `globalThis.Deno`.
         ctx.eval::<(), _>(
             r#"
-            globalThis.Deno = { core: { ops: __tinybrowser_ops } };
+            globalThis.__tbHost = { core: { ops: __tinybrowser_ops } };
             delete globalThis.__tinybrowser_ops;
             "#,
         )
         .catch(&ctx)
         .map_err(|e| e.to_string())?;
 
-        let deno: Object = ctx.globals().get("Deno").map_err(|e| e.to_string())?;
-        let core: Object = deno.get("core").map_err(|e| e.to_string())?;
+        let host: Object = ctx.globals().get("__tbHost").map_err(|e| e.to_string())?;
+        let wrap_state = self.state.clone();
+        host.set(
+            "wrapNode",
+            Function::new(ctx.clone(), move |ctx: Ctx<'js>, nid: f64| {
+                crate::dom_bindings::wrap_node(
+                    ctx,
+                    wrap_state.clone(),
+                    tinybrowser_dom::NodeId::from_raw(nid as u64),
+                )
+                .ok()
+            }),
+        )
+        .map_err(|e| e.to_string())?;
+        let core: Object = host.get("core").map_err(|e| e.to_string())?;
 
         let host_timer = self.host.clone();
         core.set(
             "queueUserTimer",
             Function::new(
                 ctx.clone(),
-                move |ctx: Ctx<'js>, _depth: f64, _repeat: bool, delay: f64, callback: Function<'js>| -> u32 {
+                move |ctx: Ctx<'js>,
+                      _depth: f64,
+                      _repeat: bool,
+                      delay: f64,
+                      callback: Function<'js>|
+                      -> u32 {
                     host_timer.borrow_mut().queue_timer(&ctx, delay, callback)
                 },
             )
@@ -773,7 +880,7 @@ impl QuickJsRuntime {
     }
 
     pub fn run_page_init(&mut self) -> Result<(), String> {
-        self.context.with(|ctx| {
+        self.with_ctx(|ctx| {
             ctx.eval::<(), _>("globalThis.__tinybrowser_init();")
                 .catch(&ctx)
                 .map_err(|e| format!("__tinybrowser_init failed: {e}"))?;
@@ -805,7 +912,7 @@ impl QuickJsRuntime {
             name.to_string()
         };
         let import_meta = import_meta_url.unwrap_or(name).to_string();
-        self.context.with(|ctx| {
+        self.with_ctx(|ctx| {
             let module = Module::declare(ctx.clone(), module_name.as_str(), source)
                 .catch(&ctx)
                 .map_err(|e| format!("load: {e}"))?;
@@ -839,26 +946,30 @@ impl QuickJsRuntime {
         let budget_end = Instant::now() + Duration::from_millis(budget_ms.max(1));
         loop {
             self.drain_jobs()?;
-            let state = self
-                .context
-                .with(|ctx| ctx.eval::<i32, _>("globalThis.__tinybrowser_mod_state|0").unwrap_or(0));
+            let state = self.with_ctx(|ctx| {
+                ctx.eval::<i32, _>("globalThis.__tinybrowser_mod_state|0")
+                    .unwrap_or(0)
+            });
             if state == 1 {
                 return Ok(());
             }
             if state == 2 {
-                let err = self
-                    .context
-                    .with(|ctx| {
-                        ctx.eval::<String, _>("String(globalThis.__tinybrowser_mod_err || 'module error')")
-                            .unwrap_or_else(|_| "module error".to_string())
-                    });
+                let err = self.with_ctx(|ctx| {
+                    ctx.eval::<String, _>(
+                        "String(globalThis.__tinybrowser_mod_err || 'module error')",
+                    )
+                    .unwrap_or_else(|_| "module error".to_string())
+                });
                 return Err(format!("eval: {err}"));
             }
             let now = Instant::now();
             if now >= budget_end {
                 return Err("timeout".into());
             }
-            let slice = budget_end.saturating_duration_since(now).as_millis().min(20) as u64;
+            let slice = budget_end
+                .saturating_duration_since(now)
+                .as_millis()
+                .min(20) as u64;
             self.run_event_loop_bounded(slice)?;
         }
     }
@@ -891,7 +1002,7 @@ impl QuickJsRuntime {
         } else {
             name.to_string()
         };
-        self.context.with(|ctx| {
+        self.with_ctx(|ctx| {
             let mut opts = rquickjs::context::EvalOptions::default();
             opts.global = true;
             opts.filename = Some(filename);
@@ -921,7 +1032,7 @@ impl QuickJsRuntime {
     }
 
     fn eval_wrapped(&mut self, wrapped: &str) -> Result<serde_json::Value, String> {
-        self.context.with(|ctx| {
+        self.with_ctx(|ctx| {
             // JSON.stringify(undefined) is undefined, not a string. Statements
             // like document.write() complete with undefined; coerce that to
             // null so the result is always JSON.
@@ -1020,7 +1131,7 @@ impl QuickJsRuntime {
     }
 
     fn drain_jobs(&mut self) -> Result<(), String> {
-        self.context.with(|ctx| {
+        self.with_ctx(|ctx| {
             while ctx.execute_pending_job() {}
             Ok::<(), String>(())
         })
@@ -1046,7 +1157,7 @@ impl QuickJsRuntime {
         match reply.result {
             Ok(outcome) => {
                 let json = ops::apply_fetch_outcome(&mut self.state.borrow_mut(), outcome);
-                self.context.with(|ctx| {
+                self.with_ctx(|ctx| {
                     let func = resolve.restore(&ctx).map_err(|e| e.to_string())?;
                     func.call::<(String,), ()>((json,))
                         .catch(&ctx)
@@ -1054,7 +1165,7 @@ impl QuickJsRuntime {
                     Ok::<(), String>(())
                 })
             }
-            Err(err) => self.context.with(|ctx| {
+            Err(err) => self.with_ctx(|ctx| {
                 let func = reject.restore(&ctx).map_err(|e| e.to_string())?;
                 func.call::<(String,), ()>((err,))
                     .catch(&ctx)
@@ -1069,7 +1180,7 @@ impl QuickJsRuntime {
         if due.is_empty() {
             return Ok(false);
         }
-        self.context.with(|ctx| {
+        self.with_ctx(|ctx| {
             for callback in due {
                 let func = callback.restore(&ctx).map_err(|e| e.to_string())?;
                 let _ = func.call::<(), ()>(()).catch(&ctx);
@@ -1083,7 +1194,7 @@ impl QuickJsRuntime {
         let Some(resolve) = self.host.borrow_mut().pop_posted() else {
             return Ok(false);
         };
-        self.context.with(|ctx| {
+        self.with_ctx(|ctx| {
             let func = resolve.restore(&ctx).map_err(|e| e.to_string())?;
             func.call::<(), ()>(())
                 .catch(&ctx)
@@ -1094,7 +1205,7 @@ impl QuickJsRuntime {
     }
 
     pub fn load_shim(&mut self) -> Result<(), String> {
-        self.context.with(|ctx| {
+        self.with_ctx(|ctx| {
             // QuickJS-ng ships a native Performance whose timeOrigin is
             // read-only. The shim keeps that object (`performance || { ... }`)
             // and __tinybrowser_init then assigns timeOrigin. Drop the native
@@ -1150,15 +1261,21 @@ impl QuickJsRuntime {
             ))
             .catch(&ctx)
             .map_err(|e| format!("intl timezone stub: {e}"))?;
-            ctx.eval::<(), _>(SHIM)
+            let host: Object = ctx
+                .globals()
+                .get("__tbHost")
+                .map_err(|e| format!("boot host: {e}"))?;
+            let boot: Function = ctx
+                .eval(SHIM)
                 .catch(&ctx)
                 .map_err(|e| format!("shim eval failed: {e}"))?;
-            // Keep record shape and type filters aligned with bootstrap.js
-            // `__notifyMutation`. Only the subtree match differs: one native
-            // ancestor test instead of walking parentNode in JS. Do not edit
-            // bootstrap.js.
-            ctx.eval::<(), _>(
-                r#"
+            boot.call::<_, ()>((host.clone(),))
+                .catch(&ctx)
+                .map_err(|e| format!("shim boot failed: {e}"))?;
+            let patch: Function = ctx
+                .eval(
+                    r#"
+                (function(Deno) {
                 globalThis.__notifyMutation = function(type, target_nid, addedNodes, removedNodes, attributeName, oldValue) {
                   if (!globalThis.__mutationObservers.length) return;
                   const target = globalThis._wrap(target_nid);
@@ -1192,10 +1309,21 @@ impl QuickJsRuntime {
                     if (matched) obs._notify([record]);
                   }
                 };
+                })
                 "#,
-            )
-            .catch(&ctx)
-            .map_err(|e| format!("mutation observer ancestor patch: {e}"))?;
+                )
+                .catch(&ctx)
+                .map_err(|e| format!("mutation observer ancestor patch: {e}"))?;
+            patch
+                .call::<_, ()>((host,))
+                .catch(&ctx)
+                .map_err(|e| format!("mutation observer ancestor patch: {e}"))?;
+            #[cfg(not(test))]
+            {
+                ctx.eval::<(), _>("delete globalThis.__tbHost;")
+                    .catch(&ctx)
+                    .map_err(|e| format!("clear boot host: {e}"))?;
+            }
             // QuickJS-ng invokes Error.prepareStackTrace inside the Error
             // constructor (V8 is lazy on .stack). Shadow the native accessor
             // so assignment is a JS property the constructor never reads.
@@ -1376,7 +1504,7 @@ mod tests {
     fn deno_core_ops_is_an_object() {
         let mut rt = QuickJsRuntime::new().expect("runtime constructs");
         assert_eq!(
-            rt.evaluate("typeof Deno.core.ops").expect("eval"),
+            rt.evaluate("typeof __tbHost.core.ops").expect("eval"),
             serde_json::json!("object")
         );
     }
@@ -1399,7 +1527,8 @@ mod tests {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "Europe/Berlin".to_string());
         assert_eq!(
-            rt.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone").expect("eval"),
+            rt.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone")
+                .expect("eval"),
             serde_json::json!(tz)
         );
     }
@@ -1438,23 +1567,28 @@ mod tests {
     fn sync_dom_ops_round_trip_through_rust_dom() {
         let mut rt = setup("<html><body><div id='x'>hi</div><p class='y'>yo</p></body></html>");
         assert_eq!(
-            rt.evaluate("document.createElement('div').tagName").expect("eval"),
+            rt.evaluate("document.createElement('div').tagName")
+                .expect("eval"),
             serde_json::json!("DIV")
         );
         assert_eq!(
-            rt.evaluate("document.getElementById('x').tagName").expect("eval"),
+            rt.evaluate("document.getElementById('x').tagName")
+                .expect("eval"),
             serde_json::json!("DIV")
         );
         assert_eq!(
-            rt.evaluate("document.getElementById('x').textContent").expect("eval"),
+            rt.evaluate("document.getElementById('x').textContent")
+                .expect("eval"),
             serde_json::json!("hi")
         );
         assert_eq!(
-            rt.evaluate("document.querySelector('#x').textContent").expect("eval"),
+            rt.evaluate("document.querySelector('#x').textContent")
+                .expect("eval"),
             serde_json::json!("hi")
         );
         assert_eq!(
-            rt.evaluate("document.querySelector('.y').textContent").expect("eval"),
+            rt.evaluate("document.querySelector('.y').textContent")
+                .expect("eval"),
             serde_json::json!("yo")
         );
         // The element created in JS lives in the Rust tree: creating it and
@@ -1469,24 +1603,39 @@ mod tests {
     }
 
     #[test]
-    fn unbound_ops_fall_back_to_stub_and_render_ops_are_absent() {
+    fn page_script_does_not_see_host_deno() {
         let mut rt = QuickJsRuntime::new().expect("runtime constructs");
+        rt.load_shim().expect("shim loads");
         assert_eq!(
-            rt.evaluate("'op_dom' in Deno.core.ops").expect("eval"),
-            serde_json::json!(true)
-        );
-        assert_eq!(
-            rt.evaluate("'op_layout_geometry' in Deno.core.ops").expect("eval"),
-            serde_json::json!(false)
-        );
-        assert_eq!(
-            rt.evaluate("typeof Deno.core.ops.op_layout_geometry").expect("eval"),
+            rt.evaluate("typeof Deno").expect("eval"),
             serde_json::json!("undefined")
         );
         assert_eq!(
-            rt.evaluate("Deno.core.ops.op_async_runtime_available()").expect("eval"),
-            serde_json::json!(true)
+            rt.evaluate("typeof fetch").expect("eval"),
+            serde_json::json!("function")
         );
+    }
+
+    #[test]
+    fn location_href_does_not_switch_cookie_origin_before_commit() {
+        let jar = std::sync::Arc::new(tinybrowser_net::CookieJar::new());
+        jar.set_cookie(
+            "secret=from-evil",
+            &url::Url::parse("https://evil.test/").unwrap(),
+        );
+        jar.set_cookie(
+            "session=victim",
+            &url::Url::parse("https://victim.test/").unwrap(),
+        );
+        let mut rt = setup_at("<html><body></body></html>", "https://victim.test/");
+        rt.shared_state().borrow_mut().cookie_jar = Some(jar);
+        rt.evaluate("location.href = 'https://evil.test/stolen'")
+            .expect("eval");
+        assert_eq!(
+            rt.evaluate("document.cookie").expect("eval"),
+            serde_json::json!("session=victim")
+        );
+        assert!(rt.shared_state().borrow().pending_navigation.is_some());
     }
 
     #[test]
@@ -1505,7 +1654,7 @@ mod tests {
     fn posted_task_settles_on_a_later_turn() {
         let mut rt = QuickJsRuntime::new().expect("runtime constructs");
         assert_eq!(
-            rt.evaluate("(function(){ globalThis.__settled = false; Deno.core.ops.op_posted_task().then(function(){ globalThis.__settled = true; }); return globalThis.__settled; })()")
+            rt.evaluate("(function(){ globalThis.__settled = false; __tbHost.core.ops.op_posted_task().then(function(){ globalThis.__settled = true; }); return globalThis.__settled; })()")
                 .expect("eval"),
             serde_json::json!(false)
         );
@@ -1526,24 +1675,27 @@ mod tests {
     fn stateless_ops_round_trip() {
         let mut rt = QuickJsRuntime::new().expect("runtime constructs");
         assert_eq!(
-            rt.evaluate("JSON.parse(Deno.core.ops.op_url_parse('https://a.com/x?y=1#z', '')).ok")
-                .expect("eval"),
+            rt.evaluate(
+                "JSON.parse(__tbHost.core.ops.op_url_parse('https://a.com/x?y=1#z', '')).ok"
+            )
+            .expect("eval"),
             serde_json::json!(true)
         );
         assert_eq!(
             rt.evaluate(
-                "JSON.parse(Deno.core.ops.op_text_decode('utf-8', new Uint8Array([104, 105]), false, false)).v"
+                "JSON.parse(__tbHost.core.ops.op_text_decode('utf-8', new Uint8Array([104, 105]), false, false)).v"
             )
             .expect("eval"),
             serde_json::json!("hi")
         );
         assert_eq!(
-            rt.evaluate("Array.from(Deno.core.ops.op_subtle_digest('SHA-256', new Uint8Array(0))).length")
+            rt.evaluate("Array.from(__tbHost.core.ops.op_subtle_digest('SHA-256', new Uint8Array(0))).length")
                 .expect("eval"),
             serde_json::json!(32)
         );
         assert_eq!(
-            rt.evaluate("Array.from(Deno.core.ops.op_random_bytes(8)).length").expect("eval"),
+            rt.evaluate("Array.from(__tbHost.core.ops.op_random_bytes(8)).length")
+                .expect("eval"),
             serde_json::json!(8)
         );
     }
@@ -1553,7 +1705,7 @@ mod tests {
         let mut rt = QuickJsRuntime::new().expect("runtime constructs");
         assert_eq!(
             rt.evaluate(
-                "(function(){ try { Deno.core.ops.op_subtle_aes_gcm(true, new Uint8Array(0), new Uint8Array(12), new Uint8Array(0), new Uint8Array(0)); return 'no-throw'; } catch (e) { return 'threw'; } })()"
+                "(function(){ try { __tbHost.core.ops.op_subtle_aes_gcm(true, new Uint8Array(0), new Uint8Array(12), new Uint8Array(0), new Uint8Array(0)); return 'no-throw'; } catch (e) { return 'threw'; } })()"
             )
             .expect("eval"),
             serde_json::json!("threw")
@@ -1593,10 +1745,7 @@ mod tests {
         let err = rt
             .fetch_module_source("/etc/passwd", Duration::from_secs(1))
             .expect_err("bare paths must not be read from disk");
-        assert!(
-            err.contains("Invalid module URL"),
-            "got {err}"
-        );
+        assert!(err.contains("Invalid module URL"), "got {err}");
     }
 
     #[test]
@@ -1717,10 +1866,7 @@ mod tests {
             let _ = stream.write_all(response.as_bytes());
         });
         let url = format!("http://{addr}/slow");
-        let mut rt = setup_at(
-            "<html><body></body></html>",
-            &format!("http://{addr}/page"),
-        );
+        let mut rt = setup_at("<html><body></body></html>", &format!("http://{addr}/page"));
         rt.set_http_client(allow_private_client());
         rt.evaluate(&format!(
             "(function(){{ globalThis.__body = null; fetch('{url}').then(function(r){{ return r.text(); }}).then(function(t){{ globalThis.__body = t; }}).catch(function(e){{ globalThis.__body = String(e); }}); return true; }})()"
@@ -1825,9 +1971,15 @@ mod tests {
         let token = rt.arm_watchdog(Duration::from_millis(50));
         let err = rt.evaluate("(function(){ while (true) {} })()");
         let fired = rt.disarm_watchdog(token);
-        assert!(err.is_err() || fired, "tight loop must be interrupted: {err:?} fired={fired}");
+        assert!(
+            err.is_err() || fired,
+            "tight loop must be interrupted: {err:?} fired={fired}"
+        );
         rt.cancel_termination();
-        assert_eq!(rt.evaluate("1+1").expect("eval after cancel"), serde_json::json!(2));
+        assert_eq!(
+            rt.evaluate("1+1").expect("eval after cancel"),
+            serde_json::json!(2)
+        );
     }
 
     #[test]
@@ -1855,10 +2007,7 @@ mod tests {
             );
             let _ = stream.write_all(response.as_bytes());
         });
-        let mut rt = setup_at(
-            "<html><body></body></html>",
-            &format!("http://{addr}/page"),
-        );
+        let mut rt = setup_at("<html><body></body></html>", &format!("http://{addr}/page"));
         rt.set_http_client(allow_private_client());
         rt.evaluate(&format!(
             "(function(){{ globalThis.__body = null; fetch('http://{addr}/slow').then(function(r){{ return r.text(); }}).then(function(t){{ globalThis.__body = t; }}).catch(function(e){{ globalThis.__body = String(e); }}); return true; }})()"

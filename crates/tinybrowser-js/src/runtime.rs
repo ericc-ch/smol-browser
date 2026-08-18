@@ -9,8 +9,8 @@ pub use crate::quickjs::QuickJsIsolateHandle as IsolateHandle;
 
 use crate::import_map::ImportMap;
 use crate::module_loader::ModuleLoadActivity;
-use crate::quickjs::{spawn_quickjs_watchdog, QuickJsRuntime, QuickJsWatchdogToken};
 use crate::ops::{node_is_script, StoredNetworkResponseBody};
+use crate::quickjs::{spawn_quickjs_watchdog, QuickJsRuntime, QuickJsWatchdogToken};
 
 const DEFAULT_CDP_AWAIT_TIMEOUT_MS: u64 = 30_000;
 
@@ -70,8 +70,7 @@ impl JsRuntime {
     /// update at task/rendering boundaries, not on each forced style or layout
     /// read. Keeping one sample across the task also lets repeated CSSOM reads
     /// share the retained layout on pages with running animations.
-    fn begin_javascript_task(&mut self) {
-    }
+    fn begin_javascript_task(&mut self) {}
     pub fn new() -> Self {
         Self::with_base_url("about:blank")
     }
@@ -130,12 +129,6 @@ impl JsRuntime {
         self.qjs.shared_state().borrow_mut().callbacks = Some(callbacks);
     }
 
-    /// Install the stealth (wreq) HTTP client so scripted fetch()/XHR is routed
-    /// through it in stealth mode (see op_fetch_url / stealth_fetch_all).
-    pub fn set_stealth_client(&self, client: std::sync::Arc<tinybrowser_net::StealthHttpClient>) {
-        self.qjs.shared_state().borrow_mut().stealth_client = Some(client);
-    }
-
     pub fn set_dom(&self, dom: DomTree) {
         let mut gs = self.qjs.shared_state().borrow_mut();
         gs.dom = Some(dom);
@@ -177,7 +170,11 @@ impl JsRuntime {
     }
 
     pub fn take_pending_navigation(&self) -> Option<(String, String, String)> {
-        self.qjs.shared_state().borrow_mut().pending_navigation.take()
+        self.qjs
+            .shared_state()
+            .borrow_mut()
+            .pending_navigation
+            .take()
     }
 
     pub fn take_pending_binding_calls(&self) -> Vec<(String, String)> {
@@ -185,7 +182,8 @@ impl JsRuntime {
     }
 
     pub fn get_network_response_body(&self, request_id: &str) -> Option<StoredNetworkResponseBody> {
-        self.qjs.shared_state()
+        self.qjs
+            .shared_state()
             .borrow()
             .network_response_bodies
             .get(request_id)
@@ -278,18 +276,13 @@ impl JsRuntime {
     pub fn set_screen_size_override(&mut self, size: Option<(f64, f64)>, emulated: bool) {
         let script = match size {
             Some((width, height))
-                if width.is_finite()
-                    && height.is_finite()
-                    && width > 0.0
-                    && height > 0.0 =>
+                if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 =>
             {
                 format!(
                     "globalThis.__tinybrowser_set_screen_override({width},{height},{emulated});"
                 )
             }
-            _ => format!(
-                "globalThis.__tinybrowser_set_screen_override(null,null,{emulated});"
-            ),
+            _ => format!("globalThis.__tinybrowser_set_screen_override(null,null,{emulated});"),
         };
         let _ = self.qjs.execute_script("<set-screen-size>", script);
     }
@@ -446,10 +439,7 @@ impl JsRuntime {
                     oid
                 ))
                 .map_err(|e| format!("JS error: {}", e))?;
-                return Err(format!(
-                    "Promise rejected: {}",
-                    err.as_str().unwrap_or("")
-                ));
+                return Err(format!("Promise rejected: {}", err.as_str().unwrap_or("")));
             }
             self.qjs
                 .evaluate("globalThis.__tinybrowser_await_meta")
@@ -765,10 +755,8 @@ impl JsRuntime {
     }
 
     fn fetch_module_source(&mut self, url: &str, budget_ms: u64) -> Result<String, String> {
-        self.qjs.fetch_module_source(
-            url,
-            std::time::Duration::from_millis(budget_ms.max(1)),
-        )
+        self.qjs
+            .fetch_module_source(url, std::time::Duration::from_millis(budget_ms.max(1)))
     }
 
     pub async fn prepare_inline_module(
@@ -808,12 +796,16 @@ impl JsRuntime {
         } else {
             match result {
                 Ok(()) => Ok(()),
-                Err(err) if err.starts_with("load:") => {
-                    Err(format!("{} load error: {}", description, err.trim_start_matches("load:").trim()))
-                }
-                Err(err) if err.starts_with("eval:") => {
-                    Err(format!("{} eval error: {}", description, err.trim_start_matches("eval:").trim()))
-                }
+                Err(err) if err.starts_with("load:") => Err(format!(
+                    "{} load error: {}",
+                    description,
+                    err.trim_start_matches("load:").trim()
+                )),
+                Err(err) if err.starts_with("eval:") => Err(format!(
+                    "{} eval error: {}",
+                    description,
+                    err.trim_start_matches("eval:").trim()
+                )),
                 Err(err) => Err(format!("{}: {err}", description)),
             }
         }
@@ -950,9 +942,9 @@ impl JsRuntime {
 
     fn next_pending_timeout_delay_ms(&mut self) -> Option<f64> {
         self.evaluate("globalThis.__tinybrowser_nextPendingTimeoutDelay?.() ?? -1")
-        .ok()
-        .and_then(|value| value.as_f64())
-        .filter(|delay| *delay >= 0.0)
+            .ok()
+            .and_then(|value| value.as_f64())
+            .filter(|delay| *delay >= 0.0)
     }
 
     /// Arm a hard wall-clock backstop on synchronous JavaScript. A page stuck
@@ -1004,7 +996,11 @@ impl JsRuntime {
         let result = self.qjs.run_event_loop_bounded(budget_ms);
         let fired = self.disarm_watchdog(token);
         match result {
-            Err(error) if fired || error.contains("interrupted") || error.contains("execution terminated") => {
+            Err(error)
+                if fired
+                    || error.contains("interrupted")
+                    || error.contains("execution terminated") =>
+            {
                 Ok(())
             }
             other => other,
@@ -1107,8 +1103,7 @@ impl JsRuntime {
         let activity_tail = std::time::Duration::from_millis(OBSERVABLE_ACTIVITY_TAIL_MS);
         let mut activity_deadline = deadline.min(started + activity_tail);
         let token = self.arm_watchdog(
-            budget
-                .saturating_add(std::time::Duration::from_millis(SYNCHRONOUS_TASK_FLOOR_MS))
+            budget.saturating_add(std::time::Duration::from_millis(SYNCHRONOUS_TASK_FLOOR_MS))
                 + std::time::Duration::from_millis(WATCHDOG_SCHEDULING_MARGIN_MS),
         );
         let mut generation = self.activity_generation();
@@ -1170,11 +1165,9 @@ impl JsRuntime {
                     + std::time::Duration::from_millis(SYNCHRONOUS_TASK_FLOOR_MS)
                     + std::time::Duration::from_millis(WATCHDOG_SCHEDULING_MARGIN_MS),
             );
-            let tick = tokio::time::timeout_at(
-                policy_deadline,
-                self.run_cooperative_event_loop_tick(),
-            )
-            .await;
+            let tick =
+                tokio::time::timeout_at(policy_deadline, self.run_cooperative_event_loop_tick())
+                    .await;
             let tick_fired = self.disarm_watchdog(tick_watchdog);
             if tick_fired {
                 break Ok(());
@@ -1238,11 +1231,7 @@ impl JsRuntime {
     /// added ~7s per click because Puppeteer's `isIntersectingViewport`
     /// disconnects its observer in the callback, but our scheduled
     /// re-fires keep the event loop "busy" until they all fire.
-    pub async fn resolve_promises_until<F>(
-        &mut self,
-        mut done_check: F,
-        max_total_ms: u64,
-    ) -> bool
+    pub async fn resolve_promises_until<F>(&mut self, mut done_check: F, max_total_ms: u64) -> bool
     where
         F: FnMut(&mut Self) -> bool,
     {
@@ -1280,7 +1269,7 @@ impl JsRuntime {
     /// is temporarily destroyed.  Page suspension keeps the DOM alive, so the
     /// HTML "already started" flags must travel with it rather than resetting
     /// like window-global JavaScript state.
-    pub fn started_script_ids(&self) -> Vec<u32> {
+    pub fn started_script_ids(&self) -> Vec<u64> {
         let state = self.qjs.shared_state().borrow();
         let mut ids = state
             .already_started_scripts
@@ -1295,7 +1284,7 @@ impl JsRuntime {
     /// Restore script preparation state only onto script nodes in the current
     /// DOM.  Callers use this exclusively for the same DomTree surviving a
     /// suspend/resume cycle; normal set_dom navigation starts from an empty set.
-    pub fn restore_started_script_ids(&self, ids: &[u32]) {
+    pub fn restore_started_script_ids(&self, ids: &[u64]) {
         let state = self.qjs.shared_state().borrow();
         let Some(dom) = state.dom.as_ref() else {
             return;
@@ -2369,7 +2358,9 @@ mod tests {
 
     #[test]
     fn clone_node_deep_copies_children_and_attributes() {
-        let mut rt = setup_runtime(r#"<html><body><ul id="l"><li class="a">one</li><li class="b">two</li></ul></body></html>"#);
+        let mut rt = setup_runtime(
+            r#"<html><body><ul id="l"><li class="a">one</li><li class="b">two</li></ul></body></html>"#,
+        );
         let out = rt
             .evaluate(
                 "(function(){var c=document.getElementById('l').cloneNode(true); return c.children.length + '|' + c.children[0].className + '|' + c.children[1].textContent;})()",
@@ -2395,7 +2386,9 @@ mod tests {
 
     #[test]
     fn clone_node_shallow_copies_attributes_without_children() {
-        let mut rt = setup_runtime(r#"<html><body><div id="d" data-x="7"><span>kid</span></div></body></html>"#);
+        let mut rt = setup_runtime(
+            r#"<html><body><div id="d" data-x="7"><span>kid</span></div></body></html>"#,
+        );
         let out = rt
             .evaluate(
                 "(function(){var c=document.getElementById('d').cloneNode(false); return c.getAttribute('data-x') + '|' + c.childNodes.length;})()",
@@ -2412,7 +2405,10 @@ mod tests {
                 "(function(){var d=document.getElementById('d');d.style.color='red';d.style.fontSize='12px';var c=d.cloneNode(false);return c.style.color+'|'+c.style.fontSize+'|'+c.style.cssText;})()",
             )
             .unwrap();
-        assert_eq!(out, serde_json::json!("red|12px|color: red; font-size: 12px;"));
+        assert_eq!(
+            out,
+            serde_json::json!("red|12px|color: red; font-size: 12px;")
+        );
     }
 
     #[test]
@@ -2439,7 +2435,8 @@ mod tests {
 
     #[test]
     fn insert_adjacent_html_position_is_case_insensitive() {
-        let mut rt = setup_runtime(r#"<html><body><div id="host"><span>base</span></div></body></html>"#);
+        let mut rt =
+            setup_runtime(r#"<html><body><div id="host"><span>base</span></div></body></html>"#);
         let out = rt
             .evaluate("(function(){var h=document.getElementById('host'); h.insertAdjacentHTML('BeforeEnd','<b>x</b>'); return h.lastElementChild ? h.lastElementChild.tagName : 'NULL';})()")
             .unwrap();
@@ -2515,7 +2512,10 @@ mod tests {
         let v = rt
             .evaluate("(function(){var s=document.createElementNS('http://www.w3.org/2000/svg','svg');s.setAttributeNS('http://www.w3.org/1999/xlink','xlink:href','#g');return s.getAttribute('xlink:href')+'|'+s.getAttributeNames()[0]+'|'+s.outerHTML;})()")
             .unwrap();
-        assert_eq!(v, serde_json::json!("#g|xlink:href|<svg xlink:href=\"#g\"></svg>"));
+        assert_eq!(
+            v,
+            serde_json::json!("#g|xlink:href|<svg xlink:href=\"#g\"></svg>")
+        );
     }
 
     #[test]
@@ -2553,9 +2553,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             v,
-            serde_json::json!(
-                "NamespaceError|InvalidCharacterError|NamespaceError|NamespaceError"
-            )
+            serde_json::json!("NamespaceError|InvalidCharacterError|NamespaceError|NamespaceError")
         );
     }
 
@@ -3099,15 +3097,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             result,
-            serde_json::json!([
-                true,
-                "{\"ready\":true}",
-                true,
-                2,
-                true,
-                true,
-                "undefined"
-            ])
+            serde_json::json!([true, "{\"ready\":true}", true, 2, true, true, "undefined"])
         );
     }
 
@@ -3175,8 +3165,7 @@ mod tests {
         assert_eq!(
             result,
             serde_json::json!([
-                true, true, true, true, true, true, true, true, true, true, true, true,
-                true
+                true, true, true, true, true, true, true, true, true, true, true, true, true
             ])
         );
     }
@@ -3528,9 +3517,7 @@ mod tests {
         .unwrap();
 
         let started = std::time::Instant::now();
-        rt.run_event_loop_until_quiescent(2_000, 150)
-            .await
-            .unwrap();
+        rt.run_event_loop_until_quiescent(2_000, 150).await.unwrap();
         let elapsed = started.elapsed();
 
         assert!(
@@ -3556,17 +3543,12 @@ mod tests {
         .unwrap();
 
         let started = std::time::Instant::now();
-        rt.run_event_loop_until_quiescent(2_000, 150)
-            .await
-            .unwrap();
+        rt.run_event_loop_until_quiescent(2_000, 150).await.unwrap();
         let elapsed = started.elapsed();
 
         assert!(
             elapsed >= std::time::Duration::from_millis(SYNCHRONOUS_TASK_FLOOR_MS)
-                && elapsed
-                    < std::time::Duration::from_millis(
-                        SYNCHRONOUS_TASK_FLOOR_MS + 1_500,
-                    ),
+                && elapsed < std::time::Duration::from_millis(SYNCHRONOUS_TASK_FLOOR_MS + 1_500,),
             "one synchronous callback drain escaped the bounded task allowance: {elapsed:?}"
         );
         assert_eq!(
@@ -3649,8 +3631,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn quiescent_event_loop_allows_fetch_hydration_within_network_grace() {
-        let (mut rt, accepted) =
-            delayed_fetch_runtime(std::time::Duration::from_millis(700));
+        let (mut rt, accepted) = delayed_fetch_runtime(std::time::Duration::from_millis(700));
         rt.execute_script(
             "quiescent-fetch-hydration",
             "fetch('/hydrate').then(response => response.text()).then(text => {\
@@ -3660,9 +3641,7 @@ mod tests {
         .unwrap();
 
         let started = std::time::Instant::now();
-        rt.run_event_loop_until_quiescent(3_000, 150)
-            .await
-            .unwrap();
+        rt.run_event_loop_until_quiescent(3_000, 150).await.unwrap();
         let elapsed = started.elapsed();
 
         accepted
@@ -3693,9 +3672,7 @@ mod tests {
         .unwrap();
 
         let started = std::time::Instant::now();
-        rt.run_event_loop_until_quiescent(4_000, 150)
-            .await
-            .unwrap();
+        rt.run_event_loop_until_quiescent(4_000, 150).await.unwrap();
         let elapsed = started.elapsed();
 
         accepted
@@ -3714,7 +3691,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn quiescent_event_loop_gives_post_grace_dom_activity_a_quiet_window() {
         let mut rt = setup_runtime("<html><body></body></html>");
-        rt.qjs.shared_state()
+        rt.qjs
+            .shared_state()
             .borrow()
             .page_in_flight
             .store(1, std::sync::atomic::Ordering::SeqCst);
@@ -3726,9 +3704,7 @@ mod tests {
         .unwrap();
 
         let started = std::time::Instant::now();
-        rt.run_event_loop_until_quiescent(4_000, 150)
-            .await
-            .unwrap();
+        rt.run_event_loop_until_quiescent(4_000, 150).await.unwrap();
         let elapsed = started.elapsed();
 
         assert_eq!(
@@ -5277,8 +5253,15 @@ mod tests {
         assert_eq!(
             result,
             serde_json::json!([
-                1, 1, true,
-                ["\"a;b\"", "url(\"data:image/svg+xml;utf8,<svg/>\")", true, true],
+                1,
+                1,
+                true,
+                [
+                    "\"a;b\"",
+                    "url(\"data:image/svg+xml;utf8,<svg/>\")",
+                    true,
+                    true
+                ],
                 ""
             ])
         );
@@ -6473,9 +6456,9 @@ mod tests {
         let result = rt
             .call_function_on_for_cdp(
                 r#"async () => {
-                const originalFetchOp = Deno.core.ops.op_fetch_url;
+                const originalFetchOp = __tbHost.core.ops.op_fetch_url;
                 try {
-                    Deno.core.ops.op_fetch_url = (url) => {
+                    __tbHost.core.ops.op_fetch_url = (url) => {
                         globalThis.__capturedFetchUrl = url;
                         return JSON.stringify({
                             status: 200,
@@ -6488,7 +6471,7 @@ mod tests {
                     const bytes = Array.from(new Uint8Array(await response.arrayBuffer()));
                     return { url: globalThis.__capturedFetchUrl, bytes };
                 } finally {
-                    Deno.core.ops.op_fetch_url = originalFetchOp;
+                    __tbHost.core.ops.op_fetch_url = originalFetchOp;
                 }
             }"#,
                 None,
@@ -6514,10 +6497,10 @@ mod tests {
         let result = rt
             .call_function_on_for_cdp(
                 r#"async () => {
-                    const originalFetchOp = Deno.core.ops.op_fetch_url;
+                    const originalFetchOp = __tbHost.core.ops.op_fetch_url;
                     const calls = [];
                     try {
-                        Deno.core.ops.op_fetch_url =
+                        __tbHost.core.ops.op_fetch_url =
                             (url, method, headers, body, origin, mode, credentials) => {
                                 calls.push({ url, credentials });
                                 return JSON.stringify({
@@ -6555,7 +6538,7 @@ mod tests {
 
                         return { calls, invalidFetchRejected };
                     } finally {
-                        Deno.core.ops.op_fetch_url = originalFetchOp;
+                        __tbHost.core.ops.op_fetch_url = originalFetchOp;
                     }
                 }"#,
                 None,
@@ -6590,9 +6573,9 @@ mod tests {
         let result = rt
             .call_function_on_for_cdp(
                 r#"async () => {
-                    const originalFetchOp = Deno.core.ops.op_fetch_url;
+                    const originalFetchOp = __tbHost.core.ops.op_fetch_url;
                     try {
-                        Deno.core.ops.op_fetch_url = (url) => JSON.stringify({
+                        __tbHost.core.ops.op_fetch_url = (url) => JSON.stringify({
                             status: 200,
                             headers: { "content-type": "text/css" },
                             body: url.endsWith("/assets/route.css")
@@ -6638,7 +6621,7 @@ mod tests {
                                 && list.length === 0,
                         };
                     } finally {
-                        Deno.core.ops.op_fetch_url = originalFetchOp;
+                        __tbHost.core.ops.op_fetch_url = originalFetchOp;
                     }
                 }"#,
                 None,
@@ -6675,9 +6658,9 @@ mod tests {
         let result = rt
             .call_function_on_for_cdp(
                 r#"async () => {
-                    const originalFetchOp = Deno.core.ops.op_fetch_url;
+                    const originalFetchOp = __tbHost.core.ops.op_fetch_url;
                     try {
-                        Deno.core.ops.op_fetch_url = (url) => JSON.stringify({
+                        __tbHost.core.ops.op_fetch_url = (url) => JSON.stringify({
                             status: 401,
                             headers: { "content-type": "application/json" },
                             body: "globalThis.__executedFailedScript = true",
@@ -6695,7 +6678,7 @@ mod tests {
                             executed: globalThis.__executedFailedScript === true,
                         };
                     } finally {
-                        Deno.core.ops.op_fetch_url = originalFetchOp;
+                        __tbHost.core.ops.op_fetch_url = originalFetchOp;
                     }
                 }"#,
                 None,
@@ -6721,10 +6704,10 @@ mod tests {
         let result = rt
             .call_function_on_for_cdp(
                 r#"async () => {
-                    const originalFetchOp = Deno.core.ops.op_fetch_url;
+                    const originalFetchOp = __tbHost.core.ops.op_fetch_url;
                     const runPair = async (explicitlyInOrder) => {
                         globalThis.__dynamicOrder = [];
-                        Deno.core.ops.op_fetch_url = (url) => new Promise(resolve => {
+                        __tbHost.core.ops.op_fetch_url = (url) => new Promise(resolve => {
                             const slow = url.includes("slow");
                             setTimeout(() => resolve(JSON.stringify({
                                 status: 200,
@@ -6752,7 +6735,7 @@ mod tests {
                             pending: globalThis.__tinybrowser_hasPendingDynamicScripts(),
                         };
                     } finally {
-                        Deno.core.ops.op_fetch_url = originalFetchOp;
+                        __tbHost.core.ops.op_fetch_url = originalFetchOp;
                     }
                 }"#,
                 None,
@@ -7461,7 +7444,10 @@ mod tests {
             .collect::<Vec<_>>();
         for request in &requests {
             let lower = request.to_ascii_lowercase();
-            assert!(lower.contains("\r\norigin: http://127.0.0.1:1\r\n"), "{request}");
+            assert!(
+                lower.contains("\r\norigin: http://127.0.0.1:1\r\n"),
+                "{request}"
+            );
             assert!(!lower.contains("\r\ncookie:"), "{request}");
         }
         let child = requests
@@ -7778,8 +7764,7 @@ mod tests {
     fn http_client_round_trips_proxy_url() {
         use tinybrowser_net::{CookieJar, HttpClient};
         let jar = std::sync::Arc::new(CookieJar::new());
-        let configured =
-            HttpClient::with_options(jar.clone(), Some("http://proxy.test:8080"));
+        let configured = HttpClient::with_options(jar.clone(), Some("http://proxy.test:8080"));
         assert_eq!(
             configured.proxy_url(),
             Some("http://proxy.test:8080"),
@@ -8263,9 +8248,9 @@ mod tests {
                 document.body.appendChild(parsed.querySelector("script"));
 
                 let externalFetches = 0;
-                const originalFetchOp = Deno.core.ops.op_fetch_url;
+                const originalFetchOp = __tbHost.core.ops.op_fetch_url;
                 try {
-                    Deno.core.ops.op_fetch_url = () => {
+                    __tbHost.core.ops.op_fetch_url = () => {
                         externalFetches++;
                         return JSON.stringify({
                             status: 200,
@@ -8278,7 +8263,7 @@ mod tests {
                     external.innerHTML = "<script src=/inert.js><\/script>";
                     document.head.appendChild(external.firstChild);
                 } finally {
-                    Deno.core.ops.op_fetch_url = originalFetchOp;
+                    __tbHost.core.ops.op_fetch_url = originalFetchOp;
                 }
                 return [globalThis.__fragmentScriptRuns, externalFetches];
                 "#,

@@ -12,9 +12,9 @@
 // These mirror the cdp_click_submit_parity helpers (`serve_once` / `cdp`),
 // copied per the Testing-and-debugging.md guidance to reuse the pattern.
 
+use serde_json::{json, Value};
 use tinybrowser_cdp::dispatch::{dispatch, CdpContext};
 use tinybrowser_cdp::types::CdpRequest;
-use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -114,8 +114,14 @@ async fn structured_clone_preserves_arraybuffer_bytes() {
     .await;
     let val = serde_json::from_str::<Value>(v["result"]["value"].as_str().unwrap()).unwrap();
     assert_eq!(val["srcLen"], 4);
-    assert_eq!(val["cloneLen"], 4, "structuredClone dropped the ArrayBuffer");
-    assert_eq!(val["same"], false, "clone must be independent, not the same buffer");
+    assert_eq!(
+        val["cloneLen"], 4,
+        "structuredClone dropped the ArrayBuffer"
+    );
+    assert_eq!(
+        val["same"], false,
+        "clone must be independent, not the same buffer"
+    );
     assert_eq!(val["bytes"], json!([10, 20, 30, 40]));
 }
 
@@ -147,7 +153,10 @@ async fn cryptokey_survives_structured_clone_and_still_signs() {
     let val = serde_json::from_str::<Value>(v["result"]["value"].as_str().unwrap()).unwrap();
     assert_eq!(val["cloneType"], "secret");
     assert_eq!(val["cloneTag"], "CryptoKey");
-    assert_eq!(val["sigLen"], 32, "cloned CryptoKey must remain usable by crypto.subtle");
+    assert_eq!(
+        val["sigLen"], 32,
+        "cloned CryptoKey must remain usable by crypto.subtle"
+    );
 }
 
 // DataView has no .slice() method, so the original TypedArray branch
@@ -180,7 +189,10 @@ async fn structured_clone_preserves_dataview() {
     assert_eq!(val["len"], 8, "DataView clone must keep its length");
     assert_eq!(val["a"], 0x12345678);
     assert_eq!(val["b"], 0x9abcdef0u64 as i64);
-    assert_eq!(val["independent"], true, "clone must own its buffer, not alias the source");
+    assert_eq!(
+        val["independent"], true,
+        "clone must own its buffer, not alias the source"
+    );
 }
 
 // A reference cycle through Error.cause must clone without crashing (issue
@@ -213,10 +225,17 @@ async fn structured_clone_handles_circular_error_cause() {
     )
     .await;
     let val = serde_json::from_str::<Value>(v["result"]["value"].as_str().unwrap()).unwrap();
-    assert_eq!(val["ok"], true, "circular Error.cause crashed structuredClone: {:?}", val["err"]);
+    assert_eq!(
+        val["ok"], true,
+        "circular Error.cause crashed structuredClone: {:?}",
+        val["err"]
+    );
     assert_eq!(val["message"], "boom");
     assert_eq!(val["isError"], true, "clone must remain an Error");
-    assert_eq!(val["selfCycle"], true, "cyclic cause must resolve to the clone, not a duplicate");
+    assert_eq!(
+        val["selfCycle"], true,
+        "cyclic cause must resolve to the clone, not a duplicate"
+    );
 }
 
 // An own enumerable `__proto__` data property (what JSON.parse('{"__proto__":…}')
@@ -243,9 +262,18 @@ async fn structured_clone_reproduces_own_proto_property() {
     )
     .await;
     let val = serde_json::from_str::<Value>(v["result"]["value"].as_str().unwrap()).unwrap();
-    assert_eq!(val["hasOwnProto"], true, "own __proto__ data property was lost");
-    assert_eq!(val["plainProto"], true, "plain object must clone onto Object.prototype");
-    assert_eq!(val["polluted"], false, "clone prototype was reparented via the __proto__ setter");
+    assert_eq!(
+        val["hasOwnProto"], true,
+        "own __proto__ data property was lost"
+    );
+    assert_eq!(
+        val["plainProto"], true,
+        "plain object must clone onto Object.prototype"
+    );
+    assert_eq!(
+        val["polluted"], false,
+        "clone prototype was reparented via the __proto__ setter"
+    );
     assert_eq!(val["a"], 1);
 }
 
@@ -303,8 +331,17 @@ async fn structured_clone_preserves_cryptokey_identity() {
     )
     .await;
     let val = serde_json::from_str::<Value>(v["result"]["value"].as_str().unwrap()).unwrap();
-    assert_eq!(val["shared"], true, "one CryptoKey reached twice must clone to one shared object");
-    assert_eq!(val["distinctFromSource"], true, "clone must not alias the source key");
+    assert_eq!(
+        val["shared"], true,
+        "one CryptoKey reached twice must clone to one shared object"
+    );
+    assert_eq!(
+        val["distinctFromSource"], true,
+        "clone must not alias the source key"
+    );
     assert_eq!(val["tag"], "CryptoKey");
-    assert_eq!(val["sigLen"], 32, "the shared clone must remain usable by crypto.subtle");
+    assert_eq!(
+        val["sigLen"], 32,
+        "the shared clone must remain usable by crypto.subtle"
+    );
 }

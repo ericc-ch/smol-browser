@@ -9,11 +9,11 @@ pub async fn handle(method: &str, _params: &Value) -> Result<Value, String> {
             "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
             "jsVersion": "14.5.0.0",
         })),
-        "close" => {
-            Ok(json!({}))
-        }
+        "close" => Ok(json!({})),
         "getWindowForTarget" => Err(crate::util::cdp_unimplemented("Browser.getWindowForTarget")),
-        "setDownloadBehavior" => Err(crate::util::cdp_unimplemented("Browser.setDownloadBehavior")),
+        "setDownloadBehavior" => Err(crate::util::cdp_unimplemented(
+            "Browser.setDownloadBehavior",
+        )),
         "getWindowBounds" => Err(crate::util::cdp_unimplemented("Browser.getWindowBounds")),
         "setWindowBounds" => Err(crate::util::cdp_unimplemented("Browser.setWindowBounds")),
         _ => Err(format!("Unknown Browser method: {}", method)),

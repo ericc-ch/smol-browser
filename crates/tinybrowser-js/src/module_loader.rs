@@ -92,17 +92,13 @@ pub(crate) fn resolve_module_specifier(
         return resolve_import(specifier, document_base);
     }
 
-    let base = if referrer.is_empty()
-        || referrer.starts_with('<')
-        || referrer == "about:blank"
-    {
+    let base = if referrer.is_empty() || referrer.starts_with('<') || referrer == "about:blank" {
         document_base
     } else {
         referrer
     };
 
-    let base = Url::parse(base)
-        .map_err(|e| format!("Invalid module referrer {base}: {e}"))?;
+    let base = Url::parse(base).map_err(|e| format!("Invalid module referrer {base}: {e}"))?;
     import_map.resolve(specifier, &base)
 }
 
@@ -142,6 +138,6 @@ pub(crate) async fn fetch_module_bytes(
     if !(200..=299).contains(&resp.status) {
         return Err(format!("Module {url} returned HTTP {}", resp.status));
     }
-    let code = tinybrowser_net::decode_non_html(&resp.body, resp.content_type());
+    let code = tinybrowser_net::decode_text(&resp.body, resp.content_type());
     Ok((resp.url.as_str().to_string(), code))
 }

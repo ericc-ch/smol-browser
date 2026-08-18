@@ -28,21 +28,19 @@ fn default_background_color(params: &Value) -> Result<Option<[u8; 4]>, String> {
     let Some(color) = params.get("color") else {
         return Ok(None);
     };
-    let color = color.as_object().ok_or(
-        "Emulation.setDefaultBackgroundColorOverride color must be an RGBA object",
-    )?;
+    let color = color
+        .as_object()
+        .ok_or("Emulation.setDefaultBackgroundColorOverride color must be an RGBA object")?;
     let channel = |name: &str| -> Result<u8, String> {
         let value = color.get(name).and_then(Value::as_i64).ok_or_else(|| {
-            format!(
-                "Emulation.setDefaultBackgroundColorOverride requires integer color.{name}"
-            )
+            format!("Emulation.setDefaultBackgroundColorOverride requires integer color.{name}")
         })?;
         Ok(value.clamp(0, 255) as u8)
     };
     let alpha = match color.get("a") {
-        Some(value) => value.as_f64().ok_or(
-            "Emulation.setDefaultBackgroundColorOverride color.a must be a number",
-        )?,
+        Some(value) => value
+            .as_f64()
+            .ok_or("Emulation.setDefaultBackgroundColorOverride color.a must be a number")?,
         None => 1.0,
     };
     if !alpha.is_finite() {
@@ -121,9 +119,9 @@ pub async fn handle(
             page.set_default_background_color_override(color);
             Ok(json!({}))
         }
-        "setTouchEmulationEnabled" => {
-            Err(crate::util::cdp_unimplemented("Emulation.setTouchEmulationEnabled"))
-        }
+        "setTouchEmulationEnabled" => Err(crate::util::cdp_unimplemented(
+            "Emulation.setTouchEmulationEnabled",
+        )),
         _ => Err(format!("Unknown Emulation method: {}", method)),
     }
 }

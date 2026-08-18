@@ -5,9 +5,9 @@
 //! login pattern (listener preventDefaults; a success callback calls
 //! `form.submit()` to actually send the form).
 
+use serde_json::{json, Value};
 use tinybrowser_cdp::dispatch::{dispatch, CdpContext};
 use tinybrowser_cdp::types::CdpRequest;
-use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -49,7 +49,13 @@ document.getElementById('f').addEventListener('submit', function(e) { e.preventD
     format!("http://{addr}/")
 }
 
-async fn cdp(ctx: &mut CdpContext, id: u64, method: &str, params: Value, session_id: &str) -> Value {
+async fn cdp(
+    ctx: &mut CdpContext,
+    id: u64,
+    method: &str,
+    params: Value,
+    session_id: &str,
+) -> Value {
     let resp = dispatch(
         &CdpRequest {
             id,
@@ -60,12 +66,23 @@ async fn cdp(ctx: &mut CdpContext, id: u64, method: &str, params: Value, session
         ctx,
     )
     .await;
-    assert!(resp.error.is_none(), "CDP {method} failed: {:?}", resp.error);
+    assert!(
+        resp.error.is_none(),
+        "CDP {method} failed: {:?}",
+        resp.error
+    );
     resp.result.unwrap_or_else(|| json!({}))
 }
 
 async fn navigate(ctx: &mut CdpContext, url: &str, session_id: &str) {
-    cdp(ctx, 1, "Page.navigate", json!({"url": url, "waitUntil": "load"}), session_id).await;
+    cdp(
+        ctx,
+        1,
+        "Page.navigate",
+        json!({"url": url, "waitUntil": "load"}),
+        session_id,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -120,7 +137,10 @@ async fn request_submit_is_vetoed_by_prevent_default_listener() {
         session_id,
     )
     .await;
-    assert_eq!(has["result"]["value"], "function", "requestSubmit must exist");
+    assert_eq!(
+        has["result"]["value"], "function",
+        "requestSubmit must exist"
+    );
 
     cdp(
         &mut ctx,
@@ -248,14 +268,32 @@ async fn request_submit_validates_its_submitter_argument() {
     .await;
 
     let val = serde_json::from_str::<Value>(v["result"]["value"].as_str().unwrap()).unwrap();
-    assert_eq!(val["div"], "TypeError", "a non-button submitter must throw TypeError");
-    assert_eq!(val["plain"], "TypeError", "type=button is not a submit button");
-    assert_eq!(val["text"], "TypeError", "input type=text is not a submit button");
+    assert_eq!(
+        val["div"], "TypeError",
+        "a non-button submitter must throw TypeError"
+    );
+    assert_eq!(
+        val["plain"], "TypeError",
+        "type=button is not a submit button"
+    );
+    assert_eq!(
+        val["text"], "TypeError",
+        "input type=text is not a submit button"
+    );
     assert_eq!(
         val["outside"], "DOMException:NotFoundError",
         "a submit button not owned by the form must throw NotFoundError"
     );
-    assert_eq!(val["valid"], "no-throw", "the form's own submit button must be accepted");
-    assert_eq!(val["noArg"], "no-throw", "requestSubmit() with no submitter is valid");
-    assert_eq!(val["nullArg"], "no-throw", "requestSubmit(null) means submit from the form itself");
+    assert_eq!(
+        val["valid"], "no-throw",
+        "the form's own submit button must be accepted"
+    );
+    assert_eq!(
+        val["noArg"], "no-throw",
+        "requestSubmit() with no submitter is valid"
+    );
+    assert_eq!(
+        val["nullArg"], "no-throw",
+        "requestSubmit(null) means submit from the form itself"
+    );
 }

@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use serde_json::json;
 use tinybrowser_core::{BrowserContext, Page};
 use tinybrowser_js::ops::InterceptedRequest;
-use serde_json::json;
 
 use crate::domains;
 use crate::domains::fetch::FetchInterceptState;
@@ -179,6 +179,10 @@ impl CdpContext {
         let page_id = format!("page-{}", self.page_counter);
         let mut page = Page::new(page_id.clone(), context);
         page.navigate_blank();
+        // Attach the QuickJS realm so an about:blank page is immediately
+        // scriptable — mirrors the PageActor's `blank_page` helper and keeps
+        // device-metric / viewport JS globals in sync from creation.
+        page.init_js();
         self.pages.push(page);
         self.current_loader_ids
             .insert(page_id.clone(), format!("loader-blank-{page_id}"));
@@ -256,20 +260,8 @@ impl CdpContext {
             .and_then(|sid| self.sessions.get(sid))
             .cloned()?;
 
-        let target_has_js = self.pages.iter().any(|p| p.id == page_id && p.has_js());
-
-        if !target_has_js {
-            for page in &mut self.pages {
-                if page.id != page_id && page.has_js() {
-                    page.suspend_js();
-                    break;
-                }
-            }
-            if let Some(target) = self.pages.iter_mut().find(|p| p.id == page_id) {
-                target.resume_js();
-            }
-        }
-
+        // QuickJS allows one runtime per page on the same thread. Do not
+        // destroy sibling heaps on tab switch.
         self.get_page_mut(&page_id)
     }
 }
@@ -279,8 +271,7 @@ impl CdpContext {
 /// Methods listed here were audited to confirm they do not transitively
 /// call into a `JsRuntime`. They either don't touch any `Page` at all, or
 /// use only the immutable `get_session_page` accessor and Rust-side field
-/// reads. `get_session_page_mut` triggers `suspend_js`/`resume_js` and
-/// must stay behind the lock.
+/// reads.
 fn is_js_free_method(method: &str) -> bool {
     matches!(
         method,
@@ -400,7 +391,10 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
         ctx.get_session_page(&req.session_id)
             .and_then(|p| p.isolate_handle())
             .map(|h| {
-                tinybrowser_js::cdp_watchdog::arm(h, std::time::Duration::from_millis(cmd_budget_ms))
+                tinybrowser_js::cdp_watchdog::arm(
+                    h,
+                    std::time::Duration::from_millis(cmd_budget_ms),
+                )
             })
     };
 
