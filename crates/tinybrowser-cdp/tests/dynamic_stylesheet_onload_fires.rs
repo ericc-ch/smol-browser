@@ -114,8 +114,7 @@ async fn dynamic_stylesheet_fires_load() {
     let value = v["result"]["value"].as_str().unwrap_or("");
     assert_eq!(
         value, "ok",
-        "dynamic <link rel=stylesheet> must fire load (got {:?})",
-        value
+        "dynamic <link rel=stylesheet> must fire load (got {value:?})"
     );
 
     let text = cdp(

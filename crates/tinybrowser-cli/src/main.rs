@@ -182,7 +182,7 @@ fn select_log_filter(verbose: bool, quiet: bool) -> &'static str {
 fn is_quiet_command(cmd: &Option<Command>) -> bool {
     matches!(
         cmd,
-        Some(Command::Fetch { quiet: true, .. }) | Some(Command::Serve { quiet: true, .. })
+        Some(Command::Fetch { quiet: true, .. } | Command::Serve { quiet: true, .. })
     )
 }
 
@@ -190,30 +190,38 @@ fn merge_proxy(global_proxy: Option<String>, command_proxy: Option<String>) -> O
     command_proxy.or(global_proxy)
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
-
+#[expect(
+    unsafe_code,
+    reason = "Initialize process TZ environment variable at startup before threads spawn"
+)]
+fn init_process_timezone() {
     // Pin the process timezone before JS Date/Intl reads it. QuickJS sources
     // the zone for both Date (getTimezoneOffset, toString) and Intl.DateTimeFormat
     // from TZ; left unset it defaults to UTC for Date while the page layer
     // advertised a different zone, a cross-surface mismatch fingerprinting
     // scripts flag. Default to Europe/Berlin; set TINYBROWSER_TIMEZONE to match
     // the exit IP's region. An existing TZ from the host is respected.
-    // SAFETY: runs before any JS runtime or worker thread starts, so the env is
-    // effectively single threaded here.
     if let Some(tz) = std::env::var("TINYBROWSER_TIMEZONE")
         .ok()
         .filter(|s| !s.trim().is_empty())
     {
+        // SAFETY: runs synchronously at program entry before any worker thread or runtime starts.
         unsafe {
             std::env::set_var("TZ", tz);
         }
     } else if std::env::var_os("TZ").is_none() {
+        // SAFETY: runs synchronously at program entry before any worker thread or runtime starts.
         unsafe {
             std::env::set_var("TZ", "Europe/Berlin");
         }
     }
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    init_process_timezone();
 
     let quiet = is_quiet_command(&args.command);
     let filter = select_log_filter(args.verbose, quiet);
@@ -224,19 +232,6 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_writer(std::io::stderr)
         .init();
-
-    // The js-side fetch path (op_fetch_url) reads TINYBROWSER_ALLOW_PRIVATE_NETWORK
-    // directly for its SSRF gate. Mirror the CLI flag into the env var so
-    // iframe loads and JS fetch() see the same policy the http_client layer
-    // already uses (issue #33).
-    if args.allow_private_network {
-        // SAFETY: set_var is unsafe in newer rustc; this runs before any
-        // spawned thread inspects the env, so it's effectively single
-        // threaded at this point.
-        unsafe {
-            std::env::set_var("TINYBROWSER_ALLOW_PRIVATE_NETWORK", "1");
-        }
-    }
 
     let global_proxy = args.proxy.clone();
 
@@ -405,7 +400,7 @@ async fn run_fetch(
     let user_agent = user_agent.clone();
 
     if !quiet {
-        eprintln!("Fetching {}...", url_str);
+        eprintln!("Fetching {url_str}...");
     }
 
     {
@@ -446,13 +441,12 @@ async fn run_fetch(
             )
             .await
             {
-                Ok(result) => result
-                    .map_err(|e| anyhow::anyhow!("Failed to navigate to {}: {}", url_owned, e))?,
-                Err(_) => anyhow::bail!(
-                    "Timed out navigating to {} after {}s",
-                    url_owned,
-                    timeout_secs
-                ),
+                Ok(result) => {
+                    result.map_err(|e| anyhow::anyhow!("Failed to navigate to {url_owned}: {e}"))?
+                }
+                Err(_) => {
+                    anyhow::bail!("Timed out navigating to {url_owned} after {timeout_secs}s")
+                }
             }
 
             if !quiet {
@@ -460,7 +454,7 @@ async fn run_fetch(
                     .with_page(|p| (p.url_string(), p.title.clone()))
                     .await
                     .unwrap_or_default();
-                eprintln!("Page loaded: {} - \"{}\"", url, title);
+                eprintln!("Page loaded: {url} - \"{title}\"");
             }
 
             let wait_ms = wait_secs.saturating_mul(1000);
@@ -500,7 +494,7 @@ async fn run_fetch(
             if let Some(ref sel) = selector {
                 let found = wait_for_selector_actor(&handle, sel, wait_secs).await;
                 if !found {
-                    eprintln!("Warning: selector '{}' not found after {}s", sel, wait_secs);
+                    eprintln!("Warning: selector '{sel}' not found after {wait_secs}s");
                 }
             }
 
@@ -532,8 +526,8 @@ async fn fetch_original_response(
     user_agent: Option<String>,
     timeout_secs: u64,
 ) -> anyhow::Result<tinybrowser_net::Response> {
-    let url = url::Url::parse(url_str)
-        .map_err(|e| anyhow::anyhow!("Invalid URL '{}': {}", url_str, e))?;
+    let url =
+        url::Url::parse(url_str).map_err(|e| anyhow::anyhow!("Invalid URL '{url_str}': {e}"))?;
 
     let client = tinybrowser_net::HttpClient::with_options(
         Arc::new(tinybrowser_net::CookieJar::new()),
@@ -545,8 +539,8 @@ async fn fetch_original_response(
 
     match timeout(Duration::from_secs(timeout_secs), client.fetch(&url)).await {
         Ok(Ok(resp)) => Ok(resp),
-        Ok(Err(e)) => anyhow::bail!("Failed to fetch {}: {}", url_str, e),
-        Err(_) => anyhow::bail!("Timed out fetching {} after {}s", url_str, timeout_secs),
+        Ok(Err(e)) => anyhow::bail!("Failed to fetch {url_str}: {e}"),
+        Err(_) => anyhow::bail!("Timed out fetching {url_str} after {timeout_secs}s"),
     }
 }
 
@@ -572,7 +566,7 @@ fn read_urls_from_file(path: &std::path::Path) -> anyhow::Result<Vec<String>> {
         let mut s = String::new();
         std::io::stdin()
             .read_to_string(&mut s)
-            .map_err(|e| anyhow::anyhow!("Failed to read URLs from stdin: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to read URLs from stdin: {e}"))?;
         s
     } else {
         std::fs::read_to_string(path)
@@ -607,8 +601,7 @@ async fn run_batch_fetch(
 
     if !quiet {
         eprintln!(
-            "Fetching {} URLs with {} concurrent request(s) (per-fetch timeout: {}s)...",
-            total, concurrency, timeout_secs
+            "Fetching {total} URLs with {concurrency} concurrent request(s) (per-fetch timeout: {timeout_secs}s)..."
         );
     }
 
@@ -683,11 +676,11 @@ async fn run_batch_fetch(
         stdout
             .write_all(out.as_bytes())
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to write to stdout: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to write to stdout: {e}"))?;
         stdout
             .flush()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to flush stdout: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to flush stdout: {e}"))?;
     }
 
     if !quiet {
@@ -712,7 +705,7 @@ async fn write_or_print(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", path.display(), e))?;
     } else {
-        println!("{}", content);
+        println!("{content}");
     }
     Ok(())
 }
@@ -732,11 +725,11 @@ async fn write_or_print_bytes(
         stdout
             .write_all(bytes)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to write to stdout: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to write to stdout: {e}"))?;
         stdout
             .flush()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to flush stdout: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to flush stdout: {e}"))?;
     }
     Ok(())
 }
@@ -767,7 +760,7 @@ async fn wait_for_selector_actor(
         let spent = slice_started.elapsed();
         let cadence = tokio::time::Duration::from_millis(100);
         if spent < cadence {
-            tokio::time::sleep(cadence - spent).await;
+            tokio::time::sleep(cadence.checked_sub(spent).unwrap()).await;
         }
     }
 }
@@ -781,7 +774,7 @@ fn dump_html(page: &Page) -> String {
     page.with_dom(|dom| {
         if let Ok(Some(html_node)) = dom.query_selector("html") {
             let html = dom.outer_html(html_node);
-            format!("<!DOCTYPE html>\n{}", html)
+            format!("<!DOCTYPE html>\n{html}")
         } else {
             let doc = dom.document();
             dom.inner_html(doc)
@@ -953,7 +946,7 @@ fn dump_links(page: &Page) -> String {
                     if text.is_empty() {
                         rendered.push(full_url);
                     } else {
-                        rendered.push(format!("{}\t{}", full_url, text));
+                        rendered.push(format!("{full_url}\t{text}"));
                     }
                 }
             }
@@ -1064,7 +1057,7 @@ fn dump_assets(page: &Page) -> String {
     let mut lines: Vec<String> = dom_ndjson
         .lines()
         .filter(|l| !l.is_empty())
-        .map(|l| l.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
 
     // URLs already listed from static DOM attributes, so a resource the script
@@ -1072,7 +1065,11 @@ fn dump_assets(page: &Page) -> String {
     let mut seen: std::collections::HashSet<String> = lines
         .iter()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .filter_map(|v| v.get("url").and_then(|u| u.as_str()).map(|s| s.to_string()))
+        .filter_map(|v| {
+            v.get("url")
+                .and_then(|u| u.as_str())
+                .map(std::string::ToString::to_string)
+        })
         .collect();
 
     // Resources pulled in by JS fetch()/XHR, which leave no static DOM tag
@@ -1182,7 +1179,7 @@ mod tests {
         )
         .unwrap();
         let urls = read_urls_from_file(&path).unwrap();
-        std::fs::remove_file(&path).ok();
+        let _ = std::fs::remove_file(&path);
         assert_eq!(
             urls,
             vec![
@@ -1425,13 +1422,13 @@ mod tests {
     #[test]
     fn skips_nav_header_footer_aside() {
         let text = body_text(
-            r#"<html><body>
+            r"<html><body>
                 <header>SITE HEADER</header>
                 <nav>NAV LINKS</nav>
                 <aside>SIDEBAR</aside>
                 <main><p>Article body.</p></main>
                 <footer>FOOTER</footer>
-            </body></html>"#,
+            </body></html>",
         );
         assert!(text.contains("Article body."), "main content kept: {text}");
         for boilerplate in ["SITE HEADER", "NAV LINKS", "SIDEBAR", "FOOTER"] {

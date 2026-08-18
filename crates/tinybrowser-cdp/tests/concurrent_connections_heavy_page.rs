@@ -111,7 +111,7 @@ async fn serve_heavy_fixture(listener: TcpListener, served: Arc<AtomicUsize>) {
 /// navigate, then repeatedly `Runtime.evaluate` an awaited promise. Returns Err
 /// on protocol failure; a V8 abort would take the whole process down instead.
 async fn one_client(ws_port: u16, page_url: String, id_base: u64) -> Result<(), String> {
-    let url = format!("ws://127.0.0.1:{}/devtools/browser", ws_port);
+    let url = format!("ws://127.0.0.1:{ws_port}/devtools/browser");
     let (mut ws, _) = connect_async(&url).await.map_err(|e| e.to_string())?;
 
     let create = json!({
@@ -169,7 +169,7 @@ async fn one_client(ws_port: u16, page_url: String, id_base: u64) -> Result<(), 
         let d = tokio::time::Instant::now() + Duration::from_secs(15);
         loop {
             if tokio::time::Instant::now() >= d {
-                return Err(format!("timeout waiting for evaluate {}", k));
+                return Err(format!("timeout waiting for evaluate {k}"));
             }
             let remaining = d - tokio::time::Instant::now();
             let msg = tokio::time::timeout(remaining, ws.next())
@@ -182,7 +182,7 @@ async fn one_client(ws_port: u16, page_url: String, id_base: u64) -> Result<(), 
                 _ => continue,
             };
             let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-            if v.get("id").and_then(|x| x.as_u64()) == Some(id_base + 100 + k) {
+            if v.get("id").and_then(serde_json::Value::as_u64) == Some(id_base + 100 + k) {
                 break;
             }
         }
@@ -198,7 +198,7 @@ async fn concurrent_connections_heavy_page_do_not_abort_js() {
     // Bind the fixture listener up front so we can hand its port to the clients.
     let fixture = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let fixture_port = fixture.local_addr().unwrap().port();
-    let page_url = format!("http://127.0.0.1:{}/", fixture_port);
+    let page_url = format!("http://127.0.0.1:{fixture_port}/");
 
     let local = tokio::task::LocalSet::new();
     local
@@ -236,14 +236,13 @@ async fn concurrent_connections_heavy_page_do_not_abort_js() {
             for (i, h) in handles.into_iter().enumerate() {
                 match h.await {
                     Ok(Ok(())) => ok += 1,
-                    Ok(Err(e)) => errors.push(format!("client {}: {}", i, e)),
-                    Err(e) => errors.push(format!("client {} join: {}", i, e)),
+                    Ok(Err(e)) => errors.push(format!("client {i}: {e}")),
+                    Err(e) => errors.push(format!("client {i} join: {e}")),
                 }
             }
             assert!(
                 errors.is_empty(),
-                "clients failed (a V8 abort would instead kill the process): {:#?}",
-                errors
+                "clients failed (a V8 abort would instead kill the process): {errors:#?}"
             );
             assert_eq!(ok as u64, CLIENTS, "every concurrent client must complete");
 

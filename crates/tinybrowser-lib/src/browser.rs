@@ -50,7 +50,7 @@ impl Browser {
     /// page's QuickJS runtime stays on this task.
     pub fn spawn_page_actor(&self) -> PageActorHandle {
         let id = NEXT_PAGE_ID.fetch_add(1, Ordering::Relaxed);
-        let page = tinybrowser_core::Page::new(format!("page-{}", id), self.context.clone());
+        let page = tinybrowser_core::Page::new(format!("page-{id}"), self.context.clone());
         let (handle, rx) = page_actor_channel();
         tokio::task::spawn_local(run_page_actor(page, rx));
         handle
@@ -58,7 +58,7 @@ impl Browser {
 
     pub async fn new_page(&self) -> Result<Page, Error> {
         let id = NEXT_PAGE_ID.fetch_add(1, Ordering::Relaxed);
-        let page = tinybrowser_core::Page::new(format!("page-{}", id), self.context.clone());
+        let page = tinybrowser_core::Page::new(format!("page-{id}"), self.context.clone());
         Ok(Page { inner: page })
     }
 

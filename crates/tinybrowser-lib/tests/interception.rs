@@ -40,7 +40,7 @@ fn spawn_echo_server() -> String {
             let _ = s.shutdown(std::net::Shutdown::Both);
         }
     });
-    format!("http://{}", addr)
+    format!("http://{addr}")
 }
 
 #[tokio::test]
@@ -103,8 +103,7 @@ async fn page_intercepts_and_observes_js_fetch() {
     let body = captured.lock().unwrap().clone();
     assert!(
         body.contains("hello"),
-        "on_response did not capture the fetch response body: {:?}",
-        body
+        "on_response did not capture the fetch response body: {body:?}"
     );
 }
 
@@ -159,7 +158,7 @@ async fn callbacks_do_not_bleed_across_pages() {
 async fn page_rewrites_request_url_via_interception() {
     std::env::set_var("TINYBROWSER_ALLOW_PRIVATE_NETWORK", "1");
     let base = spawn_echo_server();
-    let modified = format!("{}/modified", base);
+    let modified = format!("{base}/modified");
 
     let browser = Browser::new().unwrap();
     let mut page = browser.new_page().await.unwrap();
@@ -208,8 +207,7 @@ async fn page_rewrites_request_url_via_interception() {
     let body = captured.lock().unwrap().clone();
     assert!(
         body.contains("REWRITTEN"),
-        "interception Continue url-rewrite did not take effect; captured: {:?}",
-        body
+        "interception Continue url-rewrite did not take effect; captured: {body:?}"
     );
 }
 

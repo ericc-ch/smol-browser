@@ -52,7 +52,7 @@ async fn http_control_plane_unblocked_during_long_js() {
 
             // Connect via WebSocket, create a target, then send a
             // long-running JS evaluation on that target's session.
-            let url = format!("ws://127.0.0.1:{}/devtools/browser", port);
+            let url = format!("ws://127.0.0.1:{port}/devtools/browser");
             let (mut ws, _) = connect_async(&url).await.unwrap();
 
             let create = json!({
@@ -73,15 +73,14 @@ async fn http_control_plane_unblocked_during_long_js() {
                         .get("params")
                         .and_then(|p| p.get("sessionId"))
                         .and_then(|s| s.as_str())
-                        .map(|s| s.to_string());
+                        .map(std::string::ToString::to_string);
                 }
             }
             let sid = session_id.unwrap();
 
             // Fire a synchronous JS loop that holds V8 for JS_DURATION_MS.
             let code = format!(
-                "var s=Date.now();while(Date.now()-s<{}){{}}'done'",
-                JS_DURATION_MS
+                "var s=Date.now();while(Date.now()-s<{JS_DURATION_MS}){{}}'done'"
             );
             let eval = json!({
                 "id": 2,
@@ -105,14 +104,13 @@ async fn http_control_plane_unblocked_during_long_js() {
             let handle = std::thread::spawn(move || {
                 let start = Instant::now();
                 let mut stream = std::net::TcpStream::connect_timeout(
-                    &format!("127.0.0.1:{}", port_clone).parse().unwrap(),
+                    &format!("127.0.0.1:{port_clone}").parse().unwrap(),
                     HTTP_TIMEOUT,
                 )?;
                 stream.set_read_timeout(Some(HTTP_TIMEOUT))?;
 
                 let request = format!(
-                    "GET /json/version HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n",
-                    port_clone
+                    "GET /json/version HTTP/1.1\r\nHost: 127.0.0.1:{port_clone}\r\nConnection: close\r\n\r\n"
                 );
                 stream.write_all(request.as_bytes())?;
 
@@ -132,8 +130,7 @@ async fn http_control_plane_unblocked_during_long_js() {
             );
             assert!(
                 elapsed < Duration::from_secs(2),
-                "/json/version response too slow during JS eval: {:?}",
-                elapsed
+                "/json/version response too slow during JS eval: {elapsed:?}"
             );
         })
         .await;

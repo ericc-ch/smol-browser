@@ -30,7 +30,7 @@ fn current_shared() -> Result<SharedState, String> {
     })
 }
 
-fn wrap<'js>(ctx: Ctx<'js>, state: SharedState, nid: NodeId) -> Result<Class<'js, JsNode>, String> {
+fn wrap(ctx: Ctx<'_>, state: SharedState, nid: NodeId) -> Result<Class<'_, JsNode>, String> {
     Class::instance(
         ctx,
         JsNode {
@@ -325,8 +325,7 @@ impl JsNode {
     pub fn matches(&self, selector: String) -> bool {
         self.with_dom(|dom| {
             dom.compile_rule_selector(&selector)
-                .map(|compiled| dom.element_matches(self.id(), &compiled))
-                .unwrap_or(false)
+                .is_some_and(|compiled| dom.element_matches(self.id(), &compiled))
         })
         .unwrap_or(false)
     }
@@ -631,7 +630,7 @@ impl JsCSSStyleDeclaration {
     }
 }
 
-pub fn register_dom_classes<'js>(ctx: &Ctx<'js>, state: SharedState) -> Result<(), String> {
+pub fn register_dom_classes(ctx: &Ctx<'_>, state: SharedState) -> Result<(), String> {
     let _ = state;
     Class::<JsNode>::define(&ctx.globals()).map_err(|e| e.to_string())?;
     Class::<JsEvent>::define(&ctx.globals()).map_err(|e| e.to_string())?;
@@ -639,7 +638,7 @@ pub fn register_dom_classes<'js>(ctx: &Ctx<'js>, state: SharedState) -> Result<(
     Class::<JsDOMTokenList>::define(&ctx.globals()).map_err(|e| e.to_string())?;
     Class::<JsCSSStyleDeclaration>::define(&ctx.globals()).map_err(|e| e.to_string())?;
     ctx.eval::<(), _>(
-        r#"
+        r"
         Node.ELEMENT_NODE = 1;
         Node.ATTRIBUTE_NODE = 2;
         Node.TEXT_NODE = 3;
@@ -658,17 +657,17 @@ pub fn register_dom_classes<'js>(ctx: &Ctx<'js>, state: SharedState) -> Result<(
         Node.DOCUMENT_POSITION_CONTAINS = 8;
         Node.DOCUMENT_POSITION_CONTAINED_BY = 16;
         Node.DOCUMENT_POSITION_IMPLEMENTATION_SPECIFIC = 32;
-        "#,
+        ",
     )
     .map_err(|e| e.to_string())?;
     Ok(())
 }
 
-pub fn wrap_node<'js>(
-    ctx: Ctx<'js>,
+pub fn wrap_node(
+    ctx: Ctx<'_>,
     state: SharedState,
     nid: NodeId,
-) -> Result<Class<'js, JsNode>, String> {
+) -> Result<Class<'_, JsNode>, String> {
     wrap(ctx, state, nid)
 }
 
@@ -739,7 +738,7 @@ mod tests {
                 ctx.eval::<(), _>(r#"el.setAttribute("id", "y")"#)
                     .catch(&ctx)
                     .unwrap();
-            })
+            });
         });
 
         let id = state
@@ -764,10 +763,10 @@ mod tests {
 
         with_tree(tree, |ctx, state, parent, _child| {
             register_dom_classes(&ctx, state.clone()).unwrap();
-            let wrapped = wrap_node(ctx.clone(), state.clone(), parent).unwrap();
+            let wrapped = wrap_node(ctx.clone(), state, parent).unwrap();
             ctx.globals().set("el", wrapped).unwrap();
             let found: bool = ctx
-                .eval(r#"el.querySelector('#x') !== null"#)
+                .eval(r"el.querySelector('#x') !== null")
                 .catch(&ctx)
                 .unwrap();
             assert!(found);

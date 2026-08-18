@@ -1,0 +1,10 @@
+# Clippy config for the workspace. Only restriction-lint exemptions live here
+# (see `[workspace.lints.clippy]` in the root Cargo.toml for the lint levels).
+#
+# Test code legitimately unwraps, indexes, and panics to assert behavior; the
+# "don't panic" restriction set stays on for `src/` but is lifted in `#[cfg(test)]`.
+allow-dbg-in-tests = true
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-panic-in-tests = true
+allow-unwrap-in-tests = true

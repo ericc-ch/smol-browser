@@ -121,7 +121,7 @@ impl CookieJar {
             if exp == 0 {
                 let mut cookies = self.cookies.write().unwrap();
                 if let Some(domain_cookies) = cookies.get_mut(&domain) {
-                    domain_cookies.remove(&(name.clone(), path.clone()));
+                    domain_cookies.remove(&(name, path));
                 }
                 return;
             }
@@ -333,11 +333,8 @@ impl CookieJar {
                         }
                         _ => {}
                     }
-                } else {
-                    match attr.to_lowercase().as_str() {
-                        "secure" => secure = true,
-                        _ => {}
-                    }
+                } else if attr.to_lowercase().as_str() == "secure" {
+                    secure = true
                 }
             }
         }
@@ -352,7 +349,7 @@ impl CookieJar {
             if exp == 0 {
                 let mut cookies = self.cookies.write().unwrap();
                 if let Some(domain_cookies) = cookies.get_mut(&domain) {
-                    domain_cookies.remove(&(name.clone(), path.clone()));
+                    domain_cookies.remove(&(name, path));
                 }
                 return;
             }
@@ -547,9 +544,9 @@ fn parse_http_date(s: &str) -> Result<u64, ()> {
         };
     }
     let days_in_month = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let is_leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
     for m in 1..month {
-        days_total += days_in_month[m as usize] + if m == 2 && is_leap { 1 } else { 0 };
+        days_total += days_in_month[m as usize] + u64::from(m == 2 && is_leap);
     }
     days_total += day - 1;
 
@@ -985,8 +982,7 @@ mod tests {
         let header = jar.get_cookie_header(&url);
         assert!(
             header.contains("session=abc"),
-            "Cookie header was: '{}'",
-            header
+            "Cookie header was: '{header}'"
         );
     }
 
@@ -1009,11 +1005,10 @@ mod tests {
 
         let url = Url::parse("https://www.xiaohongshu.com/explore").unwrap();
         let header = jar.get_cookie_header(&url);
-        assert!(header.contains("a1=testval"), "Missing a1 in: '{}'", header);
+        assert!(header.contains("a1=testval"), "Missing a1 in: '{header}'");
         assert!(
             header.contains("web_session=sess123"),
-            "Missing web_session in: '{}'",
-            header
+            "Missing web_session in: '{header}'"
         );
     }
 

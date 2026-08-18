@@ -98,6 +98,6 @@ fn env_enabled(key: &str) -> bool {
             .map(str::trim)
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("on")
+        Some("1" | "true" | "yes" | "on")
     )
 }

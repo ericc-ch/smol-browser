@@ -42,7 +42,7 @@ async fn pick_port() -> u16 {
 ///   4. Loop: respond to Fetch.requestPaused with Fetch.continueRequest
 ///      until Page.navigate's response arrives.
 async fn one_client_with_fetch(port: u16, id_base: u64, target_url: &str) -> Result<(), String> {
-    let url = format!("ws://127.0.0.1:{}/devtools/browser", port);
+    let url = format!("ws://127.0.0.1:{port}/devtools/browser");
     let (mut ws, _) = connect_async(&url).await.map_err(|e| e.to_string())?;
 
     // 1. Target.createTarget
@@ -107,7 +107,7 @@ async fn one_client_with_fetch(port: u16, id_base: u64, target_url: &str) -> Res
             _ => continue,
         };
         let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-        if v.get("id").and_then(|x| x.as_u64()) == Some(id_base + 1) {
+        if v.get("id").and_then(serde_json::Value::as_u64) == Some(id_base + 1) {
             break;
         }
     }
@@ -124,11 +124,11 @@ async fn one_client_with_fetch(port: u16, id_base: u64, target_url: &str) -> Res
         .map_err(|e| e.to_string())?;
 
     // 4. Drain events. Auto-respond to Fetch.requestPaused with continueRequest.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
     let mut auto_id = id_base + 1000;
     loop {
         if tokio::time::Instant::now() >= deadline {
-            return Err(format!("client {} timeout waiting for navigate", id_base));
+            return Err(format!("client {id_base} timeout waiting for navigate"));
         }
         let remaining = deadline - tokio::time::Instant::now();
         let msg = tokio::time::timeout(remaining, ws.next())
@@ -146,13 +146,13 @@ async fn one_client_with_fetch(port: u16, id_base: u64, target_url: &str) -> Res
         };
 
         // navigate response?
-        if v.get("id").and_then(|x| x.as_u64()) == Some(id_base + 2) {
+        if v.get("id").and_then(serde_json::Value::as_u64) == Some(id_base + 2) {
             if let Some(err) = v
                 .get("result")
                 .and_then(|r| r.get("errorText"))
                 .and_then(|e| e.as_str())
             {
-                return Err(format!("navigation failed: {}", err));
+                return Err(format!("navigation failed: {err}"));
             }
             return Ok(());
         }
@@ -213,7 +213,7 @@ async fn serve_fixture(listener: TcpListener) {
 async fn fetch_intercept_concurrency_5_does_not_abort_js() {
     let fixture = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let fixture_port = fixture.local_addr().unwrap().port();
-    let target_url = format!("http://127.0.0.1:{}/", fixture_port);
+    let target_url = format!("http://127.0.0.1:{fixture_port}/");
 
     let port = pick_port().await;
     let local = tokio::task::LocalSet::new();
@@ -230,7 +230,7 @@ async fn fetch_intercept_concurrency_5_does_not_abort_js() {
             let mut handles = Vec::new();
             for i in 0..5u64 {
                 let id_base = (i + 1) * 1000;
-                let url = target_url.to_string();
+                let url = target_url.clone();
                 handles.push(tokio::task::spawn_local(async move {
                     one_client_with_fetch(port, id_base, &url).await
                 }));
@@ -241,13 +241,11 @@ async fn fetch_intercept_concurrency_5_does_not_abort_js() {
             for (i, h) in handles.into_iter().enumerate() {
                 match h.await {
                     Ok(Ok(())) => ok += 1,
-                    Ok(Err(e)) => errors.push(format!("client {}: {}", i, e)),
-                    Err(e) => errors.push(format!("client {} join: {}", i, e)),
+                    Ok(Err(e)) => errors.push(format!("client {i}: {e}")),
+                    Err(e) => errors.push(format!("client {i} join: {e}")),
                 }
             }
-            if !errors.is_empty() {
-                panic!("errors: {:#?}", errors);
-            }
+            assert!(errors.is_empty(), "errors: {errors:#?}");
             assert_eq!(ok, 5, "all 5 concurrent clients must complete navigate");
         })
         .await;

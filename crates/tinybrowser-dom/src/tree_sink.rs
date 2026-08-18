@@ -75,25 +75,21 @@ fn is_valid_shadow_host(tree: &DomTree, id: NodeId) -> bool {
     )
 }
 
-pub struct HtmlElemName<'a> {
-    _ref: Ref<'a, ()>,
-    name: *const QualName,
-}
+pub struct HtmlElemName<'a>(Ref<'a, QualName>);
 
-impl<'a> fmt::Debug for HtmlElemName<'a> {
+impl fmt::Debug for HtmlElemName<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = unsafe { &*self.name };
-        write!(f, "{:?}", name)
+        write!(f, "{:?}", *self.0)
     }
 }
 
-impl<'a> ElemName for HtmlElemName<'a> {
+impl ElemName for HtmlElemName<'_> {
     fn ns(&self) -> &Namespace {
-        unsafe { &(*self.name).ns }
+        &self.0.ns
     }
 
     fn local_name(&self) -> &LocalName {
-        unsafe { &(*self.name).local }
+        &self.0.local
     }
 }
 
@@ -113,19 +109,16 @@ impl TreeSink for DomTree {
     }
 
     fn elem_name<'a>(&'a self, target: &'a NodeId) -> HtmlElemName<'a> {
-        let borrow = self.borrow_inner();
-        let node = borrow
-            .get(*target)
-            .expect("elem_name called on invalid node");
-        let name_ptr: *const QualName = match &node.data {
-            NodeData::Element { name, .. } => name as *const QualName,
-            _ => panic!("elem_name called on non-element"),
-        };
-        let ref_guard = Ref::map(borrow, |_| &());
-        HtmlElemName {
-            _ref: ref_guard,
-            name: name_ptr,
-        }
+        let guard = Ref::map(self.borrow_inner(), |inner| {
+            let node = inner
+                .get(*target)
+                .expect("elem_name called on invalid node");
+            match &node.data {
+                NodeData::Element { name, .. } => name,
+                _ => panic!("elem_name called on non-element"),
+            }
+        });
+        HtmlElemName(guard)
     }
 
     fn create_element(
@@ -143,7 +136,7 @@ impl TreeSink for DomTree {
             .collect();
 
         let id = self.new_node(NodeData::Element {
-            name: name.clone(),
+            name,
             attrs: converted_attrs,
             template_contents: None,
             mathml_annotation_xml_integration_point: flags.mathml_annotation_xml_integration_point,

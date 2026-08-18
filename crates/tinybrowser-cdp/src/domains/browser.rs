@@ -16,7 +16,7 @@ pub async fn handle(method: &str, _params: &Value) -> Result<Value, String> {
         )),
         "getWindowBounds" => Err(crate::util::cdp_unimplemented("Browser.getWindowBounds")),
         "setWindowBounds" => Err(crate::util::cdp_unimplemented("Browser.setWindowBounds")),
-        _ => Err(format!("Unknown Browser method: {}", method)),
+        _ => Err(format!("Unknown Browser method: {method}")),
     }
 }
 

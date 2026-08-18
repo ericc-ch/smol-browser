@@ -929,10 +929,7 @@ impl DomTree {
         while let Some(child_id) = first {
             children_to_push.push(child_id);
             if children_to_push.len() > inner.nodes.len() {
-                eprintln!(
-                    "tinybrowser: sibling-chain cap hit at node {} - cycle",
-                    node_id
-                );
+                eprintln!("tinybrowser: sibling-chain cap hit at node {node_id} - cycle");
                 break;
             }
             first = inner.get(child_id).and_then(|n| n.next_sibling);
@@ -962,10 +959,7 @@ impl DomTree {
             while let Some(child_id) = child {
                 children_to_push.push(child_id);
                 if children_to_push.len() > inner.nodes.len() {
-                    eprintln!(
-                        "tinybrowser: sibling-chain cap hit at node {} - cycle",
-                        current
-                    );
+                    eprintln!("tinybrowser: sibling-chain cap hit at node {current} - cycle");
                     break;
                 }
                 child = inner.get(child_id).and_then(|n| n.next_sibling);
@@ -1268,8 +1262,7 @@ impl DomTree {
                 .get(parent_id)
                 .and_then(|n| n.last_child)
                 .and_then(|lc| inner.get(lc))
-                .map(|n| n.is_text())
-                .unwrap_or(false)
+                .is_some_and(Node::is_text)
         };
 
         if last_child_is_text {
@@ -1313,8 +1306,7 @@ impl DomTree {
         for child in self.children(doc) {
             if let Some(n) = self.get_node(child) {
                 if n.as_element()
-                    .map(|name| name.local.as_ref() == "html")
-                    .unwrap_or(false)
+                    .is_some_and(|name| name.local.as_ref() == "html")
                 {
                     return child;
                 }
@@ -1674,11 +1666,11 @@ mod tests {
         let root = tree.attach_shadow_root(host, ShadowRootMode::Open).unwrap();
         let first_named = element(&tree, "slot");
         tree.with_node_mut(first_named, |node| {
-            node.set_attribute("name", "title".into())
+            node.set_attribute("name", "title".into());
         });
         let duplicate_named = element(&tree, "slot");
         tree.with_node_mut(duplicate_named, |node| {
-            node.set_attribute("name", "title".into())
+            node.set_attribute("name", "title".into());
         });
         let fallback = element(&tree, "b");
         tree.append_child(duplicate_named, fallback);

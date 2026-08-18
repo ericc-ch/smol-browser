@@ -90,15 +90,11 @@ fn truncate_on_char_boundary(s: &str, max: usize) -> &str {
 /// violation because the existing realm survives the navigation and
 /// can read the new document's body.
 fn cross_scheme_to_file(from: &str, to: &str) -> bool {
-    let to_is_file = Url::parse(to)
-        .map(|u| u.scheme().eq_ignore_ascii_case("file"))
-        .unwrap_or(false);
+    let to_is_file = Url::parse(to).is_ok_and(|u| u.scheme().eq_ignore_ascii_case("file"));
     if !to_is_file {
         return false;
     }
-    Url::parse(from)
-        .map(|u| !u.scheme().eq_ignore_ascii_case("file"))
-        .unwrap_or(true)
+    Url::parse(from).map_or(true, |u| !u.scheme().eq_ignore_ascii_case("file"))
 }
 
 /// Sub-resource fetch policy. http(s) is always fine; data: is allowed
@@ -114,9 +110,7 @@ fn subresource_allowed(page_url: Option<&Url>, resource: &str) -> bool {
     let scheme = target.scheme().to_ascii_lowercase();
     match scheme.as_str() {
         "http" | "https" | "data" => true,
-        "file" => page_url
-            .map(|u| u.scheme().eq_ignore_ascii_case("file"))
-            .unwrap_or(false),
+        "file" => page_url.is_some_and(|u| u.scheme().eq_ignore_ascii_case("file")),
         _ => false,
     }
 }
@@ -328,7 +322,7 @@ fn materialize_stylesheet_graph(
     aliases: &std::collections::HashMap<String, String>,
     active: &mut std::collections::HashSet<String>,
 ) -> Option<String> {
-    let actual_key = aliases.get(key).map(String::as_str).unwrap_or(key);
+    let actual_key = aliases.get(key).map_or(key, String::as_str);
     if !active.insert(actual_key.to_string()) {
         return None;
     }
@@ -404,7 +398,7 @@ fn rebase_css_urls(css: &str, base: &url::Url) -> String {
         }
         let is_url = rest
             .get(..4)
-            .map_or(false, |prefix| prefix.eq_ignore_ascii_case("url("));
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("url("));
         if !is_url {
             out.push(first);
             index += first.len_utf8();
@@ -759,7 +753,7 @@ fn materialize_linked_stylesheet_script(link_index: usize, css: &str) -> String 
 fn materialize_inline_import_script(style_index: usize, css: &str) -> String {
     let escaped_css = escape_for_js_template_literal(css);
     format!(
-        r#"(function() {{
+        r"(function() {{
             var styles = document.querySelectorAll('style');
             var source = null;
             var authorIndex = -1;
@@ -777,7 +771,7 @@ fn materialize_inline_import_script(style_index: usize, css: &str) -> String {
             if (media.trim()) imported.setAttribute('media', media);
             imported.textContent = `{escaped_css}`;
             source.parentNode.insertBefore(imported, source);
-        }})()"#
+        }})()"
     )
 }
 
@@ -924,7 +918,7 @@ impl Page {
         }
         self.viewport = viewport;
         if let Some(js) = &mut self.js {
-            js.set_viewport(viewport.0 as f64, viewport.1 as f64);
+            js.set_viewport(f64::from(viewport.0), f64::from(viewport.1));
         }
     }
 
@@ -937,7 +931,7 @@ impl Page {
         if let Some(js) = &mut self.js {
             js.set_screen_size_override(
                 self.screen_size_override
-                    .map(|(width, height)| (width as f64, height as f64)),
+                    .map(|(width, height)| (f64::from(width), f64::from(height))),
                 self.screen_metrics_emulated,
             );
         }
@@ -1046,10 +1040,10 @@ impl Page {
         if let Some((lat, lon)) = env_geolocation() {
             rt.set_geolocation(lat, lon);
         }
-        rt.set_viewport(self.viewport.0 as f64, self.viewport.1 as f64);
+        rt.set_viewport(f64::from(self.viewport.0), f64::from(self.viewport.1));
         rt.set_screen_size_override(
             self.screen_size_override
-                .map(|(width, height)| (width as f64, height as f64)),
+                .map(|(width, height)| (f64::from(width), f64::from(height))),
             self.screen_metrics_emulated,
         );
 
@@ -1087,9 +1081,10 @@ impl Page {
         let doc_url = self.url.as_ref()?;
         let base_href: Option<String> = self.js.as_ref().and_then(|js| {
             js.with_dom(|dom| match dom.query_selector("base[href]") {
-                Ok(Some(nid)) => dom
-                    .get_node(nid)
-                    .and_then(|n| n.get_attribute("href").map(|s| s.to_string())),
+                Ok(Some(nid)) => dom.get_node(nid).and_then(|n| {
+                    n.get_attribute("href")
+                        .map(std::string::ToString::to_string)
+                }),
                 _ => None,
             })
             .flatten()
@@ -1101,19 +1096,17 @@ impl Page {
     }
 
     async fn fetch_stylesheets(&mut self) -> Vec<(AuthorStylesheetTarget, String)> {
-        let (all_links, inline_imports) = match &self.js {
-            Some(js) => js
-                .with_dom(|dom| {
-                    (
-                        linked_stylesheet_requests(dom),
-                        inline_stylesheet_import_requests(dom),
-                    )
-                })
-                .unwrap_or_default(),
-            None => {
-                tracing::info!("fetch_stylesheets: no js runtime");
-                return Vec::new();
-            }
+        let (all_links, inline_imports) = if let Some(js) = &self.js {
+            js.with_dom(|dom| {
+                (
+                    linked_stylesheet_requests(dom),
+                    inline_stylesheet_import_requests(dom),
+                )
+            })
+            .unwrap_or_default()
+        } else {
+            tracing::info!("fetch_stylesheets: no js runtime");
+            return Vec::new();
         };
 
         tracing::info!(
@@ -1153,10 +1146,8 @@ impl Page {
                 key.clone(),
                 None,
             ));
-            if scheduled.insert(key.clone()) {
-                if scheduled.len() <= MAX_STYLESHEET_RESOURCES {
-                    pending.push((key, resolved, 0u8));
-                }
+            if scheduled.insert(key.clone()) && scheduled.len() <= MAX_STYLESHEET_RESOURCES {
+                pending.push((key, resolved, 0u8));
             }
         }
         for (style_index, import) in inline_imports {
@@ -1428,8 +1419,7 @@ impl Page {
                                 nid.raw(),
                                 active_base
                                     .as_ref()
-                                    .map(ToString::to_string)
-                                    .unwrap_or_else(|| document_url.clone()),
+                                    .map_or_else(|| document_url.clone(), ToString::to_string),
                             );
                         }
                     }
@@ -1437,7 +1427,9 @@ impl Page {
 
                     for sid in script_ids {
                         if let Some(node) = dom.get_node(sid) {
-                            let src = node.get_attribute("src").map(|s| s.to_string());
+                            let src = node
+                                .get_attribute("src")
+                                .map(std::string::ToString::to_string);
                             let script_type = node
                                 .get_attribute("type")
                                 .unwrap_or("")
@@ -1498,7 +1490,7 @@ impl Page {
                 .join(",");
             let _ = js.execute_script_no_checkpoint(
                 "<parser-scripts>",
-                &format!("globalThis.__markParserScripts([{}]);", ids),
+                &format!("globalThis.__markParserScripts([{ids}]);"),
             );
         }
 
@@ -1517,8 +1509,7 @@ impl Page {
                     url::Url::parse(&script.base_url)
                         .ok()
                         .and_then(|base| base.join(src_url).ok())
-                        .map(|url| url.to_string())
-                        .unwrap_or_else(|| src_url.clone())
+                        .map_or_else(|| src_url.clone(), |url| url.to_string())
                 };
 
                 if !subresource_allowed(self.url.as_ref(), &full_url) {
@@ -1605,19 +1596,15 @@ impl Page {
         // and matches what real Chrome does for a given origin.
         use futures::StreamExt as _;
         let fetch_stream = futures::stream::iter(fetch_futures).buffer_unordered(16);
-        let fetch_results = match tokio::time::timeout_at(
-            script_deadline,
-            fetch_stream.collect::<Vec<_>>(),
-        )
-        .await
+        let fetch_results = if let Ok(results) =
+            tokio::time::timeout_at(script_deadline, fetch_stream.collect::<Vec<_>>()).await
         {
-            Ok(results) => results,
-            Err(_) => {
-                tracing::warn!(
-                    "execute_scripts: fetch deadline reached, some scripts may not have loaded"
-                );
-                Vec::new()
-            }
+            results
+        } else {
+            tracing::warn!(
+                "execute_scripts: fetch deadline reached, some scripts may not have loaded"
+            );
+            Vec::new()
         };
 
         let mut fetched: std::collections::HashMap<
@@ -1691,8 +1678,7 @@ impl Page {
                         dom.query_selector("body")
                             .ok()
                             .flatten()
-                            .map(|b| dom.descendants(b).len())
-                            .unwrap_or(0)
+                            .map_or(0, |b| dom.descendants(b).len())
                     })
                 })
                 .unwrap_or(0);
@@ -1879,8 +1865,7 @@ impl Page {
                             url::Url::parse(&script.base_url)
                                 .ok()
                                 .and_then(|base| base.join(src).ok())
-                                .map(|url| url.to_string())
-                                .unwrap_or_else(|| src.clone())
+                                .map_or_else(|| src.clone(), |url| url.to_string())
                         };
                         tracing::info!("Preparing ES module graph: {}", full_url);
                         let result = match &mut self.js {
@@ -2159,19 +2144,18 @@ impl Page {
         let nav_timeout = self.navigation_timeout();
         let nav_timeout_ms = duration_millis_u64(nav_timeout);
 
-        let result = match tokio::time::timeout(
+        let result = if let Ok(r) = tokio::time::timeout(
             nav_timeout,
             self.navigate_with_wait_post_inner(url_str, wait_until, method, body, ""),
         )
         .await
         {
-            Ok(r) => r,
-            Err(_) => {
-                self.lifecycle = crate::lifecycle::LifecycleState::Failed;
-                Err(PageError::NetworkError(format!(
-                    "navigation exceeded {nav_timeout_ms}ms deadline"
-                )))
-            }
+            r
+        } else {
+            self.lifecycle = crate::lifecycle::LifecycleState::Failed;
+            Err(PageError::NetworkError(format!(
+                "navigation exceeded {nav_timeout_ms}ms deadline"
+            )))
         };
         if result.is_ok() {
             self.push_history(self.url_string());
@@ -2236,7 +2220,7 @@ impl Page {
         let requested = tokio::time::Duration::from_millis(duration_ms);
         let elapsed = started.elapsed();
         if elapsed < requested {
-            tokio::time::sleep(requested - elapsed).await;
+            tokio::time::sleep(requested.checked_sub(elapsed).unwrap()).await;
         }
     }
 
@@ -2374,8 +2358,7 @@ impl Page {
                 if !self.context.robots_cache.is_allowed(domain, url.path()) {
                     self.lifecycle = LifecycleState::Failed;
                     return Err(PageError::NetworkError(format!(
-                        "Blocked by robots.txt: {}",
-                        url
+                        "Blocked by robots.txt: {url}"
                     )));
                 }
             }
@@ -2485,7 +2468,7 @@ impl Page {
                 // U+2028 break out of the template literal and run
                 // arbitrary JS in the page's JS realm.
                 let escaped = escape_for_js_template_literal(&combined_css);
-                let code = format!("globalThis.__tinybrowser_css = `{}`;", escaped);
+                let code = format!("globalThis.__tinybrowser_css = `{escaped}`;");
                 let _ = js.execute_script("<css>", &code);
                 for (target, css) in &author_stylesheets {
                     let code = match target {
@@ -2618,10 +2601,10 @@ impl Page {
     }
 
     pub fn url_string(&self) -> String {
-        self.url
-            .as_ref()
-            .map(|u| u.to_string())
-            .unwrap_or_else(|| "about:blank".to_string())
+        self.url.as_ref().map_or_else(
+            || "about:blank".to_string(),
+            std::string::ToString::to_string,
+        )
     }
 
     pub fn with_dom<R>(&self, f: impl FnOnce(&DomTree) -> R) -> Option<R> {
@@ -2636,7 +2619,7 @@ impl Page {
     pub fn fetched_urls(&self) -> Vec<String> {
         self.js
             .as_ref()
-            .map(|js| js.fetched_urls())
+            .map(tinybrowser_js::runtime::JsRuntime::fetched_urls)
             .unwrap_or_default()
     }
 
@@ -2675,7 +2658,9 @@ impl Page {
     /// command so a hung page cannot hold this connection's JS lock forever)
     /// without taking `&mut self`.
     pub fn isolate_handle(&self) -> Option<tinybrowser_js::runtime::IsolateHandle> {
-        self.js.as_ref().map(|js| js.isolate_handle())
+        self.js
+            .as_ref()
+            .map(tinybrowser_js::runtime::JsRuntime::isolate_handle)
     }
 
     /// Clear a JS termination left by a per-command watchdog so the next command
@@ -3681,7 +3666,7 @@ mod tests {
             .as_mut()
             .expect("page runtime")
             .evaluate(
-                r#"
+                r"
                 var clientReplacementCheck = true;
                 const button = document.getElementById('client');
                 if (button) button.dispatchEvent(new Event('click'));
@@ -3692,7 +3677,7 @@ mod tests {
                     clicks: button ? button.getAttribute('data-clicks') : null,
                     bodyElements: document.querySelectorAll('body *').length
                 };
-                "#,
+                ",
             )
             .expect("inspect client replacement");
         assert_eq!(
@@ -3746,7 +3731,7 @@ mod tests {
                 stream.write_all(response.as_bytes()).unwrap();
             }
         });
-        (format!("http://{}", address), request_rx)
+        (format!("http://{address}"), request_rx)
     }
 
     fn spawn_delayed_classic_script_server(
@@ -4038,7 +4023,7 @@ mod tests {
             true,
         ));
         let mut page = super::Page::new(name.to_string(), context);
-        page.url = Some(url::Url::parse(&format!("{}/app/index.html", base)).unwrap());
+        page.url = Some(url::Url::parse(&format!("{base}/app/index.html")).unwrap());
         page.dom = Some(parse_html(html));
         page.init_js();
         page
@@ -4342,7 +4327,7 @@ mod tests {
             "globalThis.__lifecycleOrder.push('dynamic-exec');",
         );
         let html = format!(
-            r#"<html><head></head><body><script>
+            r"<html><head></head><body><script>
                 globalThis.__lifecycleOrder = [];
                 document.addEventListener('DOMContentLoaded', () =>
                     globalThis.__lifecycleOrder.push('dom-content-loaded'));
@@ -4354,7 +4339,7 @@ mod tests {
                 script.src = '{base}/preload-dynamic.js';
                 script.onload = () => globalThis.__lifecycleOrder.push('script-load');
                 document.head.appendChild(script);
-            </script></body></html>"#,
+            </script></body></html>",
         );
         let mut page =
             import_map_test_page("preload-dynamic-lifecycle", "http://127.0.0.1:9", &html);
@@ -4402,14 +4387,14 @@ mod tests {
             "globalThis.__fairDynamicRan = true;",
         );
         let html = format!(
-            r#"<html><head></head><body><script>
+            r"<html><head></head><body><script>
                 globalThis.__schedulerTicks = 0;
                 setInterval(() => globalThis.__schedulerTicks++, 0);
                 const script = document.createElement('script');
                 script.src = '{base}/fair-dynamic.js';
                 script.onload = () => globalThis.__fairDynamicLoaded = true;
                 document.head.appendChild(script);
-            </script></body></html>"#,
+            </script></body></html>",
         );
         let mut page = import_map_test_page(
             "load-delayer-scheduler-fairness",
@@ -4507,13 +4492,13 @@ mod tests {
             "globalThis.__postLoadDynamicRan = true;",
         );
         let html = format!(
-            r#"<html><body><script>
+            r"<html><body><script>
                 window.addEventListener('load', () => {{
                     const script = document.createElement('script');
                     script.src = '{base}/post-load.js';
                     document.head.appendChild(script);
                 }});
-            </script></body></html>"#,
+            </script></body></html>",
         );
         let mut page = import_map_test_page("post-load-dynamic-lifecycle", &base, &html);
         let started = std::time::Instant::now();
@@ -5114,7 +5099,7 @@ mod tests {
 
         let result = runtime
             .evaluate(
-                r#"
+                r"
                 (() => {
                     const list = document.styleSheets;
                     const same = document.getElementById('same');
@@ -5157,7 +5142,7 @@ mod tests {
                         security,
                     };
                 })()
-                "#,
+                ",
             )
             .expect("inspect linked stylesheet CSSOM");
 

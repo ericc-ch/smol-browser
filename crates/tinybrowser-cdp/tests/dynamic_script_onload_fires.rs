@@ -89,7 +89,7 @@ async fn serve_dynamic_order_fixture(explicitly_in_order: bool) -> (String, Arc<
     let addr = listener.local_addr().unwrap();
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
-    let server_active = active.clone();
+    let server_active = active;
     let server_peak = peak.clone();
     tokio::spawn(async move {
         loop {
@@ -121,7 +121,7 @@ async fn serve_dynamic_order_fixture(explicitly_in_order: bool) -> (String, Arc<
                         ""
                     };
                     let body = format!(
-                        r#"<script>
+                        r"<script>
 window.__dynamicOrder=[];
 var slow=document.createElement('script');
 var fast=document.createElement('script');
@@ -130,7 +130,7 @@ slow.src='/slow.js';
 fast.src='/fast.js';
 document.head.appendChild(slow);
 document.head.appendChild(fast);
-</script>"#
+</script>"
                     );
                     ("text/html", body)
                 };
@@ -289,7 +289,7 @@ async fn dynamic_data_scripts_execute_before_chained_load_handlers() {
         2,
         "Runtime.evaluate",
         json!({
-            "expression": r#"(function () {
+            "expression": r"(function () {
                 var state = {
                     aExec: false,
                     aLoad: false,
@@ -319,7 +319,7 @@ async fn dynamic_data_scripts_execute_before_chained_load_handlers() {
                 };
                 document.head.appendChild(a);
                 return 'kicked';
-            })()"#,
+            })()",
             "returnByValue": true,
         }),
         session_id,
@@ -367,14 +367,14 @@ async fn invalid_dynamic_data_script_fires_error_not_load() {
         2,
         "Runtime.callFunctionOn",
         json!({
-            "functionDeclaration": r#"function () {
+            "functionDeclaration": r"function () {
                 window.__invalidDataScript = { error: false, load: false };
                 var script = document.createElement('script');
                 script.src = 'data:text/javascript;base64,!';
                 script.onerror = function () { window.__invalidDataScript.error = true; };
                 script.onload = function () { window.__invalidDataScript.load = true; };
                 document.head.appendChild(script);
-            }"#,
+            }",
             "awaitPromise": true,
         }),
         session_id,

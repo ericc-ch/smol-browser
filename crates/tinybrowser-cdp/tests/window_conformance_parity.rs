@@ -91,7 +91,7 @@ async fn element_toggle_attribute_is_callable_and_toggles() {
     let v = eval(
         &mut ctx,
         2,
-        r#"(function () {
+        r"(function () {
             const el = document.getElementById('a');
             const t = typeof el.toggleAttribute;
             const first = el.toggleAttribute('hidden');
@@ -99,7 +99,7 @@ async fn element_toggle_attribute_is_callable_and_toggles() {
             const second = el.toggleAttribute('hidden');
             const afterSecond = el.hasAttribute('hidden');
             return JSON.stringify({ type: t, first, afterFirst, second, afterSecond });
-        })()"#,
+        })()",
         &sid,
     )
     .await;
@@ -119,7 +119,7 @@ async fn document_adopt_node_moves_node() {
     let v = eval(
         &mut ctx,
         2,
-        r#"(function () {
+        r"(function () {
             const t = typeof document.adoptNode;
             const span = document.createElement('span');
             span.id = 'moved';
@@ -129,7 +129,7 @@ async fn document_adopt_node_moves_node() {
                 sameNode: adopted === span,
                 ownerDoc: adopted.ownerDocument === document,
             });
-        })()"#,
+        })()",
         &sid,
     )
     .await;

@@ -23,7 +23,7 @@ impl ModuleLoadActivity {
         *self
             .last_activity
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(std::time::Instant::now());
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::time::Instant::now());
         ModuleLoadGuard(self.clone())
     }
 
@@ -33,7 +33,7 @@ impl ModuleLoadActivity {
         }
         self.last_activity
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_some_and(|last| last.elapsed() <= grace)
     }
 }
@@ -51,7 +51,7 @@ impl Drop for ModuleLoadGuard {
             .0
             .last_activity
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(std::time::Instant::now());
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::time::Instant::now());
     }
 }
 

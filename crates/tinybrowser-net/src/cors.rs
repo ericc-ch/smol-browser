@@ -27,8 +27,10 @@ pub(crate) fn serialized_request_origin(
         .initiator
         .as_ref()
         .filter(|url| matches!(url.scheme(), "http" | "https"))
-        .map(|url| url.origin().ascii_serialization())
-        .unwrap_or_else(|| "null".to_string())
+        .map_or_else(
+            || "null".to_string(),
+            |url| url.origin().ascii_serialization(),
+        )
 }
 
 pub(crate) fn redirect_taints_origin(request: &ResourceRequest, current: &Url, next: &Url) -> bool {
@@ -45,8 +47,7 @@ pub(crate) fn validate_request_mode(
 ) -> Result<(), NetError> {
     if request.mode == RequestMode::SameOrigin && !same_origin(request, target) {
         return Err(NetError::Cors(format!(
-            "same-origin request blocked for {}",
-            target
+            "same-origin request blocked for {target}"
         )));
     }
     Ok(())
@@ -65,8 +66,7 @@ pub(crate) fn validate_cors_response(
 
     let allow_origin = allow_origin.ok_or_else(|| {
         NetError::Cors(format!(
-            "{} did not include Access-Control-Allow-Origin for origin {}",
-            target, serialized_origin
+            "{target} did not include Access-Control-Allow-Origin for origin {serialized_origin}"
         ))
     })?;
     if request.credentials != RequestCredentials::Include && allow_origin == "*" {
@@ -74,14 +74,12 @@ pub(crate) fn validate_cors_response(
     }
     if allow_origin != serialized_origin {
         return Err(NetError::Cors(format!(
-            "{} returned Access-Control-Allow-Origin {:?}, expected {:?}",
-            target, allow_origin, serialized_origin
+            "{target} returned Access-Control-Allow-Origin {allow_origin:?}, expected {serialized_origin:?}"
         )));
     }
     if request.credentials == RequestCredentials::Include && allow_credentials != Some("true") {
         return Err(NetError::Cors(format!(
-            "credentialed response from {} requires Access-Control-Allow-Credentials: true",
-            target
+            "credentialed response from {target} requires Access-Control-Allow-Credentials: true"
         )));
     }
     Ok(())

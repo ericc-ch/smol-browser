@@ -218,7 +218,7 @@ impl JsRuntime {
         let escaped = ua.replace('\\', "\\\\").replace('\'', "\\'");
         let _ = self.qjs.execute_script(
             "<set-ua>",
-            format!("globalThis.__tinybrowser_ua = '{}';", escaped),
+            format!("globalThis.__tinybrowser_ua = '{escaped}';"),
         );
     }
 
@@ -229,8 +229,7 @@ impl JsRuntime {
         let _ = self.qjs.execute_script(
             "<set-platform>",
             format!(
-                "globalThis.__tinybrowser_platform='{}';globalThis.__tinybrowser_ua_platform='{}';globalThis.__tinybrowser_ua_platform_version='{}';",
-                p, uap, uapv
+                "globalThis.__tinybrowser_platform='{p}';globalThis.__tinybrowser_ua_platform='{uap}';globalThis.__tinybrowser_ua_platform_version='{uapv}';"
             ),
         );
     }
@@ -238,7 +237,7 @@ impl JsRuntime {
     pub fn set_stealth(&mut self, enabled: bool) {
         let _ = self.qjs.execute_script(
             "<set-stealth>",
-            format!("globalThis.__tinybrowser_stealth = {};", enabled),
+            format!("globalThis.__tinybrowser_stealth = {enabled};"),
         );
     }
 
@@ -292,7 +291,7 @@ impl JsRuntime {
     pub fn run_page_init(&mut self) {
         let _ = self.qjs.execute_script(
             "<tinybrowser:page-init>",
-            "globalThis.__tinybrowser_init();".to_string(),
+            "globalThis.__tinybrowser_init();",
         );
     }
 
@@ -303,8 +302,7 @@ impl JsRuntime {
         let _ = self.qjs.execute_script(
             "<set-geo>",
             format!(
-                "globalThis.__tinybrowser_geo_lat={};globalThis.__tinybrowser_geo_lon={};",
-                latitude, longitude
+                "globalThis.__tinybrowser_geo_lat={latitude};globalThis.__tinybrowser_geo_lon={longitude};"
             ),
         );
     }
@@ -396,7 +394,7 @@ impl JsRuntime {
         let meta_str = if await_promise {
             self.qjs
                 .execute_script("<eval-remote>", &meta_code)
-                .map_err(|e| format!("JS error: {}", e))?;
+                .map_err(|e| format!("JS error: {e}"))?;
             let __t0 = std::time::Instant::now();
             let sentinel = format!("globalThis.__tinybrowser_done_{done_counter} === true");
             let settled = self
@@ -432,22 +430,21 @@ impl JsRuntime {
             let rejected = self
                 .qjs
                 .evaluate("globalThis.__tinybrowser_await_rejected")
-                .map_err(|e| format!("JS error: {}", e))?;
+                .map_err(|e| format!("JS error: {e}"))?;
             if rejected.as_bool().unwrap_or(false) {
                 let err = self.qjs.evaluate(&format!(
-                    "String(globalThis.__tinybrowser_objects['{0}'] && (globalThis.__tinybrowser_objects['{0}'].message || globalThis.__tinybrowser_objects['{0}']))",
-                    oid
+                    "String(globalThis.__tinybrowser_objects['{oid}'] && (globalThis.__tinybrowser_objects['{oid}'].message || globalThis.__tinybrowser_objects['{oid}']))"
                 ))
-                .map_err(|e| format!("JS error: {}", e))?;
+                .map_err(|e| format!("JS error: {e}"))?;
                 return Err(format!("Promise rejected: {}", err.as_str().unwrap_or("")));
             }
             self.qjs
                 .evaluate("globalThis.__tinybrowser_await_meta")
-                .map_err(|e| format!("JS error: {}", e))?
+                .map_err(|e| format!("JS error: {e}"))?
         } else {
             self.qjs
                 .evaluate(&meta_code)
-                .map_err(|e| format!("JS error: {}", e))?
+                .map_err(|e| format!("JS error: {e}"))?
         };
         let meta_json = if let serde_json::Value::String(s) = &meta_str {
             serde_json::from_str(s).unwrap_or(meta_str)
@@ -456,14 +453,14 @@ impl JsRuntime {
         };
         self.object_store.insert(
             oid.clone(),
-            format!("globalThis.__tinybrowser_objects['{}']", oid),
+            format!("globalThis.__tinybrowser_objects['{oid}']"),
         );
 
         if await_promise && return_by_value {
             let json_val = self
                 .qjs
-                .evaluate(&format!("globalThis.__tinybrowser_objects['{}']", oid))
-                .map_err(|e| format!("JS error: {}", e))?;
+                .evaluate(&format!("globalThis.__tinybrowser_objects['{oid}']"))
+                .map_err(|e| format!("JS error: {e}"))?;
             return Ok(Self::info_from_json(&json_val));
         }
 
@@ -538,7 +535,7 @@ impl JsRuntime {
 
             self.qjs
                 .execute_script("<callFnAsync>", code)
-                .map_err(|e| format!("JS error: {}", e))?;
+                .map_err(|e| format!("JS error: {e}"))?;
 
             let __t0 = std::time::Instant::now();
             let sentinel = format!("globalThis.__tinybrowser_done_{done_counter} === true");
@@ -576,15 +573,15 @@ impl JsRuntime {
             if return_by_value {
                 let json_val = self
                     .qjs
-                    .evaluate(&format!("globalThis.__tinybrowser_objects['{}']", oid))
-                    .map_err(|e| format!("JS error: {}", e))?;
+                    .evaluate(&format!("globalThis.__tinybrowser_objects['{oid}']"))
+                    .map_err(|e| format!("JS error: {e}"))?;
                 return Ok(Self::info_from_json(&json_val));
             }
 
             let meta_str = self
                 .qjs
                 .evaluate("globalThis.__tinybrowser_await_meta")
-                .map_err(|e| format!("JS error: {}", e))?;
+                .map_err(|e| format!("JS error: {e}"))?;
             let meta_json = if let serde_json::Value::String(s) = &meta_str {
                 serde_json::from_str(s).unwrap_or(meta_str.clone())
             } else {
@@ -592,7 +589,7 @@ impl JsRuntime {
             };
             self.object_store.insert(
                 oid.clone(),
-                format!("globalThis.__tinybrowser_objects['{}']", oid),
+                format!("globalThis.__tinybrowser_objects['{oid}']"),
             );
             return Ok(Self::info_from_meta(&meta_json, Some(oid)));
         }
@@ -601,19 +598,15 @@ impl JsRuntime {
             let code = format!(
                 "(function() {{\n\
                     {setup}\n\
-                    var __fn = ({fn_decl});\n\
+                    var __fn = ({function_declaration});\n\
                     var __this = ({this_expr});\n\
-                    return __fn.call(__this, {args});\n\
+                    return __fn.call(__this, {args_list});\n\
                 }})()",
-                setup = setup,
-                fn_decl = function_declaration,
-                this_expr = this_expr,
-                args = args_list,
             );
             let json_val = self
                 .qjs
                 .evaluate(&code)
-                .map_err(|e| format!("JS error: {}", e))?;
+                .map_err(|e| format!("JS error: {e}"))?;
             return Ok(Self::info_from_json(&json_val));
         }
 
@@ -636,7 +629,7 @@ impl JsRuntime {
         let meta_str = self
             .qjs
             .evaluate(&code)
-            .map_err(|e| format!("JS error: {}", e))?;
+            .map_err(|e| format!("JS error: {e}"))?;
         let meta_json = if let serde_json::Value::String(s) = &meta_str {
             serde_json::from_str(s).unwrap_or(meta_str.clone())
         } else {
@@ -644,7 +637,7 @@ impl JsRuntime {
         };
         self.object_store.insert(
             oid.clone(),
-            format!("globalThis.__tinybrowser_objects['{}']", oid),
+            format!("globalThis.__tinybrowser_objects['{oid}']"),
         );
         Ok(Self::info_from_meta(&meta_json, Some(oid)))
     }
@@ -668,16 +661,13 @@ impl JsRuntime {
         self.begin_javascript_task();
         self.object_counter += 1;
         let oid = self.make_oid(self.object_counter);
-        let code = format!(
-            "globalThis.__tinybrowser_objects['{}'] = ({});",
-            oid, js_expression,
-        );
+        let code = format!("globalThis.__tinybrowser_objects['{oid}'] = ({js_expression});",);
         self.qjs
             .execute_script("<store>", code)
-            .map_err(|e| format!("Store error: {}", e))?;
+            .map_err(|e| format!("Store error: {e}"))?;
         self.object_store.insert(
             oid.clone(),
-            format!("globalThis.__tinybrowser_objects['{}']", oid),
+            format!("globalThis.__tinybrowser_objects['{oid}']"),
         );
         Ok(oid)
     }
@@ -702,7 +692,7 @@ impl JsRuntime {
         let meta_str = self
             .qjs
             .evaluate(&code)
-            .map_err(|e| format!("Store error: {}", e))?;
+            .map_err(|e| format!("Store error: {e}"))?;
         let meta_json = if let serde_json::Value::String(s) = &meta_str {
             serde_json::from_str(s).unwrap_or(meta_str.clone())
         } else {
@@ -710,33 +700,29 @@ impl JsRuntime {
         };
         self.object_store.insert(
             oid.clone(),
-            format!("globalThis.__tinybrowser_objects['{}']", oid),
+            format!("globalThis.__tinybrowser_objects['{oid}']"),
         );
         Ok(Self::info_from_meta(&meta_json, Some(oid)))
     }
 
     pub fn release_object(&mut self, object_id: &str) {
         if self.object_store.remove(object_id).is_some() {
-            let code = format!("delete globalThis.__tinybrowser_objects['{}'];", object_id,);
+            let code = format!("delete globalThis.__tinybrowser_objects['{object_id}'];");
             let _ = self.qjs.execute_script("<release>", code);
         }
     }
 
     pub fn release_object_group(&mut self) {
-        let _ = self.qjs.execute_script(
-            "<releaseGroup>",
-            "globalThis.__tinybrowser_objects = {};".to_string(),
-        );
+        let _ = self
+            .qjs
+            .execute_script("<releaseGroup>", "globalThis.__tinybrowser_objects = {};");
         self.object_store.clear();
     }
     pub async fn load_module(&mut self, url: &str, budget_ms: u64) -> Result<(), String> {
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(budget_ms);
         let prepared = self.prepare_module(url, budget_ms).await?;
         let remaining_ms = remaining_deadline_ms(deadline).ok_or_else(|| {
-            format!(
-                "Module {} exhausted its {}ms load+evaluation budget",
-                url, budget_ms
-            )
+            format!("Module {url} exhausted its {budget_ms}ms load+evaluation budget")
         })?;
         self.evaluate_prepared_module(prepared, remaining_ms).await
     }
@@ -750,7 +736,7 @@ impl JsRuntime {
         Ok(PreparedModule {
             specifier: url.to_string(),
             source,
-            description: format!("Module {}", url),
+            description: format!("Module {url}"),
         })
     }
 
@@ -790,8 +776,7 @@ impl JsRuntime {
         let watchdog_fired = self.disarm_watchdog(watchdog);
         if watchdog_fired || result.as_ref().is_err_and(|err| err == "timeout") {
             Err(format!(
-                "{} evaluation timed out after {}ms",
-                description, budget_ms
+                "{description} evaluation timed out after {budget_ms}ms"
             ))
         } else {
             match result {
@@ -806,7 +791,7 @@ impl JsRuntime {
                     description,
                     err.trim_start_matches("eval:").trim()
                 )),
-                Err(err) => Err(format!("{}: {err}", description)),
+                Err(err) => Err(format!("{description}: {err}")),
             }
         }
     }
@@ -822,10 +807,7 @@ impl JsRuntime {
             .prepare_inline_module(code, base_url, budget_ms)
             .await?;
         let remaining_ms = remaining_deadline_ms(deadline).ok_or_else(|| {
-            format!(
-                "Inline module exhausted its {}ms load+evaluation budget",
-                budget_ms
-            )
+            format!("Inline module exhausted its {budget_ms}ms load+evaluation budget")
         })?;
         self.evaluate_prepared_module(prepared, remaining_ms).await
     }
@@ -1204,11 +1186,11 @@ impl JsRuntime {
             Ok(v) if !fired => Ok(v),
             Ok(_) => Err("eval timed out".to_string()),
             Err(e) => {
-                let msg = e.to_string();
+                let msg = e;
                 if fired || msg.contains("interrupted") || msg.contains("execution terminated") {
                     Err("eval timed out".to_string())
                 } else {
-                    Err(format!("JS error: {}", msg))
+                    Err(format!("JS error: {msg}"))
                 }
             }
         }
@@ -1325,12 +1307,12 @@ impl JsRuntime {
         }
     }
     fn make_oid(&self, counter: u64) -> String {
-        format!("{{\"injectedScriptId\":1,\"id\":{}}}", counter)
+        format!("{{\"injectedScriptId\":1,\"id\":{counter}}}")
     }
 
     fn meta_extract_js(var_name: &str) -> String {
         format!(
-            r#"(function(v) {{
+            r"(function(v) {{
                 var t = typeof v;
                 var st = null, cn = '', desc = '';
                 if (v === null) {{ t = 'object'; st = 'null'; }}
@@ -1356,8 +1338,7 @@ impl JsRuntime {
                 }}
                 else {{ desc = String(v); }}
                 return JSON.stringify({{type:t,subtype:st,className:cn,description:desc}});
-            }})({var_name})"#,
-            var_name = var_name,
+            }})({var_name})",
         )
     }
 
@@ -1370,12 +1351,11 @@ impl JsRuntime {
                     let nid = oid.strip_prefix("node-").unwrap_or("0");
                     format!(
                         "(function() {{ \
-                            var nid = {}; \
+                            var nid = {nid}; \
                             var cache = globalThis._cache || new Map(); \
                             if (cache.has(nid)) return cache.get(nid); \
                             return null; \
-                        }})()",
-                        nid
+                        }})()"
                     )
                 } else {
                     "globalThis".to_string()
@@ -1390,21 +1370,21 @@ impl JsRuntime {
         let mut arg_names = Vec::new();
 
         for (i, arg) in arguments.iter().enumerate() {
-            let arg_name = format!("__arg{}", i);
+            let arg_name = format!("__arg{i}");
             if let Some(value) = arg.get("value") {
                 let json_str =
                     serde_json::to_string(value).unwrap_or_else(|_| "undefined".to_string());
-                setup_lines.push(format!("var {} = {};", arg_name, json_str));
+                setup_lines.push(format!("var {arg_name} = {json_str};"));
             } else if let Some(oid) = arg.get("objectId").and_then(|v| v.as_str()) {
                 if let Some(retrieval) = self.object_store.get(oid) {
-                    setup_lines.push(format!("var {} = {};", arg_name, retrieval));
+                    setup_lines.push(format!("var {arg_name} = {retrieval};"));
                 } else {
-                    setup_lines.push(format!("var {} = undefined;", arg_name));
+                    setup_lines.push(format!("var {arg_name} = undefined;"));
                 }
             } else if let Some(unser) = arg.get("unserializableValue").and_then(|v| v.as_str()) {
-                setup_lines.push(format!("var {} = {};", arg_name, unser));
+                setup_lines.push(format!("var {arg_name} = {unser};"));
             } else {
-                setup_lines.push(format!("var {} = undefined;", arg_name));
+                setup_lines.push(format!("var {arg_name} = undefined;"));
             }
             arg_names.push(arg_name);
         }
@@ -1474,7 +1454,7 @@ impl JsRuntime {
         let subtype = meta
             .get("subtype")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
         let class_name = meta
             .get("className")
             .and_then(|v| v.as_str())
@@ -1791,7 +1771,7 @@ mod tests {
         rt.run_event_loop_bounded(100).await.unwrap();
         assert_eq!(
             rt.evaluate(
-                r#"[
+                r"[
                     __schedulerState.order,
                     __schedulerState.canceledCallbackRan,
                     __schedulerState.exactAbortReason,
@@ -1801,7 +1781,7 @@ mod tests {
                     Object.prototype.toString.call(scheduler),
                     Scheduler.prototype.postTask.length,
                     Scheduler.prototype.yield.length,
-                ]"#,
+                ]",
             )
             .unwrap(),
             serde_json::json!([
@@ -1823,7 +1803,7 @@ mod tests {
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "message-channel-task-yield",
-            r#"
+            r"
                 globalThis.__messageCount = 0;
                 globalThis.__timerObserved = false;
                 const channel = new MessageChannel();
@@ -1833,7 +1813,7 @@ mod tests {
                 };
                 channel.port1.postMessage(null);
                 setTimeout(() => { __timerObserved = true; }, 1);
-            "#,
+            ",
         )
         .unwrap();
 
@@ -3778,7 +3758,7 @@ mod tests {
         let started = std::time::Instant::now();
         rt.run_event_loop_until_quiescent(2_000, 150).await.unwrap();
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(1_000),
+            started.elapsed() < std::time::Duration::from_secs(1),
             "an animated document must not consume the complete settle budget"
         );
         assert!(
@@ -4035,7 +4015,7 @@ mod tests {
 
     #[test]
     fn script_created_attribute_reads_stay_coherent_across_mutation_apis() {
-        let mut rt = setup_runtime(r#"<html><body></body></html>"#);
+        let mut rt = setup_runtime(r"<html><body></body></html>");
         let result = rt
             .evaluate(
                 r#"
@@ -4069,7 +4049,7 @@ mod tests {
 
     #[test]
     fn structural_cache_tracks_detach_reparent_and_rejected_mutations() {
-        let mut rt = setup_runtime(r#"<html><body></body></html>"#);
+        let mut rt = setup_runtime(r"<html><body></body></html>");
         let result = rt
             .evaluate(
                 r#"
@@ -4222,7 +4202,7 @@ mod tests {
         rt.run_page_init();
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const root = document.getElementById('root');
                 function walk(verdict) {
                     const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
@@ -4236,7 +4216,7 @@ mod tests {
                     return seen;
                 }
                 return [walk(NodeFilter.FILTER_REJECT), walk(NodeFilter.FILTER_SKIP)];
-                "#,
+                ",
             )
             .unwrap();
         // REJECT drops <p> with its <section> parent; SKIP drops only <section>.
@@ -4251,7 +4231,7 @@ mod tests {
         rt.run_page_init();
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const root = document.getElementById('root');
                 const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
                     acceptNode(node) {
@@ -4266,7 +4246,7 @@ mod tests {
                 const backward = [];
                 while ((node = w.previousNode())) backward.push(node.tagName);
                 return [forward, backward];
-                "#,
+                ",
             )
             .unwrap();
         // From <c>, the previous sibling's deepest last child <b> is skipped, so
@@ -4284,7 +4264,7 @@ mod tests {
         rt.run_page_init();
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const root = document.getElementById('root');
                 const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
                 const forward = [];
@@ -4298,7 +4278,7 @@ mod tests {
                 // A failed traversal leaves currentNode untouched (DOM 6.1), so
                 // it stays on the last node previousNode did return.
                 return [forward, backward, w.currentNode.tagName];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(
@@ -4320,7 +4300,7 @@ mod tests {
         rt.run_page_init();
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const root = document.getElementById('root');
                 const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
                     acceptNode(node) {
@@ -4334,7 +4314,7 @@ mod tests {
                 let node;
                 while ((node = w.previousNode())) backward.push(node.tagName);
                 return backward;
-                "#,
+                ",
             )
             .unwrap();
         // <p> lives inside the rejected <section>, so the backward walk from <c>
@@ -4352,12 +4332,12 @@ mod tests {
         let mut rt = setup_runtime(r#"<div id="root"><a></a></div>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const root = document.getElementById('root');
                 const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
                 const escaped = w.parentNode();
                 return [escaped, w.currentNode.id];
-                "#,
+                ",
             )
             .unwrap();
         // No parent within the subtree, and currentNode stays put at root.
@@ -4372,13 +4352,13 @@ mod tests {
         let mut rt = setup_runtime(r#"<div id="root"><a></a></div>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const root = document.getElementById('root');
                 const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
                 w.currentNode = root.querySelector('a');
                 const p = w.parentNode();
                 return [p ? p.id : null, w.currentNode === root];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(result, serde_json::json!(["root", true]));
@@ -4392,7 +4372,7 @@ mod tests {
             setup_runtime(r#"<div id="root"><main id="m"><section><a></a></section></main></div>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const root = document.getElementById('root');
                 const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
                     acceptNode(n) {
@@ -4404,7 +4384,7 @@ mod tests {
                 w.currentNode = root.querySelector('a');
                 const p = w.parentNode();
                 return p ? p.id : null;
-                "#,
+                ",
             )
             .unwrap();
         // <a>'s parent <section> is skipped, so <main> is the first accepted
@@ -4419,7 +4399,7 @@ mod tests {
         rt.run_page_init();
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const root = document.getElementById('root');
                 const it = document.createNodeIterator(root, NodeFilter.SHOW_ELEMENT, {
                     acceptNode(node) {
@@ -4432,7 +4412,7 @@ mod tests {
                 let node;
                 while ((node = it.nextNode())) seen.push(node.tagName);
                 return seen;
-                "#,
+                ",
             )
             .unwrap();
         // The rejected <section> is skipped but not pruned, so <p> still shows.
@@ -4448,14 +4428,14 @@ mod tests {
         let mut rt = setup_runtime(r#"<div id="root"><a></a></div>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const root = document.getElementById('root');
                 const it = document.createNodeIterator(root, NodeFilter.SHOW_ELEMENT);
                 const seen = [];
                 let node;
                 while ((node = it.nextNode())) seen.push(node.tagName);
                 return seen;
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(result, serde_json::json!(["DIV", "A"]));
@@ -4468,7 +4448,7 @@ mod tests {
         let mut rt = setup_runtime(r#"<div id="root"><a></a></div>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const root = document.getElementById('root');
                 const it = document.createNodeIterator(root, NodeFilter.SHOW_ELEMENT);
                 const before = [it.referenceNode === root, it.pointerBeforeReferenceNode];
@@ -4487,7 +4467,7 @@ mod tests {
                     // The pointer advanced past the root it just returned.
                     [it.referenceNode.tagName, it.pointerBeforeReferenceNode],
                 ];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(
@@ -4514,7 +4494,7 @@ mod tests {
         let mut rt = setup_runtime(r#"<div id="root"><a><b></b></a><c></c></div>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const root = document.getElementById('root');
                 const it = document.createNodeIterator(root, NodeFilter.SHOW_ELEMENT);
                 const forward = [];
@@ -4523,7 +4503,7 @@ mod tests {
                 const backward = [];
                 while ((node = it.previousNode())) backward.push(node.tagName);
                 return [forward, backward];
-                "#,
+                ",
             )
             .unwrap();
         // Forward ends on <c>; going back re-yields <c> (the pointer sits after
@@ -4544,7 +4524,7 @@ mod tests {
         );
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const t = document.getElementById('t');
                 return [
                     t.content.childNodes.length,
@@ -4558,7 +4538,7 @@ mod tests {
                     // The children stay off the element itself, per the HTML spec.
                     t.childNodes.length,
                 ];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(
@@ -4639,7 +4619,7 @@ mod tests {
     /// through innerHTML.
     #[test]
     fn template_content_round_trips_for_created_templates() {
-        let mut rt = setup_runtime(r#"<body></body>"#);
+        let mut rt = setup_runtime(r"<body></body>");
         let result = rt
             .evaluate(
                 r#"
@@ -4670,7 +4650,7 @@ mod tests {
             setup_runtime(r#"<body><template id="t"><li class="item">x</li></template></body>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const t = document.getElementById('t');
                 const clone = t.cloneNode(true);
                 return [
@@ -4681,7 +4661,7 @@ mod tests {
                     // The clone's contents are its own, not shared with the original.
                     (clone.content.firstElementChild === t.content.firstElementChild),
                 ];
-                "#,
+                ",
             )
             .unwrap();
         let expected = r#"<template id="t"><li class="item">x</li></template>"#;
@@ -4698,7 +4678,7 @@ mod tests {
         let mut rt = setup_runtime(r#"<html><body><div id="d"></div></body></html>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const scrolled = window.scrollTo(0, 500);
                 const afterTo = [window.scrollX, window.scrollY];
                 window.scrollBy(0, 200);
@@ -4710,7 +4690,7 @@ mod tests {
                 // Negative offsets clamp to 0, as they do for elements.
                 window.scrollTo(0, -100);
                 return [afterTo, afterBy, afterOptions, afterScroll, window.scrollY];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(
@@ -4726,7 +4706,7 @@ mod tests {
         let mut rt = setup_runtime(r#"<html><body><div id="d"></div></body></html>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const isDocEl = document.scrollingElement === document.documentElement;
                 window.scrollTo(0, 300);
                 // Written through the window, read through the element...
@@ -4734,7 +4714,7 @@ mod tests {
                 // ...and the reverse.
                 document.scrollingElement.scrollTop = 90;
                 return [isDocEl, viaElement, window.scrollY, window.pageYOffset];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(result, serde_json::json!([true, 300, 90, 90]));
@@ -4747,7 +4727,7 @@ mod tests {
         let mut rt = setup_runtime(r#"<html><body><div id="d"></div></body></html>"#);
         let result = rt
             .evaluate_for_cdp(
-                r#"
+                r"
                 new Promise(resolve => {
                     let win = 0, doc = 0;
                     window.addEventListener('scroll', () => win++);
@@ -4755,7 +4735,7 @@ mod tests {
                     window.scrollBy(0, 400);
                     setTimeout(() => resolve([win, doc, window.scrollY]), 5);
                 })
-                "#,
+                ",
                 true,
                 true,
             )
@@ -4834,7 +4814,7 @@ mod tests {
         let mut rt = setup_runtime(r#"<div id="root"><section><a></a><b></b></section></div>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const root = document.getElementById('root');
                 function mover(verdict, method) {
                     const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
@@ -4851,7 +4831,7 @@ mod tests {
                     mover(NodeFilter.FILTER_REJECT, 'firstChild'),
                     mover(NodeFilter.FILTER_REJECT, 'lastChild'),
                 ];
-                "#,
+                ",
             )
             .unwrap();
         // SKIP descends into <section>; REJECT prunes it and finds nothing else.
@@ -4867,7 +4847,7 @@ mod tests {
         );
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const root = document.getElementById('root');
                 function mover(verdict, method, from) {
                     const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
@@ -4885,7 +4865,7 @@ mod tests {
                     // Rejected: the subtree is off-limits, so skip past to <q>.
                     mover(NodeFilter.FILTER_REJECT, 'nextSibling', 'start'),
                 ];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(result, serde_json::json!(["A", "Q"]));
@@ -4899,7 +4879,7 @@ mod tests {
         );
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const root = document.getElementById('root');
                 const w = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
                     acceptNode(node) {
@@ -4911,7 +4891,7 @@ mod tests {
                 w.currentNode = document.getElementById('start');
                 const found = w.previousSibling();
                 return found ? found.tagName : null;
-                "#,
+                ",
             )
             .unwrap();
         // Reverse order descends to <section>'s last child, not its first.
@@ -4923,7 +4903,7 @@ mod tests {
         let mut rt = setup_runtime(r#"<main id="host"></main>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const host = document.getElementById('host');
                 const fragment = document.createDocumentFragment();
                 const first = document.createElement('article');
@@ -4943,7 +4923,7 @@ mod tests {
                     first.parentNode === host,
                     first.parentElement === host,
                 ];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(
@@ -4957,7 +4937,7 @@ mod tests {
         let mut rt = setup_runtime(r#"<main id="host"><article id="last"></article></main>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const host = document.getElementById('host');
                 const last = document.getElementById('last');
                 const fragment = document.createDocumentFragment();
@@ -4976,7 +4956,7 @@ mod tests {
                     first.parentElement === host,
                     second.parentElement === host,
                 ];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(
@@ -4992,7 +4972,7 @@ mod tests {
         );
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const host = document.getElementById('host');
                 const old = document.getElementById('old');
                 const fragment = document.createDocumentFragment();
@@ -5012,7 +4992,7 @@ mod tests {
                     first.parentElement === host,
                     second.parentElement === host,
                 ];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(
@@ -5026,7 +5006,7 @@ mod tests {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const template = document.createElement('template');
                 template.innerHTML = '<tr><td>first</td><td>second</td></tr>';
                 const clone = template.content.firstChild.cloneNode(true);
@@ -5036,7 +5016,7 @@ mod tests {
                     clone.firstElementChild.children.length,
                     clone.textContent,
                 ];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(result, serde_json::json!(["TR", "TD", 0, "firstsecond"]));
@@ -5061,7 +5041,7 @@ mod tests {
         // 60k four-character groups decode to 180k bytes, comfortably above
         // V8's maximum argument count for a single fromCharCode(...bytes).
         let encoded = "QUFB".repeat(60_000);
-        let result = rt.evaluate(&format!("atob('{}').length", encoded)).unwrap();
+        let result = rt.evaluate(&format!("atob('{encoded}').length")).unwrap();
         assert_eq!(result.as_f64().unwrap() as usize, 180_000);
     }
 
@@ -5070,7 +5050,7 @@ mod tests {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
-                r#"
+                r"
                 (() => {
                     navigation.updateCurrentEntry({state: {route: 'home'}});
                     const first = navigation.currentEntry;
@@ -5082,7 +5062,7 @@ mod tests {
                         navigation.currentEntry.url,
                     ];
                 })()
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(
@@ -5101,7 +5081,7 @@ mod tests {
         );
         let result = rt
             .evaluate(
-                r#"
+                r"
                 (() => {
                     const list = document.styleSheets;
                     const style = document.getElementById('first');
@@ -5194,7 +5174,7 @@ mod tests {
                         innerHTMLDetached, textContentDetached,
                     };
                 })()
-                "#,
+                ",
             )
             .unwrap();
 
@@ -5274,7 +5254,7 @@ mod tests {
         );
         let result = rt
             .evaluate(
-                r#"
+                r"
                 (() => {
                     const first = document.getElementById('one').attachShadow({ mode: 'open' });
                     const second = document.getElementById('two').attachShadow({ mode: 'open' });
@@ -5337,7 +5317,7 @@ mod tests {
                     ];
                     return { initial, synchronized, afterRemoval, inlineRemoval };
                 })()
-                "#,
+                ",
             )
             .unwrap();
 
@@ -5361,7 +5341,7 @@ mod tests {
         let mut rt = setup_runtime("<html><body><canvas></canvas></body></html>");
         let result = rt
             .evaluate(
-                r#"
+                r"
                 (() => {
                     const canvas = document.querySelector('canvas');
                     const fallback = document.createElement('p');
@@ -5377,7 +5357,7 @@ mod tests {
                         fallback.textContent,
                     ];
                 })()
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(
@@ -5473,8 +5453,7 @@ mod tests {
             .unwrap_err();
         assert!(
             err.contains("classList") || err.contains("undefined"),
-            "expected classList/undefined error, got: {}",
-            err
+            "expected classList/undefined error, got: {err}"
         );
 
         // 2. The runtime must still be usable: a follow-up script runs.
@@ -5507,8 +5486,7 @@ mod tests {
             .unwrap_err();
         assert!(
             err.contains("babel-polyfill"),
-            "expected the thrown message, got: {}",
-            err
+            "expected the thrown message, got: {err}"
         );
         rt.execute_script("s3", "globalThis.__ran3 = true;")
             .unwrap();
@@ -5527,7 +5505,7 @@ mod tests {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
-                r#"(() => {
+                r"(() => {
                     const el = document.createElement('div');
                     el.style.color = 'red';
                     el.style.fontSize = '14px';
@@ -5545,7 +5523,7 @@ mod tests {
                         getByDash: el.style.getPropertyValue('font-size'),
                         reflectedAttribute: el.getAttribute('style')
                     });
-                })()"#,
+                })()",
             )
             .unwrap();
         let p: serde_json::Value = serde_json::from_str(result.as_str().unwrap()).unwrap();
@@ -5568,7 +5546,7 @@ mod tests {
         );
         let result = rt
             .evaluate(
-                r#"(() => {
+                r"(() => {
                     const el = document.getElementById('icon');
                     const before = [el.style.fontSize, el.style.color, el.style.length];
                     const removed = el.style.removeProperty('font-size');
@@ -5578,7 +5556,7 @@ mod tests {
                         after: el.style.cssText,
                         attribute: el.getAttribute('style')
                     });
-                })()"#,
+                })()",
             )
             .unwrap();
         let value: serde_json::Value = serde_json::from_str(result.as_str().unwrap()).unwrap();
@@ -5593,7 +5571,7 @@ mod tests {
         let mut rt = setup_runtime("<html><body><select id='language'></select></body></html>");
         let result = rt
             .evaluate(
-                r#"(() => {
+                r"(() => {
                     const select = document.getElementById('language');
                     const english = document.createElement('option');
                     english.value = 'en';
@@ -5610,7 +5588,7 @@ mod tests {
                         value: select.value,
                         html: select.outerHTML
                     });
-                })()"#,
+                })()",
             )
             .unwrap();
         let value: serde_json::Value = serde_json::from_str(result.as_str().unwrap()).unwrap();
@@ -5710,12 +5688,12 @@ mod tests {
     fn element_prepend_inserts_at_start() {
         let mut rt = setup_runtime(r#"<div id="c"><span>existing</span></div>"#);
         rt.evaluate(
-            r#"
+            r"
             const c = document.getElementById('c');
             const n = document.createElement('span');
             n.id = 'first';
             c.prepend(n);
-            "#,
+            ",
         )
         .unwrap();
         let first_id = rt
@@ -5735,12 +5713,12 @@ mod tests {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const a = document.createElement('div'); a.setAttribute('class', 'x'); a.innerHTML = '<span>hi</span>';
                 const b = document.createElement('div'); b.setAttribute('class', 'x'); b.innerHTML = '<span>hi</span>';
                 const c = document.createElement('div'); c.innerHTML = '<span>bye</span>';
                 return [a.isEqualNode(b), a.isEqualNode(c), a.isSameNode(b)];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(result, serde_json::json!([true, false, false]));
@@ -5756,13 +5734,13 @@ mod tests {
             setup_runtime(r#"<div id="p"><span id="b">b</span><span id="c">c</span></div>"#);
         let order = rt
             .evaluate(
-                r#"
+                r"
                 const p = document.getElementById('p');
                 const a = document.createElement('span');
                 a.id = 'a';
                 p.insertBefore(a, document.getElementById('b'));
                 return Array.from(p.children).map(e => e.id).join(',');
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(order, serde_json::json!("a,b,c"));
@@ -5773,12 +5751,12 @@ mod tests {
         let mut rt = setup_runtime(r#"<button id="go">Go</button>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
             const button = document.getElementById('go');
             button.addEventListener('click', () => { button.dataset.clicked = 'yes'; });
             button.click();
             return button.dataset.clicked;
-        "#,
+        ",
             )
             .unwrap();
         assert_eq!(result, serde_json::json!("yes"));
@@ -5789,13 +5767,13 @@ mod tests {
         let mut rt = setup_runtime(r#"<button id="go">Go</button>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
             const button = document.getElementById('go');
             let count = 0;
             button.addEventListener('click', () => { count += 1; });
             button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
             return count;
-        "#,
+        ",
             )
             .unwrap();
         assert_eq!(result.as_f64().unwrap() as i64, 1);
@@ -5807,7 +5785,7 @@ mod tests {
             setup_runtime(r#"<form><button type="submit" id="submit">Submit</button></form>"#);
         let href = rt
             .evaluate(
-                r#"
+                r"
             const form = document.querySelector('form');
             form.addEventListener('submit', (event) => {
                 event.preventDefault();
@@ -5815,7 +5793,7 @@ mod tests {
             });
             document.getElementById('submit').click();
             return location.href;
-        "#,
+        ",
             )
             .unwrap();
         assert_eq!(href, serde_json::json!("http://example.com/submitted"));
@@ -5824,7 +5802,7 @@ mod tests {
             Some((
                 "http://example.com/submitted".to_string(),
                 "GET".to_string(),
-                "".to_string()
+                String::new()
             ))
         );
     }
@@ -6076,7 +6054,7 @@ mod tests {
         let mut rt = setup_runtime(r#"<input id="i">"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
                 (function(){
                     var el = document.getElementById('i');
                     var d = Object.getOwnPropertyDescriptor(el.constructor.prototype, 'value');
@@ -6092,7 +6070,7 @@ mod tests {
                     var afterHelper = { value: el.value, tracked: tracked };
                     return JSON.stringify({ afterDirect: afterDirect, afterHelper: afterHelper });
                 })()
-                "#,
+                ",
             )
             .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(result.as_str().unwrap()).unwrap();
@@ -6114,13 +6092,13 @@ mod tests {
         let mut rt = setup_runtime("<div></div>");
         let result = rt
             .evaluate(
-                r#"JSON.stringify({
+                r"JSON.stringify({
                     docInput: ('oninput' in document),
                     docChange: ('onchange' in document),
                     docClick: ('onclick' in document),
                     elProtoInput: ('oninput' in Element.prototype),
                     winInput: ('oninput' in window)
-                })"#,
+                })",
             )
             .unwrap();
         let p: serde_json::Value = serde_json::from_str(result.as_str().unwrap()).unwrap();
@@ -6138,7 +6116,7 @@ mod tests {
         );
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const source = document.getElementById('src');
                 const clone = source.cloneNode(false);
                 clone.className = 'clone';
@@ -6161,7 +6139,7 @@ mod tests {
                     source.getAttribute('data-token'),
                     source.childNodes.length,
                 ];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(
@@ -6180,7 +6158,7 @@ mod tests {
         );
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const source = document.documentElement;
                 const clone = source.cloneNode(true);
                 const cloneItem = clone.querySelector('.item');
@@ -6207,7 +6185,7 @@ mod tests {
                     clone.querySelector('#app').getAttribute('data-state'),
                     source.querySelector('#app').getAttribute('data-state'),
                 ];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(
@@ -6282,13 +6260,11 @@ mod tests {
         let cookie_str = result.as_str().unwrap();
         assert!(
             cookie_str.contains("session=abc123"),
-            "expected session cookie, got: {}",
-            cookie_str
+            "expected session cookie, got: {cookie_str}"
         );
         assert!(
             cookie_str.contains("theme=dark"),
-            "expected theme cookie, got: {}",
-            cookie_str
+            "expected theme cookie, got: {cookie_str}"
         );
     }
 
@@ -6302,13 +6278,11 @@ mod tests {
         let cookie_str = result.as_str().unwrap();
         assert!(
             cookie_str.contains("visible=yes"),
-            "expected visible cookie, got: {}",
-            cookie_str
+            "expected visible cookie, got: {cookie_str}"
         );
         assert!(
             !cookie_str.contains("secret"),
-            "httpOnly cookie should not be visible to JS, got: {}",
-            cookie_str
+            "httpOnly cookie should not be visible to JS, got: {cookie_str}"
         );
     }
 
@@ -6327,8 +6301,7 @@ mod tests {
         let result = rt.evaluate("document.cookie").unwrap();
         assert!(
             !result.as_str().unwrap().contains("temp="),
-            "cookie should be deleted, got: {}",
-            result
+            "cookie should be deleted, got: {result}"
         );
         assert!(!jar.get_cookie_header(&url).contains("temp="));
     }
@@ -6344,13 +6317,11 @@ mod tests {
         let cookie_str = result.as_str().unwrap();
         assert!(
             cookie_str.contains("server_sid=xyz"),
-            "expected server cookie, got: {}",
-            cookie_str
+            "expected server cookie, got: {cookie_str}"
         );
         assert!(
             cookie_str.contains("client_pref=light"),
-            "expected client cookie, got: {}",
-            cookie_str
+            "expected client cookie, got: {cookie_str}"
         );
     }
 
@@ -6362,13 +6333,11 @@ mod tests {
         let body = html.as_str().unwrap();
         assert!(
             body.contains("Existing"),
-            "existing content should remain, got: {}",
-            body
+            "existing content should remain, got: {body}"
         );
         assert!(
             body.contains("Added"),
-            "written content should appear, got: {}",
-            body
+            "written content should appear, got: {body}"
         );
     }
 
@@ -6761,11 +6730,11 @@ mod tests {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .call_function_on_for_cdp(
-                r#"async () => {
+                r"async () => {
                 const bytes = new Uint8Array([9, 0, 97, 115, 109, 1, 8]);
                 const response = new Response(bytes.subarray(1, 6));
                 return Array.from(new Uint8Array(await response.arrayBuffer()));
-            }"#,
+            }",
                 None,
                 &[],
                 true,
@@ -6823,10 +6792,10 @@ mod tests {
         let mut rt = setup_runtime("<html><body></body></html>");
         rt.execute_script(
             "test",
-            r#"
+            r"
             globalThis.__e = document.createEvent('CustomEvent');
             globalThis.__e.initCustomEvent('myevent', true, false, {hello: 'world'});
-        "#,
+        ",
         )
         .unwrap();
         let t = rt.evaluate("globalThis.__e.type").unwrap();
@@ -6916,7 +6885,7 @@ mod tests {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
-                r#"(() => {
+                r"(() => {
                     const promise = Promise.resolve(1);
                     const event = new PromiseRejectionEvent('unhandledrejection', {
                         promise,
@@ -6934,7 +6903,7 @@ mod tests {
                         event.reason === 'failed',
                         missingPromiseThrows
                     ];
-                })()"#,
+                })()",
             )
             .unwrap();
         assert_eq!(result, serde_json::json!([true, true, true, true]));
@@ -6945,14 +6914,14 @@ mod tests {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
-                r#"(() => {
+                r"(() => {
                     try {
                         document.createEvent('PromiseRejectionEvent');
                         return null;
                     } catch (error) {
                         return [error.name, error instanceof DOMException];
                     }
-                })()"#,
+                })()",
             )
             .unwrap();
         assert_eq!(result, serde_json::json!(["NotSupportedError", true]));
@@ -6963,7 +6932,7 @@ mod tests {
         let mut rt = setup_runtime("<html><body></body></html>");
         let result = rt
             .evaluate(
-                r#"(() => {
+                r"(() => {
                     const event = new StorageEvent('storage', {
                         key: 'theme',
                         oldValue: 'light',
@@ -6985,7 +6954,7 @@ mod tests {
                         legacy.key,
                         legacy.newValue
                     ];
-                })()"#,
+                })()",
             )
             .unwrap();
         assert_eq!(
@@ -7090,7 +7059,7 @@ mod tests {
             );
             stream.write_all(response.as_bytes()).unwrap();
         });
-        format!("http://{}", address)
+        format!("http://{address}")
     }
 
     #[derive(Clone, Copy)]
@@ -7170,7 +7139,7 @@ mod tests {
                 stream.write_all(response.as_bytes()).unwrap();
             }
         });
-        (format!("http://{}", address), requests_rx)
+        (format!("http://{address}"), requests_rx)
     }
 
     fn spawn_import_map_server() -> (String, std::sync::mpsc::Receiver<String>) {
@@ -7207,7 +7176,7 @@ mod tests {
                 stream.write_all(response.as_bytes()).unwrap();
             }
         });
-        (format!("http://{}", address), requests_rx)
+        (format!("http://{address}"), requests_rx)
     }
 
     fn spawn_root_module_import_map_server() -> (String, std::sync::mpsc::Receiver<String>) {
@@ -7242,7 +7211,7 @@ mod tests {
             );
             stream.write_all(response.as_bytes()).unwrap();
         });
-        (format!("http://{}", address), requests_rx)
+        (format!("http://{address}"), requests_rx)
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7252,17 +7221,16 @@ mod tests {
         let client = std::sync::Arc::new(tinybrowser_net::HttpClient::with_full_options(
             jar, None, true,
         ));
-        let mut rt = JsRuntime::with_base_url(&format!("{}/", base));
+        let mut rt = JsRuntime::with_base_url(&format!("{base}/"));
         rt.set_http_client(client);
 
         let error = rt
-            .load_module(&format!("{}/entry.js", base), 1_000)
+            .load_module(&format!("{base}/entry.js"), 1_000)
             .await
             .unwrap_err();
         assert!(
             error.contains("HTTP 404"),
-            "expected entry fetch status in error, got: {}",
-            error
+            "expected entry fetch status in error, got: {error}"
         );
     }
 
@@ -7294,8 +7262,7 @@ mod tests {
             .unwrap_err();
         assert!(
             error.contains("timed out"),
-            "expected graph load timeout, got: {}",
-            error
+            "expected graph load timeout, got: {error}"
         );
         assert!(
             started.elapsed() < std::time::Duration::from_secs(2),
@@ -7307,7 +7274,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn descendant_module_uses_page_cookie_identity_and_headers() {
         let (base, requests) = spawn_module_graph_server(ModuleGraphFixture::CookieProtected);
-        let page_url = url::Url::parse(&format!("{}/", base)).unwrap();
+        let page_url = url::Url::parse(&format!("{base}/")).unwrap();
         let jar = std::sync::Arc::new(tinybrowser_net::CookieJar::new());
         jar.set_cookie("session=ok; Path=/", &page_url);
         let client = std::sync::Arc::new(tinybrowser_net::HttpClient::with_full_options(
@@ -7332,11 +7299,11 @@ mod tests {
                 .push(request.url.path().to_string());
         }));
 
-        let mut rt = JsRuntime::with_base_url(&format!("{}/", base));
+        let mut rt = JsRuntime::with_base_url(&format!("{base}/"));
         rt.set_cookie_jar(jar);
         rt.set_http_client(client);
         rt.set_callbacks(callbacks);
-        rt.load_module(&format!("{}/entry.js", base), 1_000)
+        rt.load_module(&format!("{base}/entry.js"), 1_000)
             .await
             .unwrap();
 
@@ -7468,9 +7435,9 @@ mod tests {
         let client = std::sync::Arc::new(tinybrowser_net::HttpClient::with_full_options(
             jar, None, true,
         ));
-        let mut rt = JsRuntime::with_base_url(&format!("{}/", base));
+        let mut rt = JsRuntime::with_base_url(&format!("{base}/"));
         rt.set_http_client(client);
-        rt.load_module(&format!("{}/entry.js", base), 1_000)
+        rt.load_module(&format!("{base}/entry.js"), 1_000)
             .await
             .unwrap();
 
@@ -7506,7 +7473,7 @@ mod tests {
         let client = std::sync::Arc::new(tinybrowser_net::HttpClient::with_full_options(
             jar, None, true,
         ));
-        let mut rt = JsRuntime::with_base_url(&format!("{}/app/index.html", base));
+        let mut rt = JsRuntime::with_base_url(&format!("{base}/app/index.html"));
         rt.set_http_client(client);
         rt.add_import_map(
             r#"{
@@ -7515,7 +7482,7 @@ mod tests {
                     "dynamic-pkg": "../vendor/dynamic.js"
                 }
             }"#,
-            &format!("{}/config/import-map.json", base),
+            &format!("{base}/config/import-map.json"),
         )
         .unwrap();
 
@@ -7523,7 +7490,7 @@ mod tests {
             "import { value as prefix } from 'pkg/feature.js'; \
              const dynamic = (await import('dynamic-pkg')).value; \
              globalThis.__import_map_values = [prefix, dynamic];",
-            &format!("{}/app/index.html", base),
+            &format!("{base}/app/index.html"),
             1_000,
         )
         .await
@@ -7557,15 +7524,15 @@ mod tests {
         let client = std::sync::Arc::new(tinybrowser_net::HttpClient::with_full_options(
             jar, None, true,
         ));
-        let mut rt = JsRuntime::with_base_url(&format!("{}/index.html", base));
+        let mut rt = JsRuntime::with_base_url(&format!("{base}/index.html"));
         rt.set_http_client(client);
         rt.add_import_map(
             &format!(r#"{{"imports":{{"{base}/entry.js":"{base}/remapped.js"}}}}"#),
-            &format!("{}/index.html", base),
+            &format!("{base}/index.html"),
         )
         .unwrap();
 
-        rt.load_module(&format!("{}/entry.js", base), 1_000)
+        rt.load_module(&format!("{base}/entry.js"), 1_000)
             .await
             .unwrap();
         assert_eq!(
@@ -7693,8 +7660,7 @@ mod tests {
             .unwrap_err();
         assert!(
             error.contains("Inline module load error"),
-            "expected graph load error, got: {}",
-            error
+            "expected graph load error, got: {error}"
         );
     }
 
@@ -7711,8 +7677,7 @@ mod tests {
             .unwrap_err();
         assert!(
             error.contains("Inline module eval error") && error.contains("module-evaluation-boom"),
-            "expected evaluation error, got: {}",
-            error
+            "expected evaluation error, got: {error}"
         );
     }
 
@@ -7729,8 +7694,7 @@ mod tests {
             .unwrap_err();
         assert!(
             error.contains("Inline module evaluation timed out after"),
-            "expected evaluation timeout, got: {}",
-            error
+            "expected evaluation timeout, got: {error}"
         );
     }
 
@@ -7841,10 +7805,10 @@ mod tests {
         );
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const el = document.getElementById('b');
                 return [el.role, el.ariaLabel, el.ariaSelected];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(result, serde_json::json!(["tab", "Settings", "true"]));
@@ -7863,7 +7827,7 @@ mod tests {
         let mut rt = setup_runtime("<div></div>");
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const connection = navigator.connection;
                 let calls = 0;
                 let receiverMatches = false;
@@ -7884,7 +7848,7 @@ mod tests {
                     calls,
                     receiverMatches,
                 ];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(
@@ -7898,7 +7862,7 @@ mod tests {
         let mut rt = setup_runtime("<div></div>");
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const encoder = new TextEncoderStream();
                 const decoder = new TextDecoderStream();
                 return {
@@ -7909,7 +7873,7 @@ mod tests {
                     decoderReadable: typeof decoder.readable.getReader,
                     decoderWritable: typeof decoder.writable.getWriter,
                 };
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(
@@ -7977,7 +7941,7 @@ mod tests {
         let mut rt = setup_runtime(r#"<div id="p"><span id="t">X</span></div>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const t = document.getElementById('t');
                 t.insertAdjacentText('afterbegin', 'AB');
                 t.insertAdjacentText('beforeend', 'BE');
@@ -7989,7 +7953,7 @@ mod tests {
                     document.getElementById('p').textContent,
                     t.getElementsByTagName('b').length,
                 ];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(
@@ -8007,7 +7971,7 @@ mod tests {
         let mut rt = setup_runtime(r#"<div id="p"><span id="t">X</span></div>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const t = document.getElementById('t');
                 const before = document.createElement('b');  before.id = 'before';
                 const after  = document.createElement('i');  after.id  = 'after';
@@ -8025,7 +7989,7 @@ mod tests {
                     siblings,
                     inT,
                 ];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(
@@ -8063,12 +8027,12 @@ mod tests {
         let mut rt = setup_runtime(r#"<div id="d"></div>"#);
         let result = rt
             .evaluate(
-                r#"
+                r"
                 const el = document.getElementById('d');
                 el.role = 'menu';
                 el.ariaExpanded = 'true';
                 return [el.getAttribute('role'), el.getAttribute('aria-expanded')];
-                "#,
+                ",
             )
             .unwrap();
         assert_eq!(result, serde_json::json!(["menu", "true"]));

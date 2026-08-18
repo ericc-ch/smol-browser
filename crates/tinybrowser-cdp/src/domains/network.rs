@@ -20,8 +20,7 @@ const DEFAULT_SAME_SITE: &str = "Lax";
 // requiring a session would break those flows (Storage.* already mirrors this).
 fn cookie_jar_for<'a>(ctx: &'a CdpContext, session_id: &Option<String>) -> &'a Arc<CookieJar> {
     ctx.get_session_page(session_id)
-        .map(|p| &p.context.cookie_jar)
-        .unwrap_or(&ctx.default_context.cookie_jar)
+        .map_or(&ctx.default_context.cookie_jar, |p| &p.context.cookie_jar)
 }
 
 pub async fn handle(
@@ -139,14 +138,37 @@ pub async fn handle(
                     "body": body.body,
                     "base64Encoded": body.base64_encoded,
                 })),
-                None => Err(format!(
-                    "No response body found for requestId {}",
-                    request_id
-                )),
+                None => Err(format!("No response body found for requestId {request_id}")),
             }
         }
-        _ => Err(format!("Unknown Network method: {}", method)),
+        _ => Err(format!("Unknown Network method: {method}")),
     }
+}
+
+pub(crate) fn cookie_info_to_cdp_json(c: &tinybrowser_net::CookieInfo) -> Value {
+    let expires = c.expires.unwrap_or(SESSION_COOKIE_EXPIRES);
+    let session = c.expires.is_none();
+    let same_site = if c.same_site.is_empty() {
+        DEFAULT_SAME_SITE
+    } else {
+        c.same_site.as_str()
+    };
+    json!({
+        "name": c.name,
+        "value": c.value,
+        "domain": c.domain,
+        "path": c.path,
+        "expires": expires,
+        "size": c.name.len() + c.value.len(),
+        "httpOnly": c.http_only,
+        "secure": c.secure,
+        "session": session,
+        "sameSite": same_site,
+        "sameParty": false,
+        "sourceScheme": if c.secure { SOURCE_SCHEME_SECURE } else { SOURCE_SCHEME_NONSECURE },
+        "sourcePort": if c.secure { DEFAULT_SECURE_PORT } else { DEFAULT_INSECURE_PORT },
+        "priority": "Medium",
+    })
 }
 
 #[cfg(test)]
@@ -416,30 +438,4 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("No response body found"));
     }
-}
-
-pub(crate) fn cookie_info_to_cdp_json(c: &tinybrowser_net::CookieInfo) -> Value {
-    let expires = c.expires.unwrap_or(SESSION_COOKIE_EXPIRES);
-    let session = c.expires.is_none();
-    let same_site = if c.same_site.is_empty() {
-        DEFAULT_SAME_SITE
-    } else {
-        c.same_site.as_str()
-    };
-    json!({
-        "name": c.name,
-        "value": c.value,
-        "domain": c.domain,
-        "path": c.path,
-        "expires": expires,
-        "size": c.name.len() + c.value.len(),
-        "httpOnly": c.http_only,
-        "secure": c.secure,
-        "session": session,
-        "sameSite": same_site,
-        "sameParty": false,
-        "sourceScheme": if c.secure { SOURCE_SCHEME_SECURE } else { SOURCE_SCHEME_NONSECURE },
-        "sourcePort": if c.secure { DEFAULT_SECURE_PORT } else { DEFAULT_INSECURE_PORT },
-        "priority": "Medium",
-    })
 }

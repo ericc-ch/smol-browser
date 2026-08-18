@@ -26,7 +26,9 @@ impl Response {
     }
 
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(&name.to_lowercase()).map(|s| s.as_str())
+        self.headers
+            .get(&name.to_lowercase())
+            .map(std::string::String::as_str)
     }
 
     pub fn content_type(&self) -> Option<&str> {
@@ -35,8 +37,7 @@ impl Response {
 
     pub fn is_html(&self) -> bool {
         self.content_type()
-            .map(|ct| ct.contains("text/html"))
-            .unwrap_or(false)
+            .is_some_and(|ct| ct.contains("text/html"))
     }
 }
 
@@ -340,7 +341,7 @@ mod tests {
         let cross = Url::parse("https://api.example.com/data").unwrap();
 
         let mut omit = ResourceRequest::scripted_fetch(
-            Some(initiator.clone()),
+            Some(initiator),
             "GET".into(),
             Default::default(),
             None,

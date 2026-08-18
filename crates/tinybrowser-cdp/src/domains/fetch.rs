@@ -37,6 +37,12 @@ pub struct FetchInterceptState {
     request_counter: u64,
 }
 
+impl Default for FetchInterceptState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FetchInterceptState {
     pub fn new() -> Self {
         FetchInterceptState {
@@ -64,22 +70,24 @@ pub async fn handle(
             let patterns = params
                 .get("patterns")
                 .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|p| {
-                            p.get("urlPattern")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.to_string())
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_else(|| vec!["*".to_string()]);
+                .map_or_else(
+                    || vec!["*".to_string()],
+                    |arr| {
+                        arr.iter()
+                            .filter_map(|p| {
+                                p.get("urlPattern")
+                                    .and_then(|v| v.as_str())
+                                    .map(std::string::ToString::to_string)
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                );
 
             ctx.fetch_intercept.enabled = true;
             ctx.fetch_intercept.patterns = patterns.clone();
             let tx_clone = ctx.intercept_tx.clone();
             if let Some(page) = ctx.get_session_page_mut(session_id) {
-                page.intercept_block_patterns = patterns.clone();
+                page.intercept_block_patterns = patterns;
                 if let Some(tx) = tx_clone {
                     page.set_intercept_tx(tx);
                 }
@@ -118,16 +126,16 @@ pub async fn handle(
                     url: params
                         .get("url")
                         .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
+                        .map(std::string::ToString::to_string),
                     method: params
                         .get("method")
                         .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
+                        .map(std::string::ToString::to_string),
                     headers: None,
                     post_data: params
                         .get("postData")
                         .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
+                        .map(std::string::ToString::to_string),
                 });
             }
             Ok(json!({}))
@@ -140,7 +148,7 @@ pub async fn handle(
 
             let status = params
                 .get("responseCode")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(200) as u16;
             let headers: HashMap<String, String> = params
                 .get("responseHeaders")
@@ -219,6 +227,6 @@ pub async fn handle(
                 .map_err(|error| format!("Fetch.takeResponseBodyAsStream: {error}"))?;
             Ok(json!({ "stream": handle }))
         }
-        _ => Err(format!("Unknown Fetch method: {}", method)),
+        _ => Err(format!("Unknown Fetch method: {method}")),
     }
 }

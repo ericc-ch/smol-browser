@@ -122,7 +122,7 @@ pub async fn handle(
         "setTouchEmulationEnabled" => Err(crate::util::cdp_unimplemented(
             "Emulation.setTouchEmulationEnabled",
         )),
-        _ => Err(format!("Unknown Emulation method: {}", method)),
+        _ => Err(format!("Unknown Emulation method: {method}")),
     }
 }
 

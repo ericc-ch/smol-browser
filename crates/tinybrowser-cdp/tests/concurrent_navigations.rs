@@ -35,7 +35,7 @@ async fn pick_port() -> u16 {
 }
 
 async fn one_client(port: u16, id_base: u64) -> Result<(), String> {
-    let url = format!("ws://127.0.0.1:{}/devtools/browser", port);
+    let url = format!("ws://127.0.0.1:{port}/devtools/browser");
     let (mut ws, _) = connect_async(&url).await.map_err(|e| e.to_string())?;
 
     // Target.createTarget — get a sessionId via Target.attachToTarget.
@@ -108,7 +108,7 @@ async fn one_client(port: u16, id_base: u64) -> Result<(), String> {
             _ => continue,
         };
         let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-        if v.get("id").and_then(|x| x.as_u64()) == Some(id_base + 1) {
+        if v.get("id").and_then(serde_json::Value::as_u64) == Some(id_base + 1) {
             return Ok(());
         }
     }
@@ -140,8 +140,8 @@ async fn concurrency_5_does_not_abort_js() {
             for (i, h) in handles.into_iter().enumerate() {
                 match h.await {
                     Ok(Ok(())) => ok += 1,
-                    Ok(Err(e)) => panic!("client {} failed: {}", i, e),
-                    Err(e) => panic!("client {} join error: {}", i, e),
+                    Ok(Err(e)) => panic!("client {i} failed: {e}"),
+                    Err(e) => panic!("client {i} join error: {e}"),
                 }
             }
             assert_eq!(ok, 5, "all 5 concurrent clients must complete navigate");

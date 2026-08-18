@@ -33,10 +33,10 @@ pub async fn handle(
         "enable" => Ok(json!({})),
         "getFullAXTree" => {
             let page = ctx.get_session_page(session_id).ok_or("No page")?;
-            let nodes = page.with_dom(|dom| build_ax_nodes(dom)).unwrap_or_default();
+            let nodes = page.with_dom(build_ax_nodes).unwrap_or_default();
             Ok(json!({ "nodes": nodes }))
         }
-        _ => Err(format!("Unknown Accessibility method: {}", method)),
+        _ => Err(format!("Unknown Accessibility method: {method}")),
     }
 }
 
@@ -226,8 +226,7 @@ fn map_role(data: &NodeData) -> &'static str {
                     let type_attr = attrs
                         .iter()
                         .find(|a| a.name.local.as_ref() == "type")
-                        .map(|a| a.value.as_str())
-                        .unwrap_or("text");
+                        .map_or("text", |a| a.value.as_str());
                     match type_attr {
                         "submit" | "reset" | "button" | "image" => "button",
                         "checkbox" => "checkbox",
@@ -415,7 +414,7 @@ fn compute_properties(_dom: &DomTree, node: &tinybrowser_dom::Node) -> Vec<Value
 
         // level for headings
         if let Some(level) = tag.strip_prefix('h').and_then(|s| s.parse::<u32>().ok()) {
-            if level >= 1 && level <= 6 {
+            if (1..=6).contains(&level) {
                 props.push(json!({"name": "level", "value": ax_value_integer(level)}));
             }
         }

@@ -19,11 +19,11 @@ pub fn parse_cdp_cookie(value: &Value) -> Option<CookieInfo> {
     let domain = value
         .get("domain")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .or_else(|| {
             url_parsed
                 .as_ref()
-                .and_then(|u| u.host_str().map(|h| h.to_string()))
+                .and_then(|u| u.host_str().map(std::string::ToString::to_string))
         })
         .unwrap_or_default();
 
@@ -34,7 +34,7 @@ pub fn parse_cdp_cookie(value: &Value) -> Option<CookieInfo> {
     let path = value
         .get("path")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .or_else(|| {
             url_parsed
                 .as_ref()
@@ -44,11 +44,11 @@ pub fn parse_cdp_cookie(value: &Value) -> Option<CookieInfo> {
 
     let secure = value
         .get("secure")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let http_only = value
         .get("httpOnly")
-        .and_then(|v| v.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let same_site = value
         .get("sameSite")
@@ -57,7 +57,7 @@ pub fn parse_cdp_cookie(value: &Value) -> Option<CookieInfo> {
         .to_string();
     let expires = value
         .get("expires")
-        .and_then(|v| v.as_f64())
+        .and_then(serde_json::Value::as_f64)
         .map(|f| f as i64);
 
     Some(CookieInfo {
@@ -92,18 +92,18 @@ pub fn parse_delete_cookies_params(params: &Value) -> Option<DeleteCookiesFilter
     let domain = params
         .get("domain")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .or_else(|| {
             url_parsed
                 .as_ref()
-                .and_then(|u| u.host_str().map(|h| h.to_string()))
+                .and_then(|u| u.host_str().map(std::string::ToString::to_string))
         })
         .unwrap_or_default();
 
     let path = params
         .get("path")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .or_else(|| url_parsed.as_ref().map(|u| u.path().to_string()));
 
     Some(DeleteCookiesFilter { name, domain, path })

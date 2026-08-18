@@ -91,7 +91,7 @@ async fn node_filter_exposes_the_standard_constants() {
     let v = eval(
         &mut ctx,
         2,
-        r#"JSON.stringify({
+        r"JSON.stringify({
             accept: NodeFilter.FILTER_ACCEPT,
             reject: NodeFilter.FILTER_REJECT,
             skip: NodeFilter.FILTER_SKIP,
@@ -99,7 +99,7 @@ async fn node_filter_exposes_the_standard_constants() {
             showElement: NodeFilter.SHOW_ELEMENT,
             showText: NodeFilter.SHOW_TEXT,
             showComment: NodeFilter.SHOW_COMMENT,
-        })"#,
+        })",
         &sid,
     )
     .await;
