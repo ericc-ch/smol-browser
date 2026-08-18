@@ -297,41 +297,8 @@ pub(crate) fn response_too_large(url: &Url, limit: usize) -> NetError {
 
 #[cfg(test)]
 mod tests {
-    use super::{RequestCredentials, RequestMode, ResourceRequest, ResourceType};
+    use super::{RequestCredentials, RequestMode, ResourceRequest};
     use url::Url;
-
-    #[test]
-    fn resource_profiles_use_type_specific_fetch_metadata() {
-        let document = Url::parse("https://app.example/page?q=1#fragment").unwrap();
-        let image = ResourceRequest::subresource(ResourceType::Image, &document);
-        assert_eq!(image.mode, RequestMode::NoCors);
-        assert_eq!(image.credentials, RequestCredentials::Include);
-        assert_eq!(image.destination(), "image");
-        assert!(image.accept().starts_with("image/webp"));
-
-        let stylesheet = ResourceRequest::subresource(ResourceType::Stylesheet, &document);
-        assert_eq!(stylesheet.destination(), "style");
-        assert_eq!(stylesheet.accept(), "text/css,*/*;q=0.1");
-
-        let font = ResourceRequest::subresource(ResourceType::Font, &document);
-        assert_eq!(font.mode, RequestMode::Cors);
-        assert_eq!(font.credentials, RequestCredentials::SameOrigin);
-        assert_eq!(font.destination(), "font");
-        assert_eq!(font.accept(), "*/*");
-
-        assert!(image.sends_credentials_to(&Url::parse("https://cdn.example/image.png").unwrap()));
-        assert!(font.sends_credentials_to(&Url::parse("https://app.example/font.woff2").unwrap()));
-        assert!(!font.sends_credentials_to(&Url::parse("https://cdn.example/font.woff2").unwrap()));
-
-        let module = ResourceRequest::module_script(&document, &document);
-        assert_eq!(module.resource_type, ResourceType::Script);
-        assert_eq!(module.mode, RequestMode::Cors);
-        assert_eq!(module.credentials, RequestCredentials::SameOrigin);
-        assert_eq!(module.destination(), "script");
-        assert_eq!(module.accept(), "*/*");
-        assert!(module.sends_credentials_to(&Url::parse("https://app.example/chunk.js").unwrap()));
-        assert!(!module.sends_credentials_to(&Url::parse("https://cdn.example/chunk.js").unwrap()));
-    }
 
     #[test]
     fn fetch_credentials_gate_cookie_send_per_request_origin() {

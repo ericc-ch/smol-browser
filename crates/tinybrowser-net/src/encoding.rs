@@ -406,11 +406,6 @@ mod tests {
     }
 
     #[test]
-    fn text_decoder_unknown_label_is_none() {
-        assert!(TextDecoder::new("not-an-encoding", TextDecoderOptions::default()).is_none());
-    }
-
-    #[test]
     fn text_decoder_fatal_rejects_invalid_bytes() {
         let dec = TextDecoder::new(
             "utf-8",

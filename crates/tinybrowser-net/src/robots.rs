@@ -143,7 +143,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_basic_robots() {
+    fn test_robots_txt_parsing_and_allow_checks() {
         let body = "User-agent: *\nDisallow: /private/\nDisallow: /admin\nAllow: /admin/public\n";
         let cache = RobotsCache::new();
         cache.parse_and_store("example.com", body, "tinybrowser");
@@ -152,19 +152,13 @@ mod tests {
         assert!(!cache.is_allowed("example.com", "/private/secret"));
         assert!(!cache.is_allowed("example.com", "/admin"));
         assert!(cache.is_allowed("example.com", "/admin/public"));
-    }
 
-    #[test]
-    fn test_no_rules_means_allowed() {
-        let cache = RobotsCache::new();
+        // Domain with no rules defaults to allowed
         assert!(cache.is_allowed("unknown.com", "/anything"));
-    }
 
-    #[test]
-    fn test_disallow_all() {
-        let body = "User-agent: *\nDisallow: /\n";
-        let cache = RobotsCache::new();
-        cache.parse_and_store("blocked.com", body, "tinybrowser");
+        // Disallow all rule
+        let block_all = "User-agent: *\nDisallow: /\n";
+        cache.parse_and_store("blocked.com", block_all, "tinybrowser");
         assert!(!cache.is_allowed("blocked.com", "/"));
         assert!(!cache.is_allowed("blocked.com", "/page"));
     }

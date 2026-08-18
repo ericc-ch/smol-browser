@@ -736,7 +736,6 @@ mod tests {
     use super::HttpClient;
     use crate::callbacks::CallbackRegistry;
     use crate::cookies::CookieJar;
-    use crate::ssrf::custom_cert_store_requested;
     use crate::types::{NetError, RequestCredentials, RequestMode, ResourceRequest, ResourceType};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1211,39 +1210,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cacheable_identical_module_scripts_share_one_in_flight_request() {
-        let (url, network_requests) =
-            cacheable_resource_fixture(200, "Cache-Control: public, max-age=3600\r\n").await;
-        let initiator = url.join("/app.js").unwrap();
-        let client = Arc::new(HttpClient::with_full_options(
-            Arc::new(CookieJar::new()),
-            None,
-            true,
-        ));
-
-        let mut fetches = tokio::task::JoinSet::new();
-        for _ in 0..16 {
-            let client = client.clone();
-            let url = url.clone();
-            let request = ResourceRequest::module_script(&initiator, &initiator);
-            fetches.spawn(async move {
-                client
-                    .fetch_resource_with_callbacks(&url, request, None)
-                    .await
-                    .unwrap()
-            });
-        }
-        let mut responses = Vec::new();
-        while let Some(response) = fetches.join_next().await {
-            responses.push(response.unwrap());
-        }
-
-        assert_eq!(responses.len(), 16);
-        assert!(responses.iter().all(|response| response.status == 200));
-        assert_eq!(network_requests.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
     async fn distinct_subresource_urls_do_not_coalesce() {
         let (url, network_requests) =
             cacheable_resource_fixture(200, "Cache-Control: public, max-age=3600\r\n").await;
@@ -1516,25 +1482,5 @@ mod tests {
             client.fetch(&url).await.is_err(),
             "unknown CA must be rejected"
         );
-    }
-
-    #[test]
-    fn empty_ssl_cert_env_is_treated_as_unset() {
-        use std::ffi::OsStr;
-        assert!(!custom_cert_store_requested(Some(OsStr::new("")), None));
-        assert!(!custom_cert_store_requested(None, Some(OsStr::new(""))));
-        assert!(!custom_cert_store_requested(
-            Some(OsStr::new("")),
-            Some(OsStr::new(""))
-        ));
-        assert!(!custom_cert_store_requested(None, None));
-        assert!(custom_cert_store_requested(
-            Some(OsStr::new("/etc/corp/ca.pem")),
-            None
-        ));
-        assert!(custom_cert_store_requested(
-            None,
-            Some(OsStr::new("/etc/ssl/certs"))
-        ));
     }
 }

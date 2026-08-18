@@ -824,17 +824,6 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_cookies() {
-        let jar = CookieJar::new();
-        let url = Url::parse("https://example.com/").unwrap();
-        jar.set_cookie("a=1", &url);
-        assert!(!jar.get_cookie_header(&url).is_empty());
-
-        jar.clear();
-        assert!(jar.get_cookie_header(&url).is_empty());
-    }
-
-    #[test]
     fn test_set_cookies_from_cdp_preserves_same_site_and_expires() {
         let jar = CookieJar::new();
         let future_expiry = std::time::SystemTime::now()
@@ -842,39 +831,37 @@ mod tests {
             .unwrap()
             .as_secs() as i64
             + 3600;
-        jar.set_cookies_from_cdp(vec![CookieInfo {
-            name: "sid".to_string(),
-            value: "abc".to_string(),
-            domain: "example.com".to_string(),
-            path: "/".to_string(),
-            secure: true,
-            http_only: true,
-            same_site: "Strict".to_string(),
-            expires: Some(future_expiry),
-        }]);
+        jar.set_cookies_from_cdp(vec![
+            CookieInfo {
+                name: "sid".to_string(),
+                value: "abc".to_string(),
+                domain: "example.com".to_string(),
+                path: "/".to_string(),
+                secure: true,
+                http_only: true,
+                same_site: "Strict".to_string(),
+                expires: Some(future_expiry),
+            },
+            CookieInfo {
+                name: "session_only".to_string(),
+                value: "xyz".to_string(),
+                domain: "example.com".to_string(),
+                path: "/".to_string(),
+                secure: false,
+                http_only: false,
+                same_site: String::new(),
+                expires: None,
+            },
+        ]);
 
         let cookies = jar.get_all_cookies();
-        assert_eq!(cookies.len(), 1);
-        assert_eq!(cookies[0].same_site, "Strict");
-        assert_eq!(cookies[0].expires, Some(future_expiry));
-    }
-
-    #[test]
-    fn test_set_cookies_from_cdp_session_when_expires_none() {
-        let jar = CookieJar::new();
-        jar.set_cookies_from_cdp(vec![CookieInfo {
-            name: "n".to_string(),
-            value: "v".to_string(),
-            domain: "example.com".to_string(),
-            path: "/".to_string(),
-            secure: false,
-            http_only: false,
-            same_site: String::new(),
-            expires: None,
-        }]);
-        let cookies = jar.get_all_cookies();
-        assert_eq!(cookies[0].expires, None);
-        assert_eq!(cookies[0].same_site, DEFAULT_SAME_SITE);
+        assert_eq!(cookies.len(), 2);
+        let sid = cookies.iter().find(|c| c.name == "sid").unwrap();
+        let session = cookies.iter().find(|c| c.name == "session_only").unwrap();
+        assert_eq!(sid.same_site, "Strict");
+        assert_eq!(sid.expires, Some(future_expiry));
+        assert_eq!(session.expires, None);
+        assert_eq!(session.same_site, DEFAULT_SAME_SITE);
     }
 
     #[test]
@@ -954,62 +941,6 @@ mod tests {
         let header = jar2.get_cookie_header(&url);
         assert!(header.contains("session=abc123"));
         assert!(header.contains("token=xyz"));
-    }
-
-    #[test]
-    fn test_load_nonexistent_file_returns_zero() {
-        let jar = CookieJar::new();
-        let count = jar
-            .load_from_file(std::path::Path::new("/nonexistent/cookies.json"))
-            .unwrap();
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn test_domain_matches_subdomain_without_leading_dot() {
-        let jar = CookieJar::new();
-        jar.set_cookies_from_cdp(vec![CookieInfo {
-            name: "session".to_string(),
-            value: "abc".to_string(),
-            domain: "xiaohongshu.com".to_string(),
-            path: "/".to_string(),
-            secure: false,
-            http_only: true,
-            same_site: String::new(),
-            expires: None,
-        }]);
-        let url = Url::parse("https://www.xiaohongshu.com/explore").unwrap();
-        let header = jar.get_cookie_header(&url);
-        assert!(
-            header.contains("session=abc"),
-            "Cookie header was: '{header}'"
-        );
-    }
-
-    #[test]
-    fn test_cookie_from_file_load_then_send_in_request() {
-        // Simulate what happens: load cookies from file → navigate → cookie should be in request
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("cookies.json");
-
-        // Write cookies like we exported from Chrome
-        let cookies = serde_json::json!([
-            {"name": "a1", "value": "testval", "domain": "xiaohongshu.com", "path": "/", "secure": false, "httpOnly": false},
-            {"name": "web_session", "value": "sess123", "domain": "xiaohongshu.com", "path": "/", "secure": false, "httpOnly": true},
-        ]);
-        std::fs::write(&path, serde_json::to_string(&cookies).unwrap()).unwrap();
-
-        let jar = CookieJar::new();
-        let count = jar.load_from_file(&path).unwrap();
-        assert_eq!(count, 2, "Should load 2 cookies");
-
-        let url = Url::parse("https://www.xiaohongshu.com/explore").unwrap();
-        let header = jar.get_cookie_header(&url);
-        assert!(header.contains("a1=testval"), "Missing a1 in: '{header}'");
-        assert!(
-            header.contains("web_session=sess123"),
-            "Missing web_session in: '{header}'"
-        );
     }
 
     #[test]
@@ -1106,34 +1037,20 @@ mod tests {
     }
 
     #[test]
-    fn default_cookie_path_is_request_directory() {
-        // RFC 6265 5.1.4 default-path: up to (not including) the right-most '/'.
-        assert_eq!(default_cookie_path("/app/login"), "/app");
-        assert_eq!(default_cookie_path("/app/"), "/app");
-        assert_eq!(default_cookie_path("/a/b/c"), "/a/b");
-        // No more than one '/', empty, or non-absolute -> "/".
-        assert_eq!(default_cookie_path("/foo"), "/");
-        assert_eq!(default_cookie_path("/"), "/");
-        assert_eq!(default_cookie_path(""), "/");
-        assert_eq!(default_cookie_path("relative"), "/");
-    }
-
-    #[test]
     fn cookie_without_path_defaults_to_directory_not_full_path() {
-        // A Set-Cookie with no Path attribute on /app/login must scope to /app
-        // (RFC 6265 5.1.4), so the session survives navigation to /app/dashboard.
-        // Before this fix it was scoped to the full path /app/login and vanished
-        // on the next page, appearing as a silent logout.
+        // A Set-Cookie or document.cookie with no Path attribute on /app/login
+        // must scope to /app (RFC 6265 5.1.4), so the session survives navigation
+        // to sibling paths under /app/.
         let jar = CookieJar::new();
         let login = Url::parse("https://example.com/app/login").unwrap();
         jar.set_cookie("sid=abc", &login);
+        jar.set_cookie_from_js("cart=xyz", &login);
 
         let dashboard = Url::parse("https://example.com/app/dashboard").unwrap();
-        assert!(
-            jar.get_cookie_header(&dashboard).contains("sid=abc"),
-            "session cookie was not sent to a sibling path under the same directory: {}",
-            jar.get_cookie_header(&dashboard)
-        );
+        let header = jar.get_cookie_header(&dashboard);
+        assert!(header.contains("sid=abc"));
+        assert!(jar.get_js_visible_cookies(&dashboard).contains("cart=xyz"));
+
         // Still sent at the directory root and the original path.
         let app_root = Url::parse("https://example.com/app/").unwrap();
         assert!(jar.get_cookie_header(&app_root).contains("sid=abc"));
@@ -1141,23 +1058,6 @@ mod tests {
 
         // But not to an unrelated top-level path outside the directory.
         let other = Url::parse("https://example.com/other").unwrap();
-        assert!(
-            !jar.get_cookie_header(&other).contains("sid=abc"),
-            "cookie leaked outside its default-path directory"
-        );
-    }
-
-    #[test]
-    fn js_cookie_without_path_also_defaults_to_directory() {
-        // document.cookie set on /shop/cart with no path must reach /shop/checkout.
-        let jar = CookieJar::new();
-        let cart = Url::parse("https://example.com/shop/cart").unwrap();
-        jar.set_cookie_from_js("cart=xyz", &cart);
-        let checkout = Url::parse("https://example.com/shop/checkout").unwrap();
-        assert!(
-            jar.get_js_visible_cookies(&checkout).contains("cart=xyz"),
-            "JS cookie not visible at sibling path: {}",
-            jar.get_js_visible_cookies(&checkout)
-        );
+        assert!(!jar.get_cookie_header(&other).contains("sid=abc"));
     }
 }

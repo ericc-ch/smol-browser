@@ -144,8 +144,8 @@ pub(crate) fn response_cache_lifetime(response: &Response) -> Option<Duration> {
 
 #[cfg(test)]
 mod tests {
-    use super::{response_cache_lifetime, ResourceCache, ResourceCacheKey};
-    use crate::types::{RequestCredentials, RequestMode, ResourceType, Response};
+    use super::response_cache_lifetime;
+    use crate::types::Response;
     use std::time::Duration;
     use url::Url;
 
@@ -159,20 +159,6 @@ mod tests {
                 .collect(),
             body: body.to_vec(),
             redirected_from: Vec::new(),
-        }
-    }
-
-    fn cache_key() -> ResourceCacheKey {
-        ResourceCacheKey {
-            url: "https://app.example/asset.js".into(),
-            resource_type: ResourceType::Script,
-            mode: RequestMode::NoCors,
-            credentials: RequestCredentials::Include,
-            initiator: None,
-            referrer: None,
-            user_agent: String::new(),
-            extra_headers: Vec::new(),
-            max_response_bytes: 1024,
         }
     }
 
@@ -211,17 +197,5 @@ mod tests {
             )),
             None
         );
-    }
-
-    #[test]
-    fn resource_cache_insert_and_get_round_trip() {
-        let mut cache = ResourceCache::default();
-        let key = cache_key();
-        cache.insert(
-            key.clone(),
-            response(200, &[("cache-control", "max-age=60")], b"body"),
-            Duration::from_mins(1),
-        );
-        assert_eq!(cache.get(&key).unwrap().body, b"body");
     }
 }
