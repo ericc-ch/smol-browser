@@ -210,41 +210,31 @@ impl JsNode {
 
     #[qjs(get, rename = "parentNode")]
     pub fn parent_node<'js>(&self, ctx: Ctx<'js>) -> Option<Class<'js, JsNode>> {
-        let nid = self.with_dom(|dom| {
-            dom.with_node(self.id(), |n| n.parent).flatten()
-        })??;
+        let nid = self.with_dom(|dom| dom.with_node(self.id(), |n| n.parent).flatten())??;
         self.wrap_id(ctx, nid)
     }
 
     #[qjs(get, rename = "firstChild")]
     pub fn first_child<'js>(&self, ctx: Ctx<'js>) -> Option<Class<'js, JsNode>> {
-        let nid = self.with_dom(|dom| {
-            dom.with_node(self.id(), |n| n.first_child).flatten()
-        })??;
+        let nid = self.with_dom(|dom| dom.with_node(self.id(), |n| n.first_child).flatten())??;
         self.wrap_id(ctx, nid)
     }
 
     #[qjs(get, rename = "lastChild")]
     pub fn last_child<'js>(&self, ctx: Ctx<'js>) -> Option<Class<'js, JsNode>> {
-        let nid = self.with_dom(|dom| {
-            dom.with_node(self.id(), |n| n.last_child).flatten()
-        })??;
+        let nid = self.with_dom(|dom| dom.with_node(self.id(), |n| n.last_child).flatten())??;
         self.wrap_id(ctx, nid)
     }
 
     #[qjs(get, rename = "nextSibling")]
     pub fn next_sibling<'js>(&self, ctx: Ctx<'js>) -> Option<Class<'js, JsNode>> {
-        let nid = self.with_dom(|dom| {
-            dom.with_node(self.id(), |n| n.next_sibling).flatten()
-        })??;
+        let nid = self.with_dom(|dom| dom.with_node(self.id(), |n| n.next_sibling).flatten())??;
         self.wrap_id(ctx, nid)
     }
 
     #[qjs(get, rename = "previousSibling")]
     pub fn previous_sibling<'js>(&self, ctx: Ctx<'js>) -> Option<Class<'js, JsNode>> {
-        let nid = self.with_dom(|dom| {
-            dom.with_node(self.id(), |n| n.prev_sibling).flatten()
-        })??;
+        let nid = self.with_dom(|dom| dom.with_node(self.id(), |n| n.prev_sibling).flatten())??;
         self.wrap_id(ctx, nid)
     }
 
@@ -270,7 +260,7 @@ impl JsNode {
         };
         let other_id = other.borrow().id();
         self.with_dom(|dom| other_id == self.id() || dom.ancestors(other_id).contains(&self.id()))
-        .unwrap_or(false)
+            .unwrap_or(false)
     }
 
     #[qjs(rename = "getAttribute")]

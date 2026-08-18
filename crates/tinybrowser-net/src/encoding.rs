@@ -15,62 +15,85 @@
 
 use encoding_rs::{DecoderResult, EncoderResult, Encoding, UTF_8};
 
-/// WHATWG canonical (lowercased) name for an encoding label, or None if the
-/// label is not a known encoding. Backs `TextDecoder`'s label validation and
-/// its `.encoding` property.
-pub fn label_name(label: &str) -> Option<String> {
-    Encoding::for_label(label.as_bytes()).map(|e| e.name().to_ascii_lowercase())
+/// Options for [`TextDecoder`]. Both flags default to `false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TextDecoderOptions {
+    pub fatal: bool,
+    pub ignore_bom: bool,
 }
 
-/// Decode `bytes` with an explicit encoding label, with TextDecoder semantics.
-/// Returns None when the label is unknown, or (when `fatal`) when the input is
-/// not valid in that encoding. Non-fatal decoding replaces errors with U+FFFD.
-pub fn decode_with_label(
-    label: &str,
-    bytes: &[u8],
-    fatal: bool,
-    ignore_bom: bool,
-) -> Option<String> {
-    let enc = Encoding::for_label(label.as_bytes())?;
-    let mut dec = if ignore_bom {
-        enc.new_decoder_without_bom_handling()
-    } else {
-        enc.new_decoder()
-    };
-    if fatal {
-        let mut out = String::with_capacity(bytes.len() + 1);
-        let (res, _) = dec.decode_to_string_without_replacement(bytes, &mut out, true);
-        match res {
-            DecoderResult::InputEmpty => Some(out),
-            _ => None,
+/// WHATWG `TextDecoder`: decode bytes with an explicit encoding label.
+pub struct TextDecoder {
+    encoding: &'static Encoding,
+    options: TextDecoderOptions,
+}
+
+impl TextDecoder {
+    /// `None` when `label` is not a known encoding.
+    pub fn new(label: &str, options: TextDecoderOptions) -> Option<Self> {
+        Some(Self {
+            encoding: Encoding::for_label(label.as_bytes())?,
+            options,
+        })
+    }
+
+    /// WHATWG canonical name from encoding_rs (e.g. `"UTF-8"`, `"Shift_JIS"`).
+    pub fn encoding_name(&self) -> &'static str {
+        self.encoding.name()
+    }
+
+    /// `None` when `fatal` and the input is not valid in this encoding.
+    /// Non-fatal decoding replaces errors with U+FFFD.
+    pub fn decode(&self, bytes: &[u8]) -> Option<String> {
+        let mut dec = if self.options.ignore_bom {
+            self.encoding.new_decoder_without_bom_handling()
+        } else {
+            self.encoding.new_decoder()
+        };
+        if self.options.fatal {
+            let mut out = String::with_capacity(bytes.len() + 1);
+            let (res, _) = dec.decode_to_string_without_replacement(bytes, &mut out, true);
+            match res {
+                DecoderResult::InputEmpty => Some(out),
+                _ => None,
+            }
+        } else {
+            let mut out = String::with_capacity(bytes.len() * 2 + 1);
+            let _ = dec.decode_to_string(bytes, &mut out, true);
+            Some(out)
         }
-    } else {
-        let mut out = String::with_capacity(bytes.len() * 2 + 1);
-        let _ = dec.decode_to_string(bytes, &mut out, true);
-        Some(out)
     }
 }
 
-/// Decode an HTTP response body. `content_type_header` is the raw header
-/// value if present (e.g. `text/html; charset=gbk`). For HTML resources,
-/// the parser also sniffs `<meta charset>` in the first 1KB.
-pub fn decode_response(bytes: &[u8], content_type_header: Option<&str>) -> String {
-    let (encoding, _) = detect_encoding(bytes, content_type_header);
-    let (cow, _, _) = encoding.decode(bytes);
-    cow.into_owned()
+/// HTML document text plus the encoding used, for `document.characterSet`
+/// and the WHATWG URL encoding override.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedHtml {
+    pub text: String,
+    pub encoding_name: &'static str,
 }
 
-/// Like `decode_response`, but also returns the WHATWG canonical name of the
-/// encoding that was used (e.g. "EUC-JP", "Shift_JIS", "UTF-8"). Callers use
-/// the name to expose `document.characterSet` and to do document-encoding-aware
-/// URL query serialization (the WHATWG "encoding override").
-pub fn decode_response_with_name(
-    bytes: &[u8],
-    content_type_header: Option<&str>,
-) -> (String, &'static str) {
-    let (encoding, _) = detect_encoding(bytes, content_type_header);
+/// Decode an HTML response body. `content_type` is the raw header value if
+/// present (e.g. `text/html; charset=gbk`). Sniffs `<meta charset>` in the
+/// first 1KB when the header does not name a charset.
+pub fn decode_html(bytes: &[u8], content_type: Option<&str>) -> DecodedHtml {
+    let (encoding, _) = detect_encoding(bytes, content_type);
     let (cow, _, _) = encoding.decode(bytes);
-    (cow.into_owned(), encoding.name())
+    DecodedHtml {
+        text: cow.into_owned(),
+        encoding_name: encoding.name(),
+    }
+}
+
+/// Decode a non-HTML resource (JS, CSS, JSON, plain text). Honors only the
+/// `Content-Type` charset; does not sniff HTML meta tags.
+pub fn decode_text(bytes: &[u8], content_type: Option<&str>) -> String {
+    let encoding = content_type
+        .and_then(charset_from_content_type)
+        .and_then(|name| Encoding::for_label(name.as_bytes()))
+        .unwrap_or(UTF_8);
+    let (cow, _, _) = encoding.decode(bytes);
+    cow.into_owned()
 }
 
 const PCT_HEX: &[u8; 16] = b"0123456789ABCDEF";
@@ -148,18 +171,6 @@ pub fn url_encode_query(query: &str, label: &str, special: bool) -> Option<Strin
         encode_run_pct(&mut out, &query[s..], enc);
     }
     Some(out)
-}
-
-/// Same as `decode_response` but skips the `<meta charset>` sniff. Use for
-/// non-HTML resources where embedded HTML meta tags are not authoritative
-/// (script and style bodies, JSON, plain text).
-pub fn decode_non_html(bytes: &[u8], content_type_header: Option<&str>) -> String {
-    let encoding = content_type_header
-        .and_then(charset_from_content_type)
-        .and_then(|name| Encoding::for_label(name.as_bytes()))
-        .unwrap_or(UTF_8);
-    let (cow, _, _) = encoding.decode(bytes);
-    cow.into_owned()
 }
 
 /// Resolve the encoding to use for an HTML response, mirroring the HTML5
@@ -376,21 +387,40 @@ mod tests {
     }
 
     #[test]
-    fn decode_response_gbk_bytes_roundtrip() {
+    fn decode_html_gbk_bytes_roundtrip() {
         // "你好" (ni hao) encoded as GBK = C4 E3 BA C3
         let bytes: &[u8] = &[0xC4, 0xE3, 0xBA, 0xC3];
-        let s = decode_response(bytes, Some("text/html; charset=gbk"));
-        assert_eq!(s, "你好");
+        let decoded = decode_html(bytes, Some("text/html; charset=gbk"));
+        assert_eq!(decoded.text, "你好");
+        assert_eq!(decoded.encoding_name, "GBK");
     }
 
     #[test]
-    fn decode_non_html_skips_meta_sniff() {
+    fn decode_text_skips_meta_sniff() {
         // A JS body that happens to contain a string `<meta charset="gbk">`
         // must NOT be decoded as GBK — non-HTML resources only honor the
         // HTTP header.
         let bytes = br#"var x = '<meta charset="gbk">'; // not the real charset"#;
-        let s = decode_non_html(bytes, Some("application/javascript"));
+        let s = decode_text(bytes, Some("application/javascript"));
         assert!(s.contains("<meta charset="));
+    }
+
+    #[test]
+    fn text_decoder_unknown_label_is_none() {
+        assert!(TextDecoder::new("not-an-encoding", TextDecoderOptions::default()).is_none());
+    }
+
+    #[test]
+    fn text_decoder_fatal_rejects_invalid_bytes() {
+        let dec = TextDecoder::new(
+            "utf-8",
+            TextDecoderOptions {
+                fatal: true,
+                ignore_bom: false,
+            },
+        )
+        .unwrap();
+        assert!(dec.decode(&[0x80]).is_none());
     }
 
     #[test]

@@ -446,9 +446,8 @@ async fn run_fetch(
             )
             .await
             {
-                Ok(result) => result.map_err(|e| {
-                    anyhow::anyhow!("Failed to navigate to {}: {}", url_owned, e)
-                })?,
+                Ok(result) => result
+                    .map_err(|e| anyhow::anyhow!("Failed to navigate to {}: {}", url_owned, e))?,
                 Err(_) => anyhow::bail!(
                     "Timed out navigating to {} after {}s",
                     url_owned,
@@ -501,10 +500,7 @@ async fn run_fetch(
             if let Some(ref sel) = selector {
                 let found = wait_for_selector_actor(&handle, sel, wait_secs).await;
                 if !found {
-                    eprintln!(
-                        "Warning: selector '{}' not found after {}s",
-                        sel, wait_secs
-                    );
+                    eprintln!("Warning: selector '{}' not found after {}s", sel, wait_secs);
                 }
             }
 

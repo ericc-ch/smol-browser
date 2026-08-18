@@ -85,8 +85,6 @@ fn truncate_on_char_boundary(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-use tinybrowser_net::StealthHttpClient;
-
 /// Returns true when a JS-initiated navigation would step from a
 /// non-file scheme into a file: URL. We treat that move as an SOP
 /// violation because the existing realm survives the navigation and
@@ -267,7 +265,6 @@ pub struct Page {
     /// #408): they fire only for requests this page drives and die with it.
     /// Arc because the JS runtime state holds a second handle for fetch()/XHR.
     callbacks: Arc<CallbackRegistry>,
-    pub stealth_client: Option<Arc<StealthHttpClient>>,
 }
 
 impl Drop for Page {
@@ -849,16 +846,6 @@ impl Page {
         // Page.getFrameTree return a frame the client cannot match,
         // triggering a Target.closeTarget and "Frame has been detached".
         let frame_id = id.clone();
-        // The wreq client backing StealthHttpClient does not speak SOCKS5.
-        // Callers must validate the proxy scheme up front and fail loudly
-        // rather than silently rewriting socks5:// to http://, which only
-        // works when the upstream happens to be a Clash-style mixed-mode
-        // proxy and breaks plain SOCKS5 servers like `ssh -ND` (#160).
-        let stealth_client = Some(Arc::new(StealthHttpClient::with_full_options(
-            context.cookie_jar.clone(),
-            context.proxy_url.as_deref(),
-            context.allow_private_network,
-        )));
 
         Page {
             id,
@@ -892,7 +879,6 @@ impl Page {
             intercept_tx: None,
             preload_scripts: Vec::new(),
             callbacks: Arc::new(CallbackRegistry::new()),
-            stealth_client,
         }
     }
 
@@ -1023,9 +1009,6 @@ impl Page {
     }
 
     async fn do_fetch(&self, url: &Url) -> Result<Response, NetError> {
-        if let Some(ref stealth) = self.stealth_client {
-            return stealth.fetch(url).await;
-        }
         self.http_client
             .fetch_with_callbacks(url, Some(&self.callbacks))
             .await
@@ -1074,9 +1057,6 @@ impl Page {
         rt.set_http_client(self.http_client.clone());
         rt.set_callbacks(self.callbacks.clone());
         rt.set_blocked_urls(self.blocked_url_patterns.clone());
-        if let Some(ref stealth) = self.stealth_client {
-            rt.set_stealth_client(stealth.clone());
-        }
 
         if let Some(tx) = &self.intercept_tx {
             rt.set_intercept_tx(tx.clone());
@@ -1205,36 +1185,24 @@ impl Page {
         while !pending.is_empty() {
             let batch = std::mem::take(&mut pending);
             let client = self.http_client.clone();
-            let stealth_client = self.stealth_client.clone();
             let callbacks = self.callbacks.clone();
             let initiator = document_url.clone();
             use futures::StreamExt as _;
             let results: Vec<_> =
                 futures::stream::iter(batch.into_iter().map(|(key, requested_url, depth)| {
                     let client = client.clone();
-                    let stealth_client = stealth_client.clone();
                     let callbacks = callbacks.clone();
                     let initiator = initiator.clone();
                     async move {
                         let request =
                             ResourceRequest::subresource(ResourceType::Stylesheet, &initiator);
-                        let result = if let Some(stealth_client) = stealth_client {
-                            stealth_client
-                                .fetch_resource_with_callbacks(
-                                    &requested_url,
-                                    request,
-                                    Some(&callbacks),
-                                )
-                                .await
-                        } else {
-                            client
-                                .fetch_resource_with_callbacks(
-                                    &requested_url,
-                                    request,
-                                    Some(&callbacks),
-                                )
-                                .await
-                        };
+                        let result = client
+                            .fetch_resource_with_callbacks(
+                                &requested_url,
+                                request,
+                                Some(&callbacks),
+                            )
+                            .await;
                         (key, requested_url, depth, result)
                     }
                 }))
@@ -1266,7 +1234,7 @@ impl Page {
                     aliases.insert(key, existing);
                     continue;
                 }
-                let css = tinybrowser_net::decode_non_html(&response.body, response.content_type());
+                let css = tinybrowser_net::decode_text(&response.body, response.content_type());
                 let (imports, rules) = split_css_imports(&css);
                 let imports = if depth < MAX_STYLESHEET_IMPORT_DEPTH {
                     imports
@@ -1677,7 +1645,7 @@ impl Page {
                 }
                 // Script bodies: only the HTTP Content-Type charset matters
                 // (no in-band meta-charset for JS).
-                let code = tinybrowser_net::decode_non_html(&resp.body, resp.content_type());
+                let code = tinybrowser_net::decode_text(&resp.body, resp.content_type());
                 fetched.insert(idx, (url, code, resp));
             }
         }
@@ -2484,9 +2452,9 @@ impl Page {
         // in the first 1KB → UTF-8 fallback. Without this, every non-UTF-8
         // page (GBK, Big5, Shift-JIS, Windows-125x, EUC-KR, ISO-8859-x)
         // came through as replacement characters.
-        let (body_text, encoding_name) =
-            tinybrowser_net::decode_response_with_name(&response.body, response.content_type());
-        self.encoding = encoding_name.to_string();
+        let decoded = tinybrowser_net::decode_html(&response.body, response.content_type());
+        self.encoding = decoded.encoding_name.to_string();
+        let body_text = decoded.text;
         let dom = parse_html(&body_text);
 
         self.title = dom

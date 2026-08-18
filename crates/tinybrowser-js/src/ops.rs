@@ -6,9 +6,9 @@ use std::sync::Arc;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use tinybrowser_dom::tree::{AttachShadowError, ShadowRootMode};
 use tinybrowser_dom::{DomTree, NodeData, NodeId};
-use tinybrowser_net::StealthHttpClient;
 use tinybrowser_net::{
-    CallbackRegistry, CookieJar, HttpClient, RequestInfo, ResourceType, Response,
+    validate_url, CallbackRegistry, CookieJar, HttpClient, NetError, RequestCredentials,
+    RequestMode, ResourceRequest,
 };
 use tokio::sync::Mutex;
 
@@ -90,10 +90,6 @@ pub struct RuntimeState {
     /// #408). Page-scoped, so scripted fetch()/XHR observation stays local to
     /// the page that registered it.
     pub callbacks: Option<Arc<CallbackRegistry>>,
-    /// When set (stealth mode), scripted fetch()/XHR is routed through the wreq
-    /// client so the request carries the Chrome TLS fingerprint and client
-    /// hints instead of the rustls ClientHello op_fetch_url would otherwise send.
-    pub stealth_client: Option<Arc<StealthHttpClient>>,
     pub pending_navigation: Option<(String, String, String)>,
     pub intercept_tx: Option<tokio::sync::mpsc::UnboundedSender<InterceptedRequest>>,
     pub intercept_counter: u64,
@@ -146,7 +142,6 @@ impl RuntimeState {
             cookie_jar: None,
             http_client: None,
             callbacks: None,
-            stealth_client: None,
             pending_navigation: None,
             intercept_tx: None,
             intercept_counter: 0,
@@ -1372,126 +1367,12 @@ fn compare_node_order(dom: &DomTree, a: NodeId, b: NodeId) -> i32 {
         1
     }
 }
-// Fallback cache for runtimes that have no owning HttpClient, such as
-// a standalone module loader. Browser pages use their context-scoped client
-// below so sequential V8 runtimes never share an async network pool (#453).
-static FETCH_CLIENT_CACHE: std::sync::OnceLock<
-    std::sync::RwLock<std::collections::HashMap<String, reqwest::Client>>,
-> = std::sync::OnceLock::new();
-
-/// Shared HTTP client cache for any code in tinybrowser-js that needs a
-/// reqwest::Client (op_fetch_url for JS-side fetch/XHR, the ES module
-/// loader for dynamic imports). Keyed by proxy URL ("" = direct).
-/// One client per distinct proxy, reused for every request, so the
-/// connection pool actually warms up.
-pub fn cached_request_client(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
-    let key = proxy_url.unwrap_or("").to_string();
-    let cache =
-        FETCH_CLIENT_CACHE.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()));
-    if let Ok(read) = cache.read() {
-        if let Some(client) = read.get(&key) {
-            return Ok(client.clone());
-        }
-    }
-    let client = build_request_client(proxy_url)?;
-    if let Ok(mut write) = cache.write() {
-        write.entry(key).or_insert_with(|| client.clone());
-    }
-    Ok(client)
-}
-
-fn build_request_client(proxy_url: Option<&str>) -> Result<reqwest::Client, String> {
-    // Redirects are followed manually below so each hop can be re-validated
-    // against the same SSRF policy as the initial URL (GHSA-8v6v-g4rh-jmcm).
-    // With reqwest's default auto-follow, an attacker-controlled origin can
-    // 302 to http://127.0.0.1 and read the internal-service body.
-    // Per-request timeout so a scripted fetch()/XHR, or a CORS preflight OPTIONS
-    // (issue #251), to a server that accepts the connection but never responds
-    // cannot hang forever. Without it op_fetch_url never returns, the fetch
-    // promise never settles, and the JS XHR is stuck at readyState 1 with no
-    // completion event (which stranded Angular HttpClient). On timeout reqwest's
-    // send().await errors, which op_fetch_url propagates and the fetch shim turns
-    // into an XHR `error`/`loadend`. 30s matches the other clients in the
-    // workspace; TINYBROWSER_FETCH_TIMEOUT_MS overrides it for tighter cloud limits.
-    let mut builder = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(fetch_timeout())
-        // SSRF guard: also reject hostnames that resolve to a private/loopback IP.
-        .dns_resolver(std::sync::Arc::new(
-            tinybrowser_net::SsrfGuardResolver::new(false),
-        ))
-        // Be explicit about pool size: default is unbounded which is fine,
-        // but pool_idle_timeout default (90s) is short for SPA-heavy
-        // workloads where the same origin is hit dozens of times across
-        // a navigation. Keep connections warm longer.
-        .pool_idle_timeout(std::time::Duration::from_secs(300))
-        .tcp_keepalive(std::time::Duration::from_secs(60));
-    if let Some(proxy) = proxy_url {
-        let p = reqwest::Proxy::all(proxy)
-            .map_err(|e| format!("Invalid op_fetch_url proxy '{}': {}", proxy, e))?;
-        builder = builder.proxy(p);
-    }
-    builder
-        .build()
-        .map_err(|e| format!("failed to build reqwest::Client: {}", e))
-}
-
 pub(crate) fn fetch_timeout() -> std::time::Duration {
     let timeout_ms = std::env::var("TINYBROWSER_FETCH_TIMEOUT_MS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(30_000);
     std::time::Duration::from_millis(timeout_ms)
-}
-
-/// Cap on the number of redirect hops op_fetch_url will follow.
-/// Matches reqwest's default policy of 10.
-const FETCH_REDIRECT_LIMIT: usize = 10;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FetchCredentials {
-    Omit,
-    SameOrigin,
-    Include,
-}
-
-impl FetchCredentials {
-    fn parse(value: &str) -> Self {
-        match value {
-            "omit" => Self::Omit,
-            "include" => Self::Include,
-            _ => Self::SameOrigin,
-        }
-    }
-
-    fn allows(self, page_origin: &str, request_url: &str) -> bool {
-        match self {
-            Self::Omit => false,
-            Self::Include => true,
-            Self::SameOrigin => request_origin(request_url)
-                .map(|origin| origin == page_origin)
-                .unwrap_or(false),
-        }
-    }
-}
-
-fn request_origin(request_url: &str) -> Option<String> {
-    url::Url::parse(request_url)
-        .ok()
-        .map(|url| url.origin().ascii_serialization())
-}
-
-fn cors_response_allows(
-    credentials: FetchCredentials,
-    page_origin: &str,
-    allowed_origin: &str,
-    allow_credentials: &str,
-) -> bool {
-    if credentials == FetchCredentials::Include {
-        allowed_origin == page_origin && allow_credentials == "true"
-    } else {
-        allowed_origin == "*" || allowed_origin == page_origin
-    }
 }
 
 /// Snapshot of page state a fetch needs on the network thread. `RuntimeState`
@@ -1511,9 +1392,7 @@ pub(crate) struct FetchJob {
         String,
     )>,
     pub callbacks: Option<Arc<CallbackRegistry>>,
-    pub in_flight: Option<Arc<std::sync::atomic::AtomicU32>>,
     pub page_in_flight: Arc<std::sync::atomic::AtomicU32>,
-    pub stealth_client: Option<Arc<StealthHttpClient>>,
 }
 
 pub(crate) struct FetchStore {
@@ -1576,8 +1455,8 @@ pub(crate) fn start_fetch(
         .as_ref()
         .is_some_and(|client| client.allow_private_network);
     if let Ok(parsed_url) = url::Url::parse(&url) {
-        if let Err(e) = validate_fetch_url(&parsed_url, allow_private_network) {
-            return FetchStart::Immediate(FetchOutcome::blocked(&url, Some(e)));
+        if let Err(e) = validate_url(&parsed_url, allow_private_network) {
+            return FetchStart::Immediate(FetchOutcome::blocked(&url, Some(e.to_string())));
         }
     }
     tracing::debug!(
@@ -1595,12 +1474,10 @@ pub(crate) fn start_fetch(
     };
     FetchStart::Pending(FetchJob {
         cookie_jar: gs.cookie_jar.clone(),
-        in_flight: gs.http_client.as_ref().map(|c| c.in_flight.clone()),
         page_in_flight: Arc::clone(&gs.page_in_flight),
         intercept,
         callbacks: gs.callbacks.clone(),
         http_client: gs.http_client.clone(),
-        stealth_client: gs.stealth_client.clone(),
         url,
         method,
         headers_json,
@@ -1667,9 +1544,7 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
         http_client,
         intercept: intercept_tx,
         callbacks,
-        in_flight,
         page_in_flight,
-        stealth_client,
     } = job;
     let proxy_url = http_client
         .as_ref()
@@ -1757,10 +1632,10 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
     // A Continue rewrite of the URL must pass the same SSRF / private-network
     // gate as the original request (checked above) and as redirects (checked
     // below). Without this re-validation a rewrite to an internal address would
-    // bypass validate_fetch_url entirely.
+    // bypass validate_url entirely.
     let url = if let Some(new_url) = override_url {
         if let Ok(parsed) = url::Url::parse(&new_url) {
-            if let Err(reason) = validate_fetch_url(&parsed, allow_private_network) {
+            if let Err(reason) = validate_url(&parsed, allow_private_network) {
                 return Ok(json_outcome(serde_json::json!({
                     "status": 0,
                     "body": "",
@@ -1777,306 +1652,82 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
     let method = override_method.unwrap_or(method);
     let body = override_body.unwrap_or(body);
 
-    let client = match &http_client {
-        Some(client) => client.request_client().await,
-        None => cached_request_client(proxy_url.as_deref())?,
-    };
+    let custom_headers: HashMap<String, String> =
+        override_headers.unwrap_or_else(|| serde_json::from_str(&headers_json).unwrap_or_default());
 
-    let initial_request_origin = request_origin(&url).unwrap_or_default();
     let page_origin = if origin.is_empty() {
-        initial_request_origin.clone()
+        request_origin(&url).unwrap_or_default()
     } else {
         origin.clone()
     };
-    let is_cross_origin = !page_origin.is_empty() && initial_request_origin != page_origin;
-    let credentials = FetchCredentials::parse(&credentials);
-
-    let req_method: reqwest::Method = method.parse().unwrap_or(reqwest::Method::GET);
-
-    let custom_headers: std::collections::HashMap<String, String> =
-        override_headers.unwrap_or_else(|| serde_json::from_str(&headers_json).unwrap_or_default());
-
-    // Passive request observation (non-blocking). Fires for every request that
-    // reaches the network (Fulfill/Fail from the interception channel short-
-    // circuit earlier). on_request/on_response previously fired only for
-    // navigation; this wires them for JS fetch()/XHR too.
-    if let Some(ref cbs) = callbacks {
-        if cbs.has_request_callbacks().await {
-            if let Ok(parsed) = url::Url::parse(&url) {
-                let info = RequestInfo {
-                    url: parsed,
-                    method: method.clone(),
-                    headers: custom_headers.clone(),
-                    resource_type: ResourceType::Fetch,
-                };
-                cbs.fire_request(&info).await;
-            }
-        }
-    }
-
-    let needs_preflight = is_cross_origin
-        && mode == "cors"
-        && (req_method != reqwest::Method::GET
-            && req_method != reqwest::Method::HEAD
-            && req_method != reqwest::Method::POST
-            || custom_headers.keys().any(|k| {
-                let kl = k.to_lowercase();
-                kl != "accept"
-                    && kl != "accept-language"
-                    && kl != "content-language"
-                    && kl != "content-type"
-            }));
-
-    if needs_preflight {
-        let preflight = client
-            .request(reqwest::Method::OPTIONS, &url)
-            .timeout(fetch_timeout())
-            .header("Origin", &page_origin)
-            .header("Access-Control-Request-Method", method.as_str())
-            .header(
-                "Access-Control-Request-Headers",
-                custom_headers
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            )
-            .send()
-            .await
-            .map_err(|e| format!("CORS preflight failed: {}", e))?;
-
-        let allowed_origin = preflight
-            .headers()
-            .get("access-control-allow-origin")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-
-        let allow_credentials = preflight
-            .headers()
-            .get("access-control-allow-credentials")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if !cors_response_allows(credentials, &page_origin, allowed_origin, allow_credentials) {
-            return Err(format!(
-                "CORS preflight: Origin '{}' not allowed by Access-Control-Allow-Origin '{}'",
-                page_origin, allowed_origin
-            ));
-        }
-    }
-
-    // Stealth mode: route scripted requests through wreq after the CORS
-    // preflight. stealth_fetch_all applies the credentials decision to each
-    // redirect hop without losing the Chrome TLS/client-hint transport.
-    if let Some(stealth) = stealth_client {
-        return stealth_fetch_all(
-            stealth,
-            url.clone(),
-            req_method.as_str().to_string(),
-            custom_headers.clone(),
-            body.clone(),
-            page_origin.clone(),
-            mode.clone(),
-            credentials,
-            callbacks.clone(),
-            allow_private_network,
-        )
-        .await
-        .map_err(|e| e.to_string());
-    }
-
-    // Follow redirects manually so the SSRF policy applies to every hop.
-    // reqwest's auto-follow would bypass validate_fetch_url on the redirect
-    // target and let an attacker-allowed origin 302 to http://127.0.0.1
-    // (GHSA-8v6v-g4rh-jmcm).
-    let mut current_url = url.clone();
-    let mut current_method = req_method;
-    let mut current_body = body;
-    let mut redirects_followed: usize = 0;
-    let response = loop {
-        let mut req = client
-            .request(current_method.clone(), &current_url)
-            .timeout(fetch_timeout());
-
-        let current_is_cross_origin = request_origin(&current_url)
-            .map(|request_origin| request_origin != page_origin)
-            .unwrap_or(false);
-        if current_is_cross_origin {
-            req = req.header("Origin", &page_origin);
-        }
-
-        let credentials_allowed = credentials.allows(&page_origin, &current_url);
-        if credentials_allowed {
-            if let Some(ref jar) = cookie_jar {
-                if let Ok(parsed_url) = url::Url::parse(&current_url) {
-                    let cookie_header = jar.get_cookie_header(&parsed_url);
-                    if !cookie_header.is_empty() {
-                        req = req.header("Cookie", &cookie_header);
-                    }
-                }
-            }
-        }
-
-        // Send a default User-Agent on fetch()/XHR requests (the navigation path
-        // sets one, but this op did not, so scripted requests went out with no UA
-        // and UA-gated servers rejected them). Honor an explicit override.
-        if !custom_headers
-            .keys()
-            .any(|k| k.eq_ignore_ascii_case("user-agent"))
-        {
-            req = req.header(
-                "User-Agent",
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
-            );
-        }
-
-        for (k, v) in &custom_headers {
-            req = req.header(k.as_str(), v.as_str());
-        }
-
-        if !current_body.is_empty() {
-            req = req.body(current_body.clone());
-        }
-
-        if let Some(ref counter) = in_flight {
-            counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        let resp = req.send().await.map_err(|e| {
-            if let Some(ref counter) = in_flight {
-                counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            e.to_string()
-        })?;
-
-        if let Some(ref counter) = in_flight {
-            counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        if credentials_allowed {
-            if let Some(ref jar) = cookie_jar {
-                if let Ok(parsed_url) = url::Url::parse(&current_url) {
-                    for val in resp.headers().get_all(reqwest::header::SET_COOKIE) {
-                        if let Ok(s) = val.to_str() {
-                            jar.set_cookie(s, &parsed_url);
-                        }
-                    }
-                }
-            }
-        }
-
-        if !resp.status().is_redirection() {
-            break resp;
-        }
-
-        let location_header = resp
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        let Some(location) = location_header else {
-            // 3xx without a Location header is not actually a redirect.
-            break resp;
-        };
-
-        let base = match url::Url::parse(&current_url) {
-            Ok(b) => b,
-            Err(_) => break resp,
-        };
-        let next_url = match base.join(&location) {
-            Ok(u) => u,
-            Err(_) => break resp,
-        };
-
-        // Re-validate every redirect target against the SSRF policy.
-        if let Err(reason) = validate_fetch_url(&next_url, allow_private_network) {
+    let initiator = url::Url::parse(&page_origin)
+        .ok()
+        .or_else(|| url::Url::parse(&url).ok());
+    let parsed = match url::Url::parse(&url) {
+        Ok(u) => u,
+        Err(_) => {
             return Ok(json_outcome(serde_json::json!({
-                "status": 0,
-                "body": "",
-                "url": next_url.to_string(),
-                "headers": {},
-                "blocked": true,
-                "error": format!("Redirect to forbidden URL blocked: {}", reason),
+                "status": 0, "body": "", "url": url, "headers": {},
             })));
         }
-
-        redirects_followed += 1;
-        if redirects_followed > FETCH_REDIRECT_LIMIT {
-            return Ok(json_outcome(serde_json::json!({
-                "status": 0,
-                "body": "",
-                "url": next_url.to_string(),
-                "headers": {},
-                "blocked": true,
-                "error": format!("Too many redirects (>{})", FETCH_REDIRECT_LIMIT),
-            })));
-        }
-
-        // Browser semantics: 301/302/303 downgrade to GET with no body.
-        // 307/308 preserve method and body.
-        let status_code = resp.status().as_u16();
-        if status_code == 301 || status_code == 302 || status_code == 303 {
-            current_method = reqwest::Method::GET;
-            current_body.clear();
-        }
-
-        current_url = next_url.to_string();
     };
 
-    let status = response.status().as_u16();
+    let client = match http_client {
+        Some(client) => client,
+        None => Arc::new(HttpClient::with_full_options(
+            cookie_jar.unwrap_or_else(|| Arc::new(CookieJar::new())),
+            proxy_url.as_deref(),
+            allow_private_network,
+        )),
+    };
 
-    let resp_headers: std::collections::HashMap<String, String> = response
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect();
+    let request = ResourceRequest::scripted_fetch(
+        initiator,
+        method.clone(),
+        custom_headers,
+        if body.is_empty() {
+            None
+        } else {
+            Some(body.into_bytes())
+        },
+        RequestMode::from_fetch_mode(&mode),
+        RequestCredentials::from_fetch_credentials(&credentials),
+    );
 
-    let final_is_cross_origin = request_origin(&current_url)
-        .map(|request_origin| request_origin != page_origin)
-        .unwrap_or(false);
-    if final_is_cross_origin && mode == "cors" {
-        let allowed = resp_headers
-            .get("access-control-allow-origin")
-            .map(|s| s.as_str())
-            .unwrap_or("");
-
-        let allow_credentials = resp_headers
-            .get("access-control-allow-credentials")
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        if !cors_response_allows(credentials, &page_origin, allowed, allow_credentials) {
+    let response = match client
+        .fetch_resource_with_callbacks(&parsed, request, callbacks.as_deref())
+        .await
+    {
+        Ok(response) => response,
+        Err(NetError::Cors(msg)) => {
             return Ok(json_outcome(serde_json::json!({
                 "status": 0,
                 "body": "",
                 "url": url,
                 "headers": {},
                 "corsBlocked": true,
-                "corsError": if credentials == FetchCredentials::Include {
-                    format!(
-                        "CORS error: credentialed request requires Access-Control-Allow-Origin '{}' and Access-Control-Allow-Credentials 'true'",
-                        page_origin
-                    )
-                } else {
-                    format!("CORS error: Origin '{}' not in Access-Control-Allow-Origin '{}'", page_origin, allowed)
-                },
+                "corsError": msg,
             })));
         }
-    }
+        Err(NetError::TooManyRedirects(u)) => {
+            return Ok(FetchOutcome::blocked(
+                &u,
+                Some("Too many redirects".to_string()),
+            ));
+        }
+        Err(e @ (NetError::Ssrf(_) | NetError::UnsupportedProxy { .. })) => {
+            return Ok(FetchOutcome::blocked(&url, Some(e.to_string())));
+        }
+        Err(e) => {
+            return Err(e.to_string());
+        }
+    };
 
-    let resp_bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    let status = response.status;
+    let resp_headers = response.headers.clone();
+    let resp_bytes = response.body;
     let resp_body = String::from_utf8_lossy(&resp_bytes).to_string();
     let resp_body_base64 = BASE64.encode(&resp_bytes);
-    if let Some(ref cbs) = callbacks {
-        if cbs.has_response_callbacks().await {
-            let resp = fetch_response(&url, status, resp_headers.clone(), resp_bytes.to_vec());
-            let info = RequestInfo {
-                url: resp.url.clone(),
-                method: method.clone(),
-                headers: resp_headers.clone(),
-                resource_type: ResourceType::Fetch,
-            };
-            cbs.fire_response(&info, &resp).await;
-        }
-    }
 
     tracing::debug!(
         "op_fetch_url completed: {} {} ({} bytes)",
@@ -2090,13 +1741,13 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
             "status": status,
             "body": resp_body,
             "bodyBase64": resp_body_base64,
-            "url": url,
+            "url": response.url.to_string(),
             "headers": resp_headers,
         }),
         store: Some(FetchStore {
             body: resp_body,
             body_len: resp_bytes.len(),
-            url,
+            url: response.url.to_string(),
             method,
             status,
             response_headers: resp_headers,
@@ -2104,177 +1755,10 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
     })
 }
 
-/// Assemble a `Response` for the on_response interception callbacks from the
-/// parts op_fetch_url already holds. Navigation gets a Response straight from
-/// the http client, but the JS fetch path builds the pieces itself.
-fn fetch_response(
-    url: &str,
-    status: u16,
-    headers: HashMap<String, String>,
-    body: Vec<u8>,
-) -> Response {
-    Response {
-        url: url::Url::parse(url).unwrap_or_else(|_| url::Url::parse("http://0.0.0.0/").unwrap()),
-        status,
-        headers,
-        body,
-        redirected_from: Vec::new(),
-    }
-}
-
-/// Stealth-mode scripted fetch()/XHR: mirrors op_fetch_url's redirect, SSRF,
-/// CORS, and CDP Network-event semantics but sends every hop through the wreq
-/// stealth client so the request carries the Chrome TLS fingerprint and client
-/// hints. Cookie handling lives inside StealthHttpClient::send_single, which
-/// shares the context jar.
-async fn stealth_fetch_all(
-    stealth: Arc<StealthHttpClient>,
-    url: String,
-    method: String,
-    custom_headers: HashMap<String, String>,
-    body: String,
-    page_origin: String,
-    mode: String,
-    credentials: FetchCredentials,
-    callbacks: Option<Arc<CallbackRegistry>>,
-    allow_private_network: bool,
-) -> Result<FetchOutcome, deno_error::JsErrorBox> {
-    let mut current_url = url.clone();
-    let original_method = method.clone();
-    let mut current_method = method;
-    let mut current_body = body;
-    let mut redirects_followed: usize = 0;
-
-    let (status, resp_headers, resp_bytes): (u16, HashMap<String, String>, Vec<u8>) = loop {
-        let parsed_current = match url::Url::parse(&current_url) {
-            Ok(u) => u,
-            Err(_) => {
-                return Ok(json_outcome(serde_json::json!({
-                    "status": 0, "body": "", "url": current_url, "headers": {},
-                })));
-            }
-        };
-
-        let mut req_headers: HashMap<String, String> = HashMap::new();
-        let current_is_cross_origin = parsed_current.origin().ascii_serialization() != page_origin;
-        if current_is_cross_origin {
-            req_headers.insert("origin".to_string(), page_origin.clone());
-        }
-        for (k, v) in &custom_headers {
-            req_headers.insert(k.to_lowercase(), v.clone());
-        }
-
-        let credentials_allowed = credentials.allows(&page_origin, &current_url);
-        let r = stealth
-            .send_single(
-                &current_method,
-                &parsed_current,
-                &req_headers,
-                &current_body,
-                credentials_allowed,
-                credentials_allowed,
-            )
-            .await
-            .map_err(|e| deno_error::JsErrorBox::generic(e.to_string()))?;
-
-        if !(300..400).contains(&r.status) {
-            break (r.status, r.headers, r.body);
-        }
-        let Some(location) = r.headers.get("location").cloned() else {
-            break (r.status, r.headers, r.body);
-        };
-        let next_url = match parsed_current.join(&location) {
-            Ok(u) => u,
-            Err(_) => break (r.status, r.headers, r.body),
-        };
-        // Re-validate every redirect target against the SSRF policy, matching
-        // op_fetch_url (GHSA-8v6v-g4rh-jmcm).
-        if let Err(reason) = validate_fetch_url(&next_url, allow_private_network) {
-            return Ok(json_outcome(serde_json::json!({
-                "status": 0, "body": "", "url": next_url.to_string(), "headers": {},
-                "blocked": true,
-                "error": format!("Redirect to forbidden URL blocked: {}", reason),
-            })));
-        }
-        redirects_followed += 1;
-        if redirects_followed > FETCH_REDIRECT_LIMIT {
-            return Ok(json_outcome(serde_json::json!({
-                "status": 0, "body": "", "url": next_url.to_string(), "headers": {},
-                "blocked": true,
-                "error": format!("Too many redirects (>{})", FETCH_REDIRECT_LIMIT),
-            })));
-        }
-        // Browser semantics: 301/302/303 downgrade to GET with no body.
-        if r.status == 301 || r.status == 302 || r.status == 303 {
-            current_method = "GET".to_string();
-            current_body.clear();
-        }
-        current_url = next_url.to_string();
-    };
-
-    let final_is_cross_origin = request_origin(&current_url)
-        .map(|request_origin| request_origin != page_origin)
-        .unwrap_or(false);
-    if final_is_cross_origin && mode == "cors" {
-        let allowed = resp_headers
-            .get("access-control-allow-origin")
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        let allow_credentials = resp_headers
-            .get("access-control-allow-credentials")
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        if !cors_response_allows(credentials, &page_origin, allowed, allow_credentials) {
-            return Ok(json_outcome(serde_json::json!({
-                "status": 0, "body": "", "url": url, "headers": {},
-                "corsBlocked": true,
-                "corsError": if credentials == FetchCredentials::Include {
-                    format!(
-                        "CORS error: credentialed request requires Access-Control-Allow-Origin '{}' and Access-Control-Allow-Credentials 'true'",
-                        page_origin
-                    )
-                } else {
-                    format!(
-                        "CORS error: Origin '{}' not in Access-Control-Allow-Origin '{}'",
-                        page_origin, allowed
-                    )
-                },
-            })));
-        }
-    }
-
-    let resp_body = String::from_utf8_lossy(&resp_bytes).to_string();
-    let resp_body_base64 = BASE64.encode(&resp_bytes);
-    if let Some(ref cbs) = callbacks {
-        if cbs.has_response_callbacks().await {
-            let resp = fetch_response(&url, status, resp_headers.clone(), resp_bytes.clone());
-            let info = RequestInfo {
-                url: resp.url.clone(),
-                method: current_method.clone(),
-                headers: resp_headers.clone(),
-                resource_type: ResourceType::Fetch,
-            };
-            cbs.fire_response(&info, &resp).await;
-        }
-    }
-
-    Ok(FetchOutcome {
-        json: serde_json::json!({
-            "status": status,
-            "body": resp_body,
-            "bodyBase64": resp_body_base64,
-            "url": url,
-            "headers": resp_headers,
-        }),
-        store: Some(FetchStore {
-            body: resp_body,
-            body_len: resp_bytes.len(),
-            url,
-            method: original_method,
-            status,
-            response_headers: resp_headers,
-        }),
-    })
+fn request_origin(request_url: &str) -> Option<String> {
+    url::Url::parse(request_url)
+        .ok()
+        .map(|url| url.origin().ascii_serialization())
 }
 
 fn glob_match(pattern: &str, url: &str) -> bool {
@@ -2306,7 +1790,7 @@ fn glob_match(pattern: &str, url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{cors_response_allows, glob_match, validate_fetch_url, FetchCredentials};
+    use super::glob_match;
     use crate::runtime::JsRuntime;
     use tinybrowser_dom::parse_html;
 
@@ -2335,57 +1819,9 @@ mod tests {
     }
 
     #[test]
-    fn fetch_credentials_gate_cookie_send_and_storage_per_request_origin() {
-        let page_origin = "https://www.example.com";
-        let same_origin_url = "https://www.example.com/api";
-        let explicit_default_port = "https://www.example.com:443/api";
-        let cross_origin_url = "https://api.example.com/data";
-
-        assert!(!FetchCredentials::Omit.allows(page_origin, same_origin_url));
-        assert!(!FetchCredentials::Omit.allows(page_origin, cross_origin_url));
-
-        assert!(FetchCredentials::SameOrigin.allows(page_origin, same_origin_url));
-        assert!(FetchCredentials::SameOrigin.allows(page_origin, explicit_default_port));
-        assert!(!FetchCredentials::SameOrigin.allows(page_origin, cross_origin_url));
-
-        assert!(FetchCredentials::Include.allows(page_origin, same_origin_url));
-        assert!(FetchCredentials::Include.allows(page_origin, cross_origin_url));
-    }
-
-    #[test]
-    fn credentialed_cors_requires_exact_origin_and_allow_credentials() {
-        let page_origin = "https://www.example.com";
-
-        assert!(cors_response_allows(
-            FetchCredentials::SameOrigin,
-            page_origin,
-            "*",
-            "",
-        ));
-        assert!(!cors_response_allows(
-            FetchCredentials::Include,
-            page_origin,
-            "*",
-            "true",
-        ));
-        assert!(!cors_response_allows(
-            FetchCredentials::Include,
-            page_origin,
-            page_origin,
-            "",
-        ));
-        assert!(cors_response_allows(
-            FetchCredentials::Include,
-            page_origin,
-            page_origin,
-            "true",
-        ));
-    }
-
-    #[test]
     fn fetch_url_validation_honors_per_context_private_network_opt_in() {
         let loopback = url::Url::parse("http://127.0.0.1:8080/resource").unwrap();
-        assert!(validate_fetch_url(&loopback, true).is_ok());
+        assert!(tinybrowser_net::validate_url(&loopback, true).is_ok());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2521,55 +1957,6 @@ mod tests {
     }
 }
 
-fn validate_fetch_url(url: &url::Url, allow_private_network: bool) -> Result<(), String> {
-    let scheme = url.scheme();
-    if scheme != "http" && scheme != "https" && scheme != "file" {
-        return Err(format!(
-            "Forbidden URL scheme '{}' - only http, https, and file are allowed",
-            scheme
-        ));
-    }
-
-    if scheme == "file" || allow_private_network || tinybrowser_net::env_allows_private_network() {
-        return Ok(());
-    }
-
-    if let Some(host) = url.host() {
-        match host {
-            url::Host::Ipv4(ip) => {
-                if tinybrowser_net::is_forbidden_ip(std::net::IpAddr::V4(ip)) {
-                    return Err(format!(
-                        "Access to private/internal IP address {} is not allowed",
-                        ip
-                    ));
-                }
-            }
-            url::Host::Ipv6(ip) => {
-                if tinybrowser_net::is_forbidden_ip(std::net::IpAddr::V6(ip)) {
-                    return Err(format!(
-                        "Access to private/internal IPv6 address {} is not allowed",
-                        ip
-                    ));
-                }
-            }
-            url::Host::Domain(domain) => {
-                let lower_domain = domain.to_lowercase();
-                if lower_domain == "localhost"
-                    || lower_domain.ends_with(".localhost")
-                    || lower_domain == "127.0.0.1"
-                    || lower_domain == "::1"
-                {
-                    return Err(format!(
-                        "Access to localhost domain '{}' is not allowed",
-                        domain
-                    ));
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
 pub(crate) fn op_get_cookies_inner(shared: &SharedState) -> String {
     let gs = shared.borrow();
     let jar = match &gs.cookie_jar {
@@ -3082,14 +2469,19 @@ pub(crate) fn op_add_import_map_inner(
 /// Canonical (lowercased) WHATWG name for a TextDecoder label, or "" if the
 /// label is unknown (the JS constructor turns "" into a RangeError).
 pub(crate) fn encoding_for_label(label: &str) -> String {
-    tinybrowser_net::label_name(label).unwrap_or_default()
+    tinybrowser_net::TextDecoder::new(label, tinybrowser_net::TextDecoderOptions::default())
+        .map(|decoder| decoder.encoding_name().to_ascii_lowercase())
+        .unwrap_or_default()
 }
 
 /// Decode bytes with a legacy/explicit encoding via encoding_rs. Returns
 /// {"ok":true,"v":<string>} or {"ok":false} (unknown label, or a fatal decode
 /// error). The UTF-8 non-fatal common case is handled in JS without this op.
 pub(crate) fn text_decode(label: &str, bytes: &[u8], fatal: bool, ignore_bom: bool) -> String {
-    match tinybrowser_net::decode_with_label(label, bytes, fatal, ignore_bom) {
+    let options = tinybrowser_net::TextDecoderOptions { fatal, ignore_bom };
+    match tinybrowser_net::TextDecoder::new(label, options)
+        .and_then(|decoder| decoder.decode(bytes))
+    {
         Some(s) => serde_json::json!({ "ok": true, "v": s }).to_string(),
         None => "{\"ok\":false}".to_string(),
     }

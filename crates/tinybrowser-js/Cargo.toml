@@ -15,7 +15,6 @@ url = { workspace = true }
 # Public Suffix List and adds no runtime I/O.
 psl = "2"
 tracing = { workspace = true }
-reqwest = { workspace = true }
 html5ever = { workspace = true }
 deno_error = "0.6"
 base64 = { workspace = true }

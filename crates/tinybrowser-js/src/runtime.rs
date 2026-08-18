@@ -129,12 +129,6 @@ impl JsRuntime {
         self.qjs.shared_state().borrow_mut().callbacks = Some(callbacks);
     }
 
-    /// Install the stealth (wreq) HTTP client so scripted fetch()/XHR is routed
-    /// through it in stealth mode (see op_fetch_url / stealth_fetch_all).
-    pub fn set_stealth_client(&self, client: std::sync::Arc<tinybrowser_net::StealthHttpClient>) {
-        self.qjs.shared_state().borrow_mut().stealth_client = Some(client);
-    }
-
     pub fn set_dom(&self, dom: DomTree) {
         let mut gs = self.qjs.shared_state().borrow_mut();
         gs.dom = Some(dom);

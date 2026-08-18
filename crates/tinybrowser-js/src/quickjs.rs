@@ -1635,11 +1635,7 @@ mod tests {
             rt.evaluate("document.cookie").expect("eval"),
             serde_json::json!("session=victim")
         );
-        assert!(rt
-            .shared_state()
-            .borrow()
-            .pending_navigation
-            .is_some());
+        assert!(rt.shared_state().borrow().pending_navigation.is_some());
     }
 
     #[test]
