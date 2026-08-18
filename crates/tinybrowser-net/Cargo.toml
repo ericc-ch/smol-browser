@@ -36,3 +36,6 @@ wreq = { version = "=6.0.0-rc.29", features = ["prefix-symbols", "socks", "strea
 
 [target.'cfg(not(any(target_os = "linux", target_os = "android")))'.dependencies]
 wreq = { version = "=6.0.0-rc.29", features = ["socks", "stream", "gzip", "brotli", "deflate", "zstd"] }
+
+[lints]
+workspace = true

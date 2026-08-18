@@ -16,6 +16,113 @@ edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/h4ckf0r0day/obscura"
 
+# ─── Lints ────────────────────────────────────────────────────────────────────
+# Strict by default, modeled on the oxc/bun workspace setups:
+#   - rustc: every warning is an error (`warnings` at priority -1; individual
+#     lints can override back down).
+#   - clippy: whole categories (all, pedantic, nursery, cargo) are denied at
+#     priority -1, then individual lints are allowed below where the category
+#     is noise for this codebase. On top of the categories, a curated set of
+#     `restriction` lints (panic prevention, silent-error prevention, async
+#     deadlocks, unsafe hygiene, numeric footguns) is denied explicitly.
+#   - Suppressions must be `#[expect(clippy::x, reason = "...")]`, never bare
+#     `#[allow]` (see `allow_attributes` / `allow_attributes_without_reason`).
+#   - Every workspace member opts in with `[lints] workspace = true` in its
+#     own Cargo.toml. Lint levels apply to `cargo build` / `cargo test` /
+#     `cargo clippy` alike, so violations fail locally, not just in CI.
+# See clippy.toml for test-code exemptions.
+[workspace.lints.rust]
+warnings = { level = "deny", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+
+# ── restriction, curated ──
+# Panic prevention. The anti-panic protocol (catch_unwind in ops) is the last
+# line of defense; these lints stop panics from being written in the first
+# place. Exempted in test code via clippy.toml.
+panic = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+string_slice = "deny"
+indexing_slicing = "deny"
+get_unwrap = "deny"
+unwrap_in_result = "deny"
+panic_in_result_fn = "deny"
+unchecked_time_subtraction = "deny"
+# Silent failures: dropped futures, swallowed errors.
+let_underscore_future = "deny"
+let_underscore_must_use = "deny"
+unused_result_ok = "deny"
+map_err_ignore = "deny"
+assertions_on_result_states = "deny"
+# Async: deadlocks and oversized futures (tokio-heavy codebase).
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+large_futures = "deny"
+# Unsafe / memory hygiene (QuickJS FFI, BoringSSL).
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unnecessary_safety_comment = "deny"
+mem_forget = "deny"
+not_unsafe_ptr_arg_deref = "deny"
+ptr_as_ptr = "deny"
+ref_as_ptr = "deny"
+transmute_ptr_to_ptr = "deny"
+cast_ptr_alignment = "deny"
+# Numeric footguns.
+float_cmp = "deny"
+float_cmp_const = "deny"
+cast_sign_loss = "deny"
+lossy_float_literal = "deny"
+implicit_saturating_sub = "deny"
+# Hygiene / misc.
+dbg_macro = "deny"
+rc_mutex = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+# perf (in `all`, but deny-worthy on hot paths).
+redundant_clone = "deny"
+unnecessary_to_owned = "deny"
+needless_collect = "deny"
+
+# ── pedantic, allowed (oxc/coreyja consensus: noise or style) ──
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+similar_names = "allow"
+struct_excessive_bools = "allow"
+too_many_lines = "allow"
+wildcard_imports = "allow"
+doc_markdown = "allow"
+too_many_arguments = "allow"
+fn_params_excessive_bools = "allow"
+non_std_lazy_statics = "allow"
+result_large_err = "allow"
+# ── nursery, allowed ──
+missing_const_for_fn = "allow"
+cognitive_complexity = "allow"
+option_if_let_else = "allow"
+use_self = "allow"
+significant_drop_tightening = "allow"
+branches_sharing_code = "allow"
+fallible_impl_from = "allow"
+useless_let_if_seq = "allow"
+impl_trait_in_params = "allow"
+# New 1.97 warnings; noise until the codebase adopts the new idioms.
+byte_char_slices = "allow"
+question_mark = "allow"
+# ── cargo, allowed ──
+multiple_crate_versions = "allow"
+cargo_common_metadata = "allow"
+
 [workspace.dependencies]
 tinybrowser-dom = { path = "crates/tinybrowser-dom" }
 tinybrowser-net = { path = "crates/tinybrowser-net" }

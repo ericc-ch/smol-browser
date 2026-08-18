@@ -15,3 +15,6 @@ precomputed-hash = "0.1"
 slotmap = { workspace = true }
 
 [dev-dependencies]
+
+[lints]
+workspace = true
