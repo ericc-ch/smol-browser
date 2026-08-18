@@ -105,8 +105,7 @@ fn response_request_id(ctx: &CdpContext, url_needle: &str) -> Option<String> {
                     .get("response")
                     .and_then(|r| r.get("url"))
                     .and_then(|u| u.as_str())
-                    .map(|u| u.contains(url_needle))
-                    .unwrap_or(false)
+                    .is_some_and(|u| u.contains(url_needle))
         })
         .and_then(|e| {
             e.params

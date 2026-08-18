@@ -97,7 +97,7 @@ async fn iframe_document_dispatches_registered_listeners() {
     let v = eval(
         &mut ctx,
         2,
-        r#"(function () {
+        r"(function () {
             const iframe = document.createElement('iframe');
             document.body.appendChild(iframe);
             const doc = iframe.contentDocument;
@@ -122,7 +122,7 @@ async fn iframe_document_dispatches_registered_listeners() {
             out.cancelReturn = doc.dispatchEvent(new Event('cancelme', { cancelable: true }));
             out.plainReturn = doc.dispatchEvent(new Event('nolisteners'));
             return JSON.stringify(out);
-        })()"#,
+        })()",
         &sid,
     )
     .await;

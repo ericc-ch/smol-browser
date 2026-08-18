@@ -30,7 +30,7 @@ impl parser::SelectorImpl for Selector {
     type PseudoElement = PseudoElement;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct CssString(pub String);
 
 impl<'a> From<&'a str> for CssString {
@@ -55,15 +55,9 @@ impl PrecomputedHash for CssString {
     fn precomputed_hash(&self) -> u32 {
         let mut h: u32 = 5381;
         for b in self.0.as_bytes() {
-            h = h.wrapping_mul(33).wrapping_add(*b as u32);
+            h = h.wrapping_mul(33).wrapping_add(u32::from(*b));
         }
         h
-    }
-}
-
-impl Default for CssString {
-    fn default() -> Self {
-        CssString(String::new())
     }
 }
 
@@ -261,20 +255,18 @@ impl<'a> DomElement<'a> {
     fn is_form_control(&self) -> bool {
         self.tree
             .with_node(self.node_id, |n| {
-                n.as_element()
-                    .map(|name| {
-                        matches!(
-                            name.local.as_ref(),
-                            "input"
-                                | "button"
-                                | "select"
-                                | "textarea"
-                                | "optgroup"
-                                | "option"
-                                | "fieldset"
-                        )
-                    })
-                    .unwrap_or(false)
+                n.as_element().is_some_and(|name| {
+                    matches!(
+                        name.local.as_ref(),
+                        "input"
+                            | "button"
+                            | "select"
+                            | "textarea"
+                            | "optgroup"
+                            | "option"
+                            | "fieldset"
+                    )
+                })
             })
             .unwrap_or(false)
     }
@@ -289,21 +281,21 @@ impl<'a> DomElement<'a> {
     }
 }
 
-impl<'a> std::fmt::Debug for DomElement<'a> {
+impl std::fmt::Debug for DomElement<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "DomElement({:?})", self.node_id)
     }
 }
 
-impl<'a> PartialEq for DomElement<'a> {
+impl PartialEq for DomElement<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.node_id == other.node_id
     }
 }
 
-impl<'a> Eq for DomElement<'a> {}
+impl Eq for DomElement<'_> {}
 
-impl<'a> Element for DomElement<'a> {
+impl Element for DomElement<'_> {
     type Impl = Selector;
 
     fn opaque(&self) -> OpaqueElement {
@@ -395,9 +387,7 @@ impl<'a> Element for DomElement<'a> {
     fn is_html_element_in_html_document(&self) -> bool {
         self.tree
             .with_node(self.node_id, |n| {
-                n.as_element()
-                    .map(|name| name.ns == ns!(html))
-                    .unwrap_or(false)
+                n.as_element().is_some_and(|name| name.ns == ns!(html))
             })
             .unwrap_or(false)
     }
@@ -406,8 +396,7 @@ impl<'a> Element for DomElement<'a> {
         self.tree
             .with_node(self.node_id, |n| {
                 n.as_element()
-                    .map(|name| name.local == local_name.0)
-                    .unwrap_or(false)
+                    .is_some_and(|name| name.local == local_name.0)
             })
             .unwrap_or(false)
     }
@@ -415,7 +404,7 @@ impl<'a> Element for DomElement<'a> {
     fn has_namespace(&self, ns: &CssNamespace) -> bool {
         self.tree
             .with_node(self.node_id, |n| {
-                n.as_element().map(|name| name.ns == ns.0).unwrap_or(false)
+                n.as_element().is_some_and(|name| name.ns == ns.0)
             })
             .unwrap_or(false)
     }
@@ -470,13 +459,11 @@ impl<'a> Element for DomElement<'a> {
     fn has_attr_in_no_namespace(&self, local_name: &CssLocalName) -> bool {
         self.tree
             .with_node(self.node_id, |node| {
-                node.attrs()
-                    .map(|attrs| {
-                        attrs
-                            .iter()
-                            .any(|a| a.name.ns == html5ever::ns!() && a.name.local == local_name.0)
-                    })
-                    .unwrap_or(false)
+                node.attrs().is_some_and(|attrs| {
+                    attrs
+                        .iter()
+                        .any(|a| a.name.ns == html5ever::ns!() && a.name.local == local_name.0)
+                })
             })
             .unwrap_or(false)
     }
@@ -525,12 +512,10 @@ impl<'a> Element for DomElement<'a> {
     fn is_link(&self) -> bool {
         self.tree
             .with_node(self.node_id, |n| {
-                n.as_element()
-                    .map(|name| {
-                        matches!(name.local.as_ref(), "a" | "area" | "link")
-                            && n.get_attribute("href").is_some()
-                    })
-                    .unwrap_or(false)
+                n.as_element().is_some_and(|name| {
+                    matches!(name.local.as_ref(), "a" | "area" | "link")
+                        && n.get_attribute("href").is_some()
+                })
             })
             .unwrap_or(false)
     }
@@ -549,8 +534,7 @@ impl<'a> Element for DomElement<'a> {
         self.tree
             .with_node(self.node_id, |n| {
                 n.get_attribute("id")
-                    .map(|value| case_sensitivity.eq(value.as_bytes(), id.0.as_bytes()))
-                    .unwrap_or(false)
+                    .is_some_and(|value| case_sensitivity.eq(value.as_bytes(), id.0.as_bytes()))
             })
             .unwrap_or(false)
     }
@@ -558,13 +542,11 @@ impl<'a> Element for DomElement<'a> {
     fn has_class(&self, name: &CssString, case_sensitivity: CaseSensitivity) -> bool {
         self.tree
             .with_node(self.node_id, |n| {
-                n.get_attribute("class")
-                    .map(|class_attr| {
-                        class_attr
-                            .split_whitespace()
-                            .any(|c| case_sensitivity.eq(c.as_bytes(), name.0.as_bytes()))
-                    })
-                    .unwrap_or(false)
+                n.get_attribute("class").is_some_and(|class_attr| {
+                    class_attr
+                        .split_whitespace()
+                        .any(|c| case_sensitivity.eq(c.as_bytes(), name.0.as_bytes()))
+                })
             })
             .unwrap_or(false)
     }
@@ -605,15 +587,13 @@ impl<'a> Element for DomElement<'a> {
     fn is_root(&self) -> bool {
         self.tree
             .with_node(self.node_id, |n| {
-                n.parent
-                    .map(|parent_id| {
-                        !self.tree.is_shadow_root(parent_id)
-                            && self
-                                .tree
-                                .with_node(parent_id, |p| p.is_document())
-                                .unwrap_or(false)
-                    })
-                    .unwrap_or(false)
+                n.parent.is_some_and(|parent_id| {
+                    !self.tree.is_shadow_root(parent_id)
+                        && self
+                            .tree
+                            .with_node(parent_id, super::tree::Node::is_document)
+                            .unwrap_or(false)
+                })
             })
             .unwrap_or(false)
     }
@@ -644,7 +624,7 @@ fn parse_selector_uncached(selector: &str) -> Result<SelectorList<Selector>, Str
     let mut parser_input = cssparser::ParserInput::new(selector);
     let mut parser = cssparser::Parser::new(&mut parser_input);
     SelectorList::parse(&SelectorParser, &mut parser, ParseRelative::No)
-        .map_err(|e| format!("Failed to parse selector '{}': {:?}", selector, e))
+        .map_err(|e| format!("Failed to parse selector '{selector}': {e:?}"))
 }
 
 pub fn parse_selector(selector: &str) -> Result<SelectorList<Selector>, String> {
@@ -732,7 +712,9 @@ impl DomTree {
         );
 
         for desc_id in self.descendants(root) {
-            let is_element = self.with_node(desc_id, |n| n.is_element()).unwrap_or(false);
+            let is_element = self
+                .with_node(desc_id, super::tree::Node::is_element)
+                .unwrap_or(false);
             if is_element {
                 let element = DomElement::new(self, desc_id);
                 if selectors::matching::matches_selector_list(
@@ -775,7 +757,9 @@ impl DomTree {
         let mut results = Vec::new();
 
         for desc_id in self.descendants(root) {
-            let is_element = self.with_node(desc_id, |n| n.is_element()).unwrap_or(false);
+            let is_element = self
+                .with_node(desc_id, super::tree::Node::is_element)
+                .unwrap_or(false);
             if is_element {
                 let element = DomElement::new(self, desc_id);
                 if selectors::matching::matches_selector_list(
@@ -794,7 +778,7 @@ impl DomTree {
     /// detached or is a direct child of a shadow-tree compatibility root.
     pub fn matches_selector(&self, nid: NodeId, selector: &str) -> Result<bool, String> {
         if !self
-            .with_node(nid, |node| node.is_element())
+            .with_node(nid, super::tree::Node::is_element)
             .unwrap_or(false)
         {
             return Ok(false);
@@ -904,7 +888,10 @@ impl Matcher {
     /// Match `nid` (matched as if it were the subject element; the ancestor
     /// filter reflects `nid`'s ancestors, not `nid` itself) against `compiled`.
     pub fn matches(&mut self, tree: &DomTree, nid: NodeId, compiled: &CompiledSelector) -> bool {
-        if !tree.with_node(nid, |n| n.is_element()).unwrap_or(false) {
+        if !tree
+            .with_node(nid, super::tree::Node::is_element)
+            .unwrap_or(false)
+        {
             return false;
         }
         let mut context = MatchingContext::new(
@@ -951,7 +938,10 @@ impl Matcher {
         compiled: &CompiledSelector,
         host: NodeId,
     ) -> bool {
-        if !tree.with_node(nid, |n| n.is_element()).unwrap_or(false) {
+        if !tree
+            .with_node(nid, super::tree::Node::is_element)
+            .unwrap_or(false)
+        {
             return false;
         }
         let mut context = MatchingContext::new(
@@ -1188,10 +1178,10 @@ fn subject_keys(sel: &parser::Selector<Selector>) -> Vec<SelectorKey> {
                 local_name_lower, ..
             } => attribute = Some(local_name_lower.0.to_string()),
             Component::AttributeInNoNamespace { local_name, .. } => {
-                attribute = Some(local_name.0.to_string())
+                attribute = Some(local_name.0.to_string());
             }
             Component::AttributeOther(selector) => {
-                attribute = Some(selector.local_name_lower.0.to_string())
+                attribute = Some(selector.local_name_lower.0.to_string());
             }
             Component::Is(list) | Component::Where(list) => {
                 let mut keys = Vec::new();
@@ -1520,7 +1510,7 @@ mod tests {
 
     #[test]
     fn test_enabled_matches_form_control_without_disabled_attr() {
-        let tree = parse_html(r#"<button>Click</button><button disabled>Nope</button>"#);
+        let tree = parse_html(r"<button>Click</button><button disabled>Nope</button>");
         let enabled = tree.query_selector_all("button:enabled").unwrap();
         assert_eq!(
             enabled.len(),
@@ -1539,7 +1529,7 @@ mod tests {
     fn test_enabled_does_not_match_non_form_elements() {
         // :enabled/:disabled only apply to form controls; a plain div should
         // never match either, disabled attribute or not.
-        let tree = parse_html(r#"<div disabled>x</div>"#);
+        let tree = parse_html(r"<div disabled>x</div>");
         assert_eq!(tree.query_selector_all("div:enabled").unwrap().len(), 0);
         assert_eq!(tree.query_selector_all("div:disabled").unwrap().len(), 0);
     }
@@ -1576,7 +1566,7 @@ mod tests {
         );
         let target = tree.get_element_by_id("target").unwrap();
         let compiled = tree
-            .compile_rule_selector(r#":is(.\*\*\:\[\.line\]\:block *).line"#)
+            .compile_rule_selector(r":is(.\*\*\:\[\.line\]\:block *).line")
             .unwrap();
         let mut matcher = tree.matcher();
         for ancestor in tree.ancestors(target).into_iter().rev() {

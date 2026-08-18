@@ -130,6 +130,12 @@ pub struct RuntimeState {
     pub(crate) already_started_scripts: RefCell<HashSet<NodeId>>,
 }
 
+impl Default for RuntimeState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RuntimeState {
     pub fn new() -> Self {
         RuntimeState {
@@ -164,8 +170,7 @@ impl RuntimeState {
 pub(crate) fn node_is_script(dom: &DomTree, node_id: NodeId) -> bool {
     dom.with_node(node_id, |node| {
         node.as_element()
-            .map(|name| name.local.as_ref().eq_ignore_ascii_case("script"))
-            .unwrap_or(false)
+            .is_some_and(|name| name.local.as_ref().eq_ignore_ascii_case("script"))
     })
     .unwrap_or(false)
 }
@@ -313,8 +318,7 @@ fn render_mutation_impact(
             let value = parts.next().unwrap_or("");
             let local = qualified
                 .split_once(':')
-                .map(|(_, local)| local)
-                .unwrap_or(qualified);
+                .map_or(qualified, |(_, local)| local);
             let old = dom
                 .with_node(target, |node| {
                     node.get_attribute_ns(namespace, local).map(str::to_owned)
@@ -588,7 +592,7 @@ pub(crate) fn op_dom_tree_query(shared: &SharedState, cmd: &str, nid: u64) -> Op
             _ => None,
         })
         .flatten();
-    Some(id.map(|id| id.raw() as i64).unwrap_or(-1))
+    Some(id.map_or(-1, |id| id.raw() as i64))
 }
 
 pub(crate) fn op_dom_inner(
@@ -643,7 +647,7 @@ pub(crate) fn op_dom_inner(
                 .flatten()
                 .map(|title_id| {
                     dom.text_content(title_id)
-                        .split(|ch| matches!(ch, '\t' | '\n' | '\u{000C}' | '\r' | ' '))
+                        .split(['\t', '\n', '\u{000C}', '\r', ' '])
                         .filter(|part| !part.is_empty())
                         .collect::<Vec<_>>()
                         .join(" ")
@@ -658,8 +662,7 @@ pub(crate) fn op_dom_inner(
             for cid in dom.children(dom.document()) {
                 if let Some(n) = dom.get_node(cid) {
                     if n.as_element()
-                        .map(|name| name.local.as_ref() == "html")
-                        .unwrap_or(false)
+                        .is_some_and(|name| name.local.as_ref() == "html")
                     {
                         return cid.raw().to_string();
                     }
@@ -695,28 +698,25 @@ pub(crate) fn op_dom_inner(
             let doc = dom.document();
             let nid = dom.get_element_by_id(&arg1);
             let live = nid.filter(|&n| dom.ancestors(n).contains(&doc));
-            match live {
-                Some(n) => n.raw().to_string(),
-                None => {
-                    // Fall back to full scan for the live document.
-                    let sel = format!(
-                        "[id=\"{}\"]",
-                        arg1.replace('\\', "\\\\").replace('"', "\\\"")
-                    );
-                    dom.query_selector(&sel)
-                        .ok()
-                        .flatten()
-                        .map(|id| id.raw().to_string())
-                        .unwrap_or("-1".into())
-                }
+            if let Some(n) = live {
+                n.raw().to_string()
+            } else {
+                // Fall back to full scan for the live document.
+                let sel = format!(
+                    "[id=\"{}\"]",
+                    arg1.replace('\\', "\\\\").replace('"', "\\\"")
+                );
+                dom.query_selector(&sel)
+                    .ok()
+                    .flatten()
+                    .map_or("-1".into(), |id| id.raw().to_string())
             }
         }
         "query_selector" => dom
             .query_selector(&arg1)
             .ok()
             .flatten()
-            .map(|id| id.raw().to_string())
-            .unwrap_or("-1".into()),
+            .map_or("-1".into(), |id| id.raw().to_string()),
         "query_selector_all" => {
             let ids: Vec<i64> = dom
                 .query_selector_all(&arg1)
@@ -730,8 +730,7 @@ pub(crate) fn op_dom_inner(
             dom.query_selector_from(NodeId::new(root_nid), &arg2)
                 .ok()
                 .flatten()
-                .map(|id| id.raw().to_string())
-                .unwrap_or("-1".into())
+                .map_or("-1".into(), |id| id.raw().to_string())
         }
         "query_selector_all_scoped" => {
             let root_nid = arg1.parse::<u64>().unwrap_or(0);
@@ -790,15 +789,13 @@ pub(crate) fn op_dom_inner(
                 _ => None,
             })
             .flatten()
-            .map(|id| id.raw().to_string())
-            .unwrap_or("-1".into())
+            .map_or("-1".into(), |id| id.raw().to_string())
         }
         "next_in_subtree" => {
             let root = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
             let current = NodeId::new(arg2.parse::<u64>().unwrap_or(0));
             dom.next_in_subtree(root, current)
-                .map(|id| id.raw().to_string())
-                .unwrap_or("-1".into())
+                .map_or("-1".into(), |id| id.raw().to_string())
         }
         // Reverse document order within a subtree, for NodeIterator's backward
         // walk (which prunes nothing, so the whole step fits in the DOM layer).
@@ -806,8 +803,7 @@ pub(crate) fn op_dom_inner(
             let root = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
             let current = NodeId::new(arg2.parse::<u64>().unwrap_or(0));
             dom.prev_in_subtree(root, current)
-                .map(|id| id.raw().to_string())
-                .unwrap_or("-1".into())
+                .map_or("-1".into(), |id| id.raw().to_string())
         }
         // Step past a whole subtree rather than into it: NodeFilter.FILTER_REJECT
         // prunes the rejected node's descendants, unlike FILTER_SKIP.
@@ -815,8 +811,7 @@ pub(crate) fn op_dom_inner(
             let root = NodeId::new(arg1.parse::<u64>().unwrap_or(0));
             let current = NodeId::new(arg2.parse::<u64>().unwrap_or(0));
             dom.next_after_subtree(root, current)
-                .map(|id| id.raw().to_string())
-                .unwrap_or("-1".into())
+                .map_or("-1".into(), |id| id.raw().to_string())
         }
         "child_nodes" => {
             let nid = arg1.parse::<u64>().unwrap_or(0);
@@ -873,7 +868,7 @@ pub(crate) fn op_dom_inner(
             let nid = arg1.parse::<u64>().unwrap_or(0);
             let val = dom
                 .with_node(NodeId::new(nid), |n| {
-                    n.get_attribute(&arg2).map(|s| s.to_string())
+                    n.get_attribute(&arg2).map(std::string::ToString::to_string)
                 })
                 .flatten();
             serde_json::to_string(&val).unwrap_or("null".into())
@@ -883,7 +878,11 @@ pub(crate) fn op_dom_inner(
             let names: Vec<String> = dom
                 .with_node(NodeId::new(nid), |n| {
                     n.attrs()
-                        .map(|a| a.iter().map(|x| x.qualified_name()).collect())
+                        .map(|a| {
+                            a.iter()
+                                .map(tinybrowser_dom::Attribute::qualified_name)
+                                .collect()
+                        })
                         .unwrap_or_default()
                 })
                 .unwrap_or_default();
@@ -895,7 +894,9 @@ pub(crate) fn op_dom_inner(
             if let Some((name, value)) = arg2.split_once('\0') {
                 if name == "id" {
                     let old_id = dom
-                        .with_node(node_id, |n| n.get_attribute("id").map(|s| s.to_string()))
+                        .with_node(node_id, |n| {
+                            n.get_attribute("id").map(std::string::ToString::to_string)
+                        })
                         .flatten();
                     dom.with_node_mut(node_id, |n| n.set_attribute(name, value.to_string()));
                     dom.update_id_index(node_id, old_id.as_deref(), Some(value));
@@ -980,7 +981,8 @@ pub(crate) fn op_dom_inner(
             let (ns, local) = arg2.split_once('\0').unwrap_or(("", arg2.as_str()));
             let val = dom
                 .with_node(NodeId::new(nid), |n| {
-                    n.get_attribute_ns(ns, local).map(|s| s.to_string())
+                    n.get_attribute_ns(ns, local)
+                        .map(std::string::ToString::to_string)
                 })
                 .flatten();
             serde_json::to_string(&val).unwrap_or("null".into())
@@ -995,19 +997,18 @@ pub(crate) fn op_dom_inner(
             if !qualified.is_empty() {
                 let local = qualified
                     .split_once(':')
-                    .map(|(_, local)| local)
-                    .unwrap_or(qualified);
+                    .map_or(qualified, |(_, local)| local);
                 if ns.is_empty() && local == "id" {
                     let old_id = dom
                         .with_node(node_id, |n| n.get_attribute("id").map(str::to_owned))
                         .flatten();
                     dom.with_node_mut(node_id, |n| {
-                        n.set_attribute_ns(ns, qualified, value.to_string())
+                        n.set_attribute_ns(ns, qualified, value.to_string());
                     });
                     dom.update_id_index(node_id, old_id.as_deref(), Some(value));
                 } else {
                     dom.with_node_mut(node_id, |n| {
-                        n.set_attribute_ns(ns, qualified, value.to_string())
+                        n.set_attribute_ns(ns, qualified, value.to_string());
                     });
                 }
             }
@@ -1121,8 +1122,7 @@ pub(crate) fn op_dom_inner(
         "template_contents" => {
             let nid = arg1.parse::<u64>().unwrap_or(0);
             dom.template_contents(NodeId::new(nid))
-                .map(|id| id.raw().to_string())
-                .unwrap_or("-1".into())
+                .map_or("-1".into(), |id| id.raw().to_string())
         }
         "create_document_fragment" => dom.new_node(NodeData::Document).raw().to_string(),
         "clone_node" => {
@@ -1175,22 +1175,18 @@ pub(crate) fn op_dom_inner(
             .to_string()
         }
         "create_text_node" => dom
-            .new_node(NodeData::Text {
-                contents: arg1.clone(),
-            })
+            .new_node(NodeData::Text { contents: arg1 })
             .raw()
             .to_string(),
         "create_comment_node" => dom
-            .new_node(NodeData::Comment {
-                contents: arg1.clone(),
-            })
+            .new_node(NodeData::Comment { contents: arg1 })
             .raw()
             .to_string(),
         "create_processing_instruction" => {
             // arg1 = target, arg2 = data
             dom.new_node(NodeData::ProcessingInstruction {
-                target: arg1.clone(),
-                data: arg2.clone(),
+                target: arg1,
+                data: arg2,
             })
             .raw()
             .to_string()
@@ -1200,8 +1196,8 @@ pub(crate) fn op_dom_inner(
             // JS wrapper since neither current WPT test reads it back from
             // the underlying tree.
             dom.new_node(NodeData::Doctype {
-                name: arg1.clone(),
-                public_id: arg2.clone(),
+                name: arg1,
+                public_id: arg2,
                 system_id: String::new(),
             })
             .raw()
@@ -1245,7 +1241,7 @@ pub(crate) fn op_dom_inner(
             let ids: Vec<i64> = dom
                 .children(NodeId::new(nid))
                 .iter()
-                .filter(|&&id| dom.get_node(id).map(|n| n.is_element()).unwrap_or(false))
+                .filter(|&&id| dom.get_node(id).is_some_and(|n| n.is_element()))
                 .map(|id| id.raw() as i64)
                 .collect();
             serde_json::to_string(&ids).unwrap_or("[]".into())
@@ -1548,7 +1544,7 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
     } = job;
     let proxy_url = http_client
         .as_ref()
-        .and_then(|c| c.proxy_url().map(|s| s.to_string()));
+        .and_then(|c| c.proxy_url().map(std::string::ToString::to_string));
     let allow_private_network = http_client
         .as_ref()
         .is_some_and(|client| client.allow_private_network);
@@ -1786,175 +1782,6 @@ fn glob_match(pattern: &str, url: &str) -> bool {
     }
 
     pattern.ends_with('*') || remainder.is_empty()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::glob_match;
-    use crate::runtime::JsRuntime;
-    use tinybrowser_dom::parse_html;
-
-    #[test]
-    fn glob_match_handles_cdp_blocked_url_patterns() {
-        assert!(glob_match(
-            "*://*.google.com/maps/vt/*",
-            "https://www.google.com/maps/vt/pb=!1m4!1m3",
-        ));
-        assert!(glob_match(
-            "*://*.gstatic.com/*.woff2",
-            "https://fonts.gstatic.com/s/inter/v18/font.woff2",
-        ));
-        assert!(glob_match(
-            "https://example.com/assets/*",
-            "https://example.com/assets/app.js",
-        ));
-        assert!(!glob_match(
-            "https://example.com/assets/*",
-            "https://cdn.example.com/assets/app.js",
-        ));
-        assert!(!glob_match(
-            "*://*.gstatic.com/*.woff2",
-            "https://fonts.gstatic.com/s/inter/v18/font.woff",
-        ));
-    }
-
-    #[test]
-    fn fetch_url_validation_honors_per_context_private_network_opt_in() {
-        let loopback = url::Url::parse("http://127.0.0.1:8080/resource").unwrap();
-        assert!(tinybrowser_net::validate_url(&loopback, true).is_ok());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn posted_task_chains_complete_without_zero_delay_timer_floor() {
-        let mut runtime = JsRuntime::new();
-        runtime.set_dom(parse_html("<html><body></body></html>"));
-        runtime.set_url("http://example.com/posted-task-test");
-        runtime.run_page_init();
-        runtime
-            .execute_script(
-                "posted-task-throughput",
-                r#"
-                    globalThis.__postedTaskBench = {
-                        message: 0,
-                        postTask: 0,
-                        yields: 0,
-                        started: performance.now(),
-                        finished: 0,
-                    };
-                    const markFinished = () => {
-                        if (__postedTaskBench.message === 100 &&
-                            __postedTaskBench.postTask === 100 &&
-                            __postedTaskBench.yields === 100) {
-                            __postedTaskBench.finished = performance.now();
-                        }
-                    };
-
-                    const channel = new MessageChannel();
-                    channel.port2.onmessage = () => {
-                        __postedTaskBench.message++;
-                        if (__postedTaskBench.message < 100) channel.port1.postMessage(null);
-                        else markFinished();
-                    };
-                    channel.port1.postMessage(null);
-
-                    const postNext = () => scheduler.postTask(() => {
-                        __postedTaskBench.postTask++;
-                        if (__postedTaskBench.postTask < 100) postNext();
-                        else markFinished();
-                    });
-                    postNext();
-
-                    scheduler.postTask(async () => {
-                        while (__postedTaskBench.yields < 100) {
-                            await scheduler.yield();
-                            __postedTaskBench.yields++;
-                        }
-                        markFinished();
-                    });
-                "#,
-            )
-            .unwrap();
-
-        runtime.run_event_loop_bounded(100).await.unwrap();
-        let result = runtime
-            .evaluate(
-                r#"[
-                    __postedTaskBench.message,
-                    __postedTaskBench.postTask,
-                    __postedTaskBench.yields,
-                    __postedTaskBench.finished - __postedTaskBench.started,
-                ]"#,
-            )
-            .unwrap();
-        let values = result.as_array().unwrap();
-        assert!(
-            values[..3]
-                .iter()
-                .all(|value| value.as_f64() == Some(100.0)),
-            "posted-task chains did not finish inside the 100ms pump: {result}",
-        );
-        assert!(
-            values[3]
-                .as_f64()
-                .is_some_and(|elapsed| elapsed >= 0.0 && elapsed < 75.0),
-            "300 chained posted-task deliveries retained timer-wheel latency: {result}",
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn shared_posted_task_queue_preserves_priority_fifo_and_microtasks() {
-        let mut runtime = JsRuntime::new();
-        runtime.set_dom(parse_html("<html><body></body></html>"));
-        runtime.set_url("http://example.com/posted-task-order");
-        runtime.run_page_init();
-        runtime
-            .execute_script(
-                "shared-posted-task-order",
-                r#"
-                    globalThis.__sharedPostedOrder = ["sync"];
-                    const channel = new MessageChannel();
-                    channel.port2.onmessage = event => {
-                        __sharedPostedOrder.push("message-" + event.data);
-                        Promise.resolve().then(() => {
-                            __sharedPostedOrder.push("message-" + event.data + "-microtask");
-                        });
-                    };
-                    channel.port1.postMessage(1);
-                    scheduler.postTask(() => {
-                        __sharedPostedOrder.push("visible");
-                        Promise.resolve().then(() => __sharedPostedOrder.push("visible-microtask"));
-                    });
-                    channel.port1.postMessage(2);
-                    scheduler.postTask(() => {
-                        __sharedPostedOrder.push("background");
-                    }, { priority: "background" });
-                    scheduler.postTask(() => {
-                        __sharedPostedOrder.push("blocking");
-                        Promise.resolve().then(() => __sharedPostedOrder.push("blocking-microtask"));
-                    }, { priority: "user-blocking" });
-                    Promise.resolve().then(() => __sharedPostedOrder.push("initial-microtask"));
-                "#,
-            )
-            .unwrap();
-
-        runtime.run_event_loop_bounded(100).await.unwrap();
-        assert_eq!(
-            runtime.evaluate("__sharedPostedOrder").unwrap(),
-            serde_json::json!([
-                "sync",
-                "initial-microtask",
-                "blocking",
-                "blocking-microtask",
-                "message-1",
-                "message-1-microtask",
-                "visible",
-                "visible-microtask",
-                "message-2",
-                "message-2-microtask",
-                "background",
-            ]),
-        );
-    }
 }
 
 pub(crate) fn op_get_cookies_inner(shared: &SharedState) -> String {
@@ -2495,4 +2322,173 @@ pub(crate) fn text_decode(label: &str, bytes: &[u8], fatal: bool, ignore_bom: bo
 /// path when the document is non-UTF-8, so the UTF-8 hot path never reaches it.
 pub(crate) fn url_encode_query(query: &str, label: &str, special: bool) -> String {
     tinybrowser_net::url_encode_query(query, label, special).unwrap_or_else(|| query.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::glob_match;
+    use crate::runtime::JsRuntime;
+    use tinybrowser_dom::parse_html;
+
+    #[test]
+    fn glob_match_handles_cdp_blocked_url_patterns() {
+        assert!(glob_match(
+            "*://*.google.com/maps/vt/*",
+            "https://www.google.com/maps/vt/pb=!1m4!1m3",
+        ));
+        assert!(glob_match(
+            "*://*.gstatic.com/*.woff2",
+            "https://fonts.gstatic.com/s/inter/v18/font.woff2",
+        ));
+        assert!(glob_match(
+            "https://example.com/assets/*",
+            "https://example.com/assets/app.js",
+        ));
+        assert!(!glob_match(
+            "https://example.com/assets/*",
+            "https://cdn.example.com/assets/app.js",
+        ));
+        assert!(!glob_match(
+            "*://*.gstatic.com/*.woff2",
+            "https://fonts.gstatic.com/s/inter/v18/font.woff",
+        ));
+    }
+
+    #[test]
+    fn fetch_url_validation_honors_per_context_private_network_opt_in() {
+        let loopback = url::Url::parse("http://127.0.0.1:8080/resource").unwrap();
+        assert!(tinybrowser_net::validate_url(&loopback, true).is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn posted_task_chains_complete_without_zero_delay_timer_floor() {
+        let mut runtime = JsRuntime::new();
+        runtime.set_dom(parse_html("<html><body></body></html>"));
+        runtime.set_url("http://example.com/posted-task-test");
+        runtime.run_page_init();
+        runtime
+            .execute_script(
+                "posted-task-throughput",
+                r"
+                    globalThis.__postedTaskBench = {
+                        message: 0,
+                        postTask: 0,
+                        yields: 0,
+                        started: performance.now(),
+                        finished: 0,
+                    };
+                    const markFinished = () => {
+                        if (__postedTaskBench.message === 100 &&
+                            __postedTaskBench.postTask === 100 &&
+                            __postedTaskBench.yields === 100) {
+                            __postedTaskBench.finished = performance.now();
+                        }
+                    };
+
+                    const channel = new MessageChannel();
+                    channel.port2.onmessage = () => {
+                        __postedTaskBench.message++;
+                        if (__postedTaskBench.message < 100) channel.port1.postMessage(null);
+                        else markFinished();
+                    };
+                    channel.port1.postMessage(null);
+
+                    const postNext = () => scheduler.postTask(() => {
+                        __postedTaskBench.postTask++;
+                        if (__postedTaskBench.postTask < 100) postNext();
+                        else markFinished();
+                    });
+                    postNext();
+
+                    scheduler.postTask(async () => {
+                        while (__postedTaskBench.yields < 100) {
+                            await scheduler.yield();
+                            __postedTaskBench.yields++;
+                        }
+                        markFinished();
+                    });
+                ",
+            )
+            .unwrap();
+
+        runtime.run_event_loop_bounded(100).await.unwrap();
+        let result = runtime
+            .evaluate(
+                r"[
+                    __postedTaskBench.message,
+                    __postedTaskBench.postTask,
+                    __postedTaskBench.yields,
+                    __postedTaskBench.finished - __postedTaskBench.started,
+                ]",
+            )
+            .unwrap();
+        let values = result.as_array().unwrap();
+        assert!(
+            values[..3]
+                .iter()
+                .all(|value| value.as_f64() == Some(100.0)),
+            "posted-task chains did not finish inside the 100ms pump: {result}",
+        );
+        assert!(
+            values[3]
+                .as_f64()
+                .is_some_and(|elapsed| (0.0..75.0).contains(&elapsed)),
+            "300 chained posted-task deliveries retained timer-wheel latency: {result}",
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_posted_task_queue_preserves_priority_fifo_and_microtasks() {
+        let mut runtime = JsRuntime::new();
+        runtime.set_dom(parse_html("<html><body></body></html>"));
+        runtime.set_url("http://example.com/posted-task-order");
+        runtime.run_page_init();
+        runtime
+            .execute_script(
+                "shared-posted-task-order",
+                r#"
+                    globalThis.__sharedPostedOrder = ["sync"];
+                    const channel = new MessageChannel();
+                    channel.port2.onmessage = event => {
+                        __sharedPostedOrder.push("message-" + event.data);
+                        Promise.resolve().then(() => {
+                            __sharedPostedOrder.push("message-" + event.data + "-microtask");
+                        });
+                    };
+                    channel.port1.postMessage(1);
+                    scheduler.postTask(() => {
+                        __sharedPostedOrder.push("visible");
+                        Promise.resolve().then(() => __sharedPostedOrder.push("visible-microtask"));
+                    });
+                    channel.port1.postMessage(2);
+                    scheduler.postTask(() => {
+                        __sharedPostedOrder.push("background");
+                    }, { priority: "background" });
+                    scheduler.postTask(() => {
+                        __sharedPostedOrder.push("blocking");
+                        Promise.resolve().then(() => __sharedPostedOrder.push("blocking-microtask"));
+                    }, { priority: "user-blocking" });
+                    Promise.resolve().then(() => __sharedPostedOrder.push("initial-microtask"));
+                "#,
+            )
+            .unwrap();
+
+        runtime.run_event_loop_bounded(100).await.unwrap();
+        assert_eq!(
+            runtime.evaluate("__sharedPostedOrder").unwrap(),
+            serde_json::json!([
+                "sync",
+                "initial-microtask",
+                "blocking",
+                "blocking-microtask",
+                "message-1",
+                "message-1-microtask",
+                "visible",
+                "visible-microtask",
+                "message-2",
+                "message-2-microtask",
+                "background",
+            ]),
+        );
+    }
 }

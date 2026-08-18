@@ -71,7 +71,7 @@ pub async fn handle(
             let context = match context_id {
                 Some(id) => ctx
                     .browser_context(id)
-                    .ok_or_else(|| format!("Browser context not found: {}", id))?,
+                    .ok_or_else(|| format!("Browser context not found: {id}"))?,
                 None => &ctx.default_context,
             };
 
@@ -86,7 +86,7 @@ pub async fn handle(
             }
 
             let page_id = ctx.create_page_in_context(context_id)?;
-            let session_id = format!("{}-session", page_id);
+            let session_id = format!("{page_id}-session");
 
             if let Some(page) = ctx.get_page_mut(&page_id) {
                 // `create_page_in_context` already left an about:blank document
@@ -209,7 +209,7 @@ pub async fn handle(
                 .get("targetId")
                 .and_then(|v| v.as_str())
                 .ok_or("targetId required")?;
-            let session_id = format!("{}-session", target_id);
+            let session_id = format!("{target_id}-session");
 
             ctx.pending_events.push(CdpEvent::new(
                 "Target.detachedFromTarget",
@@ -308,7 +308,7 @@ pub async fn handle(
                 }
             }
         }
-        _ => Err(format!("Unknown Target method: {}", method)),
+        _ => Err(format!("Unknown Target method: {method}")),
     }
 }
 

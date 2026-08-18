@@ -49,16 +49,15 @@ impl Page {
     }
 
     /// Query a single element by CSS selector.
-    pub fn query_selector(&mut self, selector: &str) -> Option<Element> {
+    pub fn query_selector(&mut self, selector: &str) -> Option<Element<'_>> {
         let escaped = selector.replace('\\', "\\\\").replace('\'', "\\'");
         let js = format!(
-            "(function() {{ var el = document.querySelector('{}'); return el ? el._nid : null; }})()",
-            escaped
+            "(function() {{ var el = document.querySelector('{escaped}'); return el ? el._nid : null; }})()"
         );
         let val = self.evaluate(&js);
         nid_from_value(&val).map(|nid| Element {
             node_id: nid,
-            page: self as *const Page,
+            page: self,
         })
     }
 
@@ -67,19 +66,18 @@ impl Page {
         &mut self,
         selector: &str,
         timeout: Duration,
-    ) -> Result<Element, Error> {
+    ) -> Result<Element<'_>, Error> {
         let start = std::time::Instant::now();
         let escaped = selector.replace('\\', "\\\\").replace('\'', "\\'");
         loop {
             let js = format!(
-                "(function() {{ var el = document.querySelector('{}'); return el ? el._nid : null; }})()",
-                escaped
+                "(function() {{ var el = document.querySelector('{escaped}'); return el ? el._nid : null; }})()"
             );
             let val = self.evaluate(&js);
             if let Some(nid) = nid_from_value(&val) {
                 return Ok(Element {
                     node_id: nid,
-                    page: self as *const Page,
+                    page: self,
                 });
             }
             if start.elapsed() > timeout {
@@ -99,7 +97,7 @@ impl Page {
     /// setTimeout, RxJS subscribers) to let the V8 event loop pump and
     /// resolve scheduled microtasks/macrotasks before the next `evaluate()`.
     pub async fn settle(&mut self, max_ms: u64) {
-        self.inner.settle(max_ms).await
+        self.inner.settle(max_ms).await;
     }
 
     /// Register a script that runs before any of the page's own `<script>` tags,
@@ -154,16 +152,15 @@ impl Page {
 /// Handle to a DOM element.
 ///
 /// Created via [`Page::query_selector`] or [`Page::wait_for_selector`].
-pub struct Element {
+pub struct Element<'a> {
     node_id: u64,
-    page: *const Page,
+    page: &'a mut Page,
 }
 
-impl Element {
+impl Element<'_> {
     /// Get text content of this element.
-    pub fn text(&self) -> String {
-        let page = unsafe { &mut *(self.page as *mut Page) };
-        let val = page.evaluate(&format!(
+    pub fn text(&mut self) -> String {
+        let val = self.page.evaluate(&format!(
             "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); return el ? el.textContent : ''; }})()",
             self.node_id
         ));
@@ -171,9 +168,8 @@ impl Element {
     }
 
     /// Get an attribute value.
-    pub fn attribute(&self, name: &str) -> Option<String> {
-        let page = unsafe { &mut *(self.page as *mut Page) };
-        let val = page.evaluate(&format!(
+    pub fn attribute(&mut self, name: &str) -> Option<String> {
+        let val = self.page.evaluate(&format!(
             "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); return el ? el.getAttribute('{}') : null; }})()",
             self.node_id, name
         ));
@@ -185,15 +181,14 @@ impl Element {
     }
 
     /// Click this element.
-    pub fn click(&self) -> Result<(), Error> {
-        let page = unsafe { &mut *(self.page as *mut Page) };
+    pub fn click(&mut self) -> Result<(), Error> {
         // Scroll into view
-        page.evaluate(&format!(
+        self.page.evaluate(&format!(
             "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); if (el) el.scrollIntoView({{block:'center'}}); }})()",
             self.node_id
         ));
         // Click
-        let result = page.evaluate(&format!(
+        let result = self.page.evaluate(&format!(
             "(function() {{ var el = globalThis._wrap && globalThis._wrap({}); if (el) {{ el.click(); return true; }} return false; }})()",
             self.node_id
         ));

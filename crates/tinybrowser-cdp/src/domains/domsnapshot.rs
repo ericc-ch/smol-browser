@@ -53,7 +53,7 @@ pub async fn handle(
             page.with_dom(|dom| build_capture_snapshot(dom, &url, &title))
                 .ok_or_else(|| "No DOM loaded".to_string())
         }
-        _ => Err(format!("Unknown DOMSnapshot method: {}", method)),
+        _ => Err(format!("Unknown DOMSnapshot method: {method}")),
     }
 }
 
@@ -140,30 +140,29 @@ fn build_capture_snapshot(dom: &DomTree, url: &str, title: &str) -> Value {
     let mut layout_text: Vec<i64> = Vec::with_capacity(n);
 
     for (i, &nid) in order.iter().enumerate() {
-        let node = match dom.get_node(nid) {
-            Some(node) => node,
-            None => {
-                // Keep arrays aligned even for a vanished node.
-                node_type.push(0);
-                node_name.push(0);
-                node_value.push(0);
-                backend_ids.push(nid.raw() as i64);
-                attributes.push(json!([]));
-                layout_node_index.push(i as i64);
-                bounds.push(json!([0.0, 0.0, 0.0, 0.0]));
-                styles.push(json!([]));
-                paint_orders.push(i as i64);
-                client_rects.push(json!([0.0, 0.0, 0.0, 0.0]));
-                layout_text.push(-1);
-                continue;
-            }
+        let node = if let Some(node) = dom.get_node(nid) {
+            node
+        } else {
+            // Keep arrays aligned even for a vanished node.
+            node_type.push(0);
+            node_name.push(0);
+            node_value.push(0);
+            backend_ids.push(nid.raw() as i64);
+            attributes.push(json!([]));
+            layout_node_index.push(i as i64);
+            bounds.push(json!([0.0, 0.0, 0.0, 0.0]));
+            styles.push(json!([]));
+            paint_orders.push(i as i64);
+            client_rects.push(json!([0.0, 0.0, 0.0, 0.0]));
+            layout_text.push(-1);
+            continue;
         };
 
         let (ntype, nname, nval, attrs, tag): (i64, String, String, Vec<(String, String)>, String) =
             match &node.data {
                 NodeData::Document => (9, "#document".into(), String::new(), vec![], String::new()),
                 NodeData::Doctype { name, .. } => {
-                    (10, name.to_string(), String::new(), vec![], String::new())
+                    (10, name.clone(), String::new(), vec![], String::new())
                 }
                 NodeData::Element { name, attrs, .. } => {
                     let tag = name.local.as_ref().to_string();
@@ -190,7 +189,7 @@ fn build_capture_snapshot(dom: &DomTree, url: &str, title: &str) -> Value {
                     String::new(),
                 ),
                 NodeData::ProcessingInstruction { target, data } => {
-                    (7, target.to_string(), data.clone(), vec![], String::new())
+                    (7, target.clone(), data.clone(), vec![], String::new())
                 }
             };
 
@@ -308,7 +307,10 @@ mod tests {
     use crate::dispatch::CdpContext;
 
     fn collect_backend_ids(node: &Value, out: &mut Vec<i64>) {
-        if let Some(id) = node.get("backendNodeId").and_then(|v| v.as_i64()) {
+        if let Some(id) = node
+            .get("backendNodeId")
+            .and_then(serde_json::Value::as_i64)
+        {
             out.push(id);
         }
         if let Some(children) = node.get("children").and_then(|v| v.as_array()) {
@@ -320,7 +322,9 @@ mod tests {
 
     fn find_backend_id_by_name(node: &Value, name: &str) -> Option<i64> {
         if node.get("nodeName").and_then(|v| v.as_str()) == Some(name) {
-            return node.get("backendNodeId").and_then(|v| v.as_i64());
+            return node
+                .get("backendNodeId")
+                .and_then(serde_json::Value::as_i64);
         }
         node.get("children")
             .and_then(|v| v.as_array())
@@ -333,7 +337,7 @@ mod tests {
 
     async fn navigate(ctx: &mut CdpContext, body: &str) -> String {
         let page_id = ctx.create_page();
-        let session_id = format!("{}-session", page_id);
+        let session_id = format!("{page_id}-session");
         ctx.sessions.insert(session_id.clone(), page_id.clone());
         let url = format!("data:text/html,{body}");
         crate::domains::page::handle(

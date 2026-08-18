@@ -133,12 +133,12 @@ pub async fn start_with_serve_options_and_limit(
 ) -> anyhow::Result<()> {
     let ip: std::net::IpAddr = host
         .parse()
-        .map_err(|e| anyhow::anyhow!("invalid --host '{}': {}", host, e))?;
+        .map_err(|e| anyhow::anyhow!("invalid --host '{host}': {e}"))?;
     let addr = SocketAddr::new(ip, port);
 
     let listener = TcpListener::bind(addr)
         .await
-        .map_err(|e| anyhow::anyhow!("bind {}:{}: {}", host, port, e))?;
+        .map_err(|e| anyhow::anyhow!("bind {host}:{port}: {e}"))?;
 
     info!("tinybrowser listening on ws://{}:{}", host, port);
     info!("DevTools endpoint: ws://{}:{}/devtools/browser", host, port);
@@ -203,7 +203,7 @@ pub async fn start_with_serve_options_and_limit(
             loop {
                 let accepted = tokio::select! {
                     accepted = listener.accept() => accepted.ok().map(|(s, _)| s),
-                    _ = shutdown_notify.notified() => None,
+                    () = shutdown_notify.notified() => None,
                 };
                 let tokio_stream = match accepted {
                     Some(s) => s,
@@ -245,7 +245,7 @@ pub async fn start_with_serve_options_and_limit(
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        if !format!("{}", e).contains("close") {
+                        if !format!("{e}").contains("close") {
                             error!("Accept dispatch error: {}", e);
                         }
                     }
@@ -293,7 +293,7 @@ fn run_connection(
         }
     }
 
-    let slot = live_connections.clone();
+    let slot = live_connections;
     tokio::task::spawn_local(async move {
         let _slot = SlotGuard(slot);
         let default_context = Arc::new(context_template.isolated_copy("default".to_string(), true));
@@ -316,7 +316,9 @@ fn run_connection(
         let _ = processor.await;
 
         if persistence_context.storage_dir.is_some() {
-            let _guard = persistence_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let _guard = persistence_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             merge_cookie_delta(
                 &persistence_context.cookie_jar,
                 &initial_cookies,
@@ -547,7 +549,7 @@ async fn cdp_processor(
                     Some(m) => Some(m),
                     None => break,
                 },
-                _ = &mut shutdown => {
+                () = &mut shutdown => {
                     tracing::info!("Shutdown signal received (connection processor)");
                     break;
                 },
@@ -560,7 +562,7 @@ async fn cdp_processor(
                         Err(error) => {
                             runtime_pump_error_streak = runtime_pump_error_streak.saturating_add(1);
                             runtime_pump_armed = runtime_pump_error_streak <= 3
-                                && ctx.pages.iter().any(|page| page.has_js());
+                                && ctx.pages.iter().any(tinybrowser_core::Page::has_js);
                             tracing::warn!("autonomous page task failed: {error}");
                             tokio::task::yield_now().await;
                         }
@@ -590,7 +592,7 @@ async fn cdp_processor(
                             false,
                         )
                         .await;
-                        runtime_pump_armed = ctx.pages.iter().any(|page| page.has_js());
+                        runtime_pump_armed = ctx.pages.iter().any(tinybrowser_core::Page::has_js);
                     }
                     None
                 },
@@ -675,7 +677,7 @@ async fn cdp_processor(
         // Dispatch may have created a page or scheduled new asynchronous work.
         // A single live isolate is the connection's current active target; the
         // pump will park cheaply if its next task is a distant timer.
-        runtime_pump_armed = ctx.pages.iter().any(|page| page.has_js());
+        runtime_pump_armed = ctx.pages.iter().any(tinybrowser_core::Page::has_js);
         runtime_pump_error_streak = 0;
     }
 
@@ -819,9 +821,7 @@ fn forward_pending_events(ctx: &mut CdpContext, reply_tx: Option<&mpsc::Unbounde
 // and belongs to its own handler, or any other frame that merely embeds the
 // literal text (e.g. a `Runtime.evaluate` expression). See issue #363.
 fn is_navigate_method(text: &str) -> bool {
-    serde_json::from_str::<CdpRequest>(text)
-        .map(|req| req.method == "Page.navigate")
-        .unwrap_or(false)
+    serde_json::from_str::<CdpRequest>(text).is_ok_and(|req| req.method == "Page.navigate")
 }
 
 fn is_fetch_resolution_method(method: &str) -> bool {
@@ -892,24 +892,24 @@ fn handle_fetch_resolution(
                         .params
                         .get("url")
                         .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
+                        .map(std::string::ToString::to_string),
                     method: req
                         .params
                         .get("method")
                         .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
+                        .map(std::string::ToString::to_string),
                     headers: parse_cdp_headers(&req.params),
                     body: req
                         .params
                         .get("postData")
                         .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
+                        .map(std::string::ToString::to_string),
                 },
                 "Fetch.fulfillRequest" => {
                     let status = req
                         .params
                         .get("responseCode")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(200) as u16;
                     let raw_body = req
                         .params
@@ -989,21 +989,19 @@ async fn process_with_interception(
         .and_then(|sid| ctx.sessions.get(sid))
         .cloned();
 
-    let page_id = match page_id {
-        Some(id) => id,
-        None => {
-            process_cdp_message(text, ctx, reply_tx).await;
-            return;
-        }
+    let page_id = if let Some(id) = page_id {
+        id
+    } else {
+        process_cdp_message(text, ctx, reply_tx).await;
+        return;
     };
 
     let page_index = ctx.pages.iter().position(|p| p.id == page_id);
-    let mut page = match page_index {
-        Some(idx) => ctx.pages.remove(idx),
-        None => {
-            process_cdp_message(text, ctx, reply_tx).await;
-            return;
-        }
+    let mut page = if let Some(idx) = page_index {
+        ctx.pages.remove(idx)
+    } else {
+        process_cdp_message(text, ctx, reply_tx).await;
+        return;
     };
 
     // QuickJS runtimes are per-page and can stay live together. Do not
@@ -1114,7 +1112,7 @@ async fn process_with_interception(
                     ServerMessage::NewConnection { reply_tx: new_tx } => {
                         // Safe: no V8 enter, just bookkeeping.
                         let pid = ctx.create_page();
-                        let sid = format!("{}-session", pid);
+                        let sid = format!("{pid}-session");
                         ctx.sessions.insert(sid.clone(), pid.clone());
                         let _ = new_tx.send(json!({"__init": true, "pageId": pid, "sessionId": sid}).to_string());
                     }

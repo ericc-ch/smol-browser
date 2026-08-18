@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 /// Configuration for launching a Browser instance.
+#[derive(Default)]
 pub struct BrowserConfig {
     /// Proxy URL (e.g., "socks5://127.0.0.1:1080")
     pub proxy: Option<String>,
@@ -8,16 +9,6 @@ pub struct BrowserConfig {
     pub user_agent: Option<String>,
     /// Directory for persistent cookie storage
     pub storage_dir: Option<PathBuf>,
-}
-
-impl Default for BrowserConfig {
-    fn default() -> Self {
-        Self {
-            proxy: None,
-            user_agent: None,
-            storage_dir: None,
-        }
-    }
 }
 
 impl BrowserConfig {

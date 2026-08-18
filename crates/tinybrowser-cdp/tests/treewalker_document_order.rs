@@ -132,7 +132,7 @@ async fn next_node_handles_a_deep_accepted_child_fast_path() {
     let value = eval(
         &mut ctx,
         &session_id,
-        r#"(() => {
+        r"(() => {
             const root = document.createElement('div');
             let parent = root;
             for (let i = 0; i < 5000; i++) {
@@ -145,7 +145,7 @@ async fn next_node_handles_a_deep_accepted_child_fast_path() {
             let count = 0;
             while (walker.nextNode()) count++;
             return count;
-        })()"#,
+        })()",
     )
     .await;
     assert_eq!(value["result"]["value"].as_f64(), Some(5000.0));

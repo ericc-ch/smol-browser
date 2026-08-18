@@ -2,7 +2,7 @@
 
 /// JS expression that walks `document.body` and returns a markdown string.
 /// Must be evaluated against a Page that has a fully-bootstrapped JS runtime.
-pub const HTML_TO_MARKDOWN_JS: &str = r#"
+pub const HTML_TO_MARKDOWN_JS: &str = r"
 (function() {
     function toMd(el, depth) {
         if (!el) return '';
@@ -66,4 +66,4 @@ pub const HTML_TO_MARKDOWN_JS: &str = r#"
     md = md.replace(/\n{3,}/g, '\n\n').trim();
     return md;
 })()
-"#;
+";

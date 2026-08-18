@@ -16,11 +16,11 @@ fn cookie_jar_for(
         Some(id) => ctx
             .browser_context(id)
             .map(|context| context.cookie_jar.clone())
-            .ok_or_else(|| format!("Browser context not found: {}", id)),
-        None => Ok(ctx
-            .get_session_page(session_id)
-            .map(|page| page.context.cookie_jar.clone())
-            .unwrap_or_else(|| ctx.default_context.cookie_jar.clone())),
+            .ok_or_else(|| format!("Browser context not found: {id}")),
+        None => Ok(ctx.get_session_page(session_id).map_or_else(
+            || ctx.default_context.cookie_jar.clone(),
+            |page| page.context.cookie_jar.clone(),
+        )),
     }
 }
 
@@ -53,6 +53,6 @@ pub async fn handle(
             }
             Ok(json!({}))
         }
-        _ => Err(format!("Unknown Storage method: {}", method)),
+        _ => Err(format!("Unknown Storage method: {method}")),
     }
 }

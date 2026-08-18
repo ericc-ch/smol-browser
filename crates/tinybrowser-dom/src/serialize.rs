@@ -138,8 +138,7 @@ impl DomTree {
                         .and_then(|pid| {
                             self.with_node(pid, |p| {
                                 p.as_element()
-                                    .map(|name| is_raw_text_element(name.local.as_ref()))
-                                    .unwrap_or(false)
+                                    .is_some_and(|name| is_raw_text_element(name.local.as_ref()))
                             })
                         })
                         .unwrap_or(false);

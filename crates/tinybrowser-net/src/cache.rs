@@ -180,7 +180,7 @@ mod tests {
     fn cache_lifetime_requires_fresh_success_without_cookies_or_star_vary() {
         assert_eq!(
             response_cache_lifetime(&response(200, &[("cache-control", "max-age=60")], b"ok")),
-            Some(Duration::from_secs(60))
+            Some(Duration::from_mins(1))
         );
         assert_eq!(
             response_cache_lifetime(&response(404, &[("cache-control", "max-age=60")], b"no")),
@@ -220,7 +220,7 @@ mod tests {
         cache.insert(
             key.clone(),
             response(200, &[("cache-control", "max-age=60")], b"body"),
-            Duration::from_secs(60),
+            Duration::from_mins(1),
         );
         assert_eq!(cache.get(&key).unwrap().body, b"body");
     }

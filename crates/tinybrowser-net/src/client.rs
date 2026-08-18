@@ -62,14 +62,13 @@ fn wreq_response_header_value<'a>(
     };
     if values.next().is_some() {
         return Err(NetError::Cors(format!(
-            "{} returned multiple {} headers",
-            url, name
+            "{url} returned multiple {name} headers"
         )));
     }
     first
         .to_str()
         .map(Some)
-        .map_err(|_| NetError::Cors(format!("{} returned an invalid {} header", url, name)))
+        .map_err(|_| NetError::Cors(format!("{url} returned an invalid {name} header")))
 }
 
 fn validate_wreq_cors_response(
@@ -118,7 +117,7 @@ async fn read_wreq_body_limited(
     let mut body = Vec::with_capacity(capacity);
     while let Some(chunk) = stream.next().await {
         let chunk =
-            chunk.map_err(|error| NetError::Network(format!("Failed to read body: {}", error)))?;
+            chunk.map_err(|error| NetError::Network(format!("Failed to read body: {error}")))?;
         if chunk.len() > limit.saturating_sub(body.len()) {
             return Err(response_too_large(url, limit));
         }
@@ -246,7 +245,7 @@ impl HttpClient {
 
         HttpClient {
             client,
-            proxy_url: proxy_url.map(|s| s.to_string()),
+            proxy_url: proxy_url.map(std::string::ToString::to_string),
             unsupported_proxy,
             cookie_jar,
             user_agent: RwLock::new(STEALTH_USER_AGENT.to_string()),
@@ -634,7 +633,7 @@ impl HttpClient {
                         .map_err(|_| NetError::Network("Invalid redirect Location".into()))?;
                     let next_url = current_url
                         .join(location_str)
-                        .map_err(|e| NetError::Network(format!("Invalid redirect URL: {}", e)))?;
+                        .map_err(|e| NetError::Network(format!("Invalid redirect URL: {e}")))?;
                     validate_url(&next_url, self.allow_private_network)?;
                     validate_request_mode(&request, &next_url)?;
                     redirect_tainted |= redirect_taints_origin(&request, &current_url, &next_url);
@@ -846,7 +845,7 @@ mod tests {
         assert!(request.contains("origin: http://127.0.0.1:1\r\n"));
         assert!(request.contains("sec-fetch-mode: cors\r\n"));
         assert!(request.contains("sec-fetch-dest: script\r\n"));
-        assert!(request.contains(&format!("referer: {}\r\n", importing_module)));
+        assert!(request.contains(&format!("referer: {importing_module}\r\n")));
         assert!(!request.contains("cookie:"));
         assert_eq!(jar.get_cookie_header(&target), "seed=1");
     }

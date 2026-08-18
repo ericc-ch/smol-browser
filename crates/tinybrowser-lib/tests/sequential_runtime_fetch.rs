@@ -34,7 +34,7 @@ fn spawn_server() -> String {
             });
         }
     });
-    format!("http://{}", addr)
+    format!("http://{addr}")
 }
 
 async fn run_browser(base: &str) {
@@ -43,7 +43,7 @@ async fn run_browser(base: &str) {
     page.goto(base).await.unwrap();
 
     let script = format!(
-        r#"(function() {{
+        r"(function() {{
             var done = 0;
             function mark() {{
                 done += 1;
@@ -62,7 +62,7 @@ async fn run_browser(base: &str) {
                 xhr.addEventListener('load', mark);
                 xhr.send();
             }}
-        }})()"#,
+        }})()",
     );
     page.evaluate(&script);
 

@@ -43,7 +43,7 @@ async fn open_and_use(
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     String,
 > {
-    let url = format!("ws://127.0.0.1:{}/devtools/browser", ws_port);
+    let url = format!("ws://127.0.0.1:{ws_port}/devtools/browser");
     let (mut ws, _) = connect_async(&url).await.map_err(|e| e.to_string())?;
     ws.send(Message::Text(
         json!({"id": id, "method": "Target.getTargets"})
@@ -65,7 +65,7 @@ async fn open_and_use(
             .map_err(|e| e.to_string())?;
         if let Message::Text(t) = msg {
             let v: serde_json::Value = serde_json::from_str(&t).map_err(|e| e.to_string())?;
-            if v.get("id").and_then(|i| i.as_u64()) == Some(id) {
+            if v.get("id").and_then(serde_json::Value::as_u64) == Some(id) {
                 return Ok(ws);
             }
         }
@@ -80,10 +80,9 @@ async fn raw_handshake_status(ws_port: u16) -> String {
         .await
         .expect("connect");
     let req = format!(
-        "GET /devtools/browser HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\
+        "GET /devtools/browser HTTP/1.1\r\nHost: 127.0.0.1:{ws_port}\r\n\
          Upgrade: websocket\r\nConnection: Upgrade\r\n\
-         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
-        ws_port
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
     );
     sock.write_all(req.as_bytes()).await.expect("write");
     let mut buf = vec![0u8; 1024];
@@ -126,7 +125,7 @@ fn max_connections_refuses_then_recovers() {
                 open_and_use(ws_port, 100 + i as u64)
                     .await
                     .unwrap_or_else(|e| {
-                        panic!("connection {} within the limit must be accepted: {}", i, e)
+                        panic!("connection {i} within the limit must be accepted: {e}")
                     }),
             );
         }
@@ -140,8 +139,7 @@ fn max_connections_refuses_then_recovers() {
         );
         assert!(
             refused.contains("X-tinybrowser-Reason: max-connections"),
-            "refusal must name the reason so a client can tell it apart from a crash: {:?}",
-            refused
+            "refusal must name the reason so a client can tell it apart from a crash: {refused:?}"
         );
 
         // 3. Free one slot and confirm the server accepts again. Closing is

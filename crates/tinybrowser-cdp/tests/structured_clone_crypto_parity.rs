@@ -99,7 +99,7 @@ async fn structured_clone_preserves_arraybuffer_bytes() {
     let v = eval(
         &mut ctx,
         2,
-        r#"(async () => {
+        r"(async () => {
             const src = new Uint8Array([10, 20, 30, 40]);
             const clone = structuredClone(src);
             return JSON.stringify({
@@ -108,7 +108,7 @@ async fn structured_clone_preserves_arraybuffer_bytes() {
                 same: src.buffer === clone.buffer,
                 bytes: Array.from(clone),
             });
-        })()"#,
+        })()",
         &sid,
     )
     .await;
@@ -169,7 +169,7 @@ async fn structured_clone_preserves_dataview() {
     let v = eval(
         &mut ctx,
         2,
-        r#"(async () => {
+        r"(async () => {
             const buf = new ArrayBuffer(8);
             const view = new DataView(buf);
             view.setUint32(0, 0x12345678);
@@ -181,7 +181,7 @@ async fn structured_clone_preserves_dataview() {
                 b: clone.getUint32(4),
                 independent: clone.buffer !== view.buffer,
             });
-        })()"#,
+        })()",
         &sid,
     )
     .await;

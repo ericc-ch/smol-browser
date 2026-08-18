@@ -17,7 +17,7 @@ pub fn env_allows_private_network() -> bool {
             .map(str::trim)
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("1") | Some("true") | Some("yes") | Some("on")
+        Some("1" | "true" | "yes" | "on")
     )
 }
 
@@ -66,8 +66,7 @@ pub fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), NetErr
     let scheme = url.scheme();
     if scheme != "http" && scheme != "https" && scheme != "file" {
         return Err(NetError::Ssrf(format!(
-            "Forbidden URL scheme '{}' - only http, https, and file are allowed",
-            scheme
+            "Forbidden URL scheme '{scheme}' - only http, https, and file are allowed"
         )));
     }
 
@@ -80,16 +79,14 @@ pub fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), NetErr
             url::Host::Ipv4(ip) => {
                 if is_forbidden_ip(IpAddr::V4(ip)) {
                     return Err(NetError::Ssrf(format!(
-                        "Access to private/internal IP address {} is not allowed",
-                        ip
+                        "Access to private/internal IP address {ip} is not allowed"
                     )));
                 }
             }
             url::Host::Ipv6(ip) => {
                 if is_forbidden_ip(IpAddr::V6(ip)) {
                     return Err(NetError::Ssrf(format!(
-                        "Access to private/internal IPv6 address {} is not allowed",
-                        ip
+                        "Access to private/internal IPv6 address {ip} is not allowed"
                     )));
                 }
             }
@@ -101,8 +98,7 @@ pub fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), NetErr
                     || lower_domain == "::1"
                 {
                     return Err(NetError::Ssrf(format!(
-                        "Access to localhost domain '{}' is not allowed",
-                        domain
+                        "Access to localhost domain '{domain}' is not allowed"
                     )));
                 }
             }
@@ -118,7 +114,7 @@ pub(crate) async fn fetch_file_url(
 ) -> Result<Response, NetError> {
     let path = url
         .to_file_path()
-        .map_err(|_| NetError::Network("Invalid file URL".to_string()))?;
+        .map_err(|()| NetError::Network("Invalid file URL".to_string()))?;
     if let Ok(metadata) = tokio::fs::metadata(&path).await {
         if metadata.len() > max_response_bytes as u64 {
             return Err(crate::types::response_too_large(url, max_response_bytes));
@@ -126,7 +122,7 @@ pub(crate) async fn fetch_file_url(
     }
     let body = tokio::fs::read(&path)
         .await
-        .map_err(|e| NetError::Network(format!("Failed to read file: {}", e)))?;
+        .map_err(|e| NetError::Network(format!("Failed to read file: {e}")))?;
     if body.len() > max_response_bytes {
         return Err(crate::types::response_too_large(url, max_response_bytes));
     }

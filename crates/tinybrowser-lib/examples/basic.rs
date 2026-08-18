@@ -13,7 +13,7 @@ async fn main() -> anyhow::Result<()> {
     println!("URL: {}", page.url());
     println!("Content length: {}", page.content().len());
 
-    let el = page.wait_for_selector("a", Duration::from_secs(5)).await?;
+    let mut el = page.wait_for_selector("a", Duration::from_secs(5)).await?;
     println!("Link text: {}", el.text());
     println!("Link href: {:?}", el.attribute("href"));
 

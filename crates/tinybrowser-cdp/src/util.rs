@@ -16,9 +16,10 @@ pub(crate) fn cdp_unimplemented(method: &str) -> String {
 /// case-insensitive on the scheme so neither `FILE://` nor `File://` slips
 /// past callers that gate on `file://`.
 pub(crate) fn url_is_file_scheme(raw: &str) -> bool {
-    url::Url::parse(raw)
-        .map(|u| u.scheme().eq_ignore_ascii_case("file"))
-        .unwrap_or_else(|_| raw.trim_start().to_ascii_lowercase().starts_with("file:"))
+    url::Url::parse(raw).map_or_else(
+        |_| raw.trim_start().to_ascii_lowercase().starts_with("file:"),
+        |u| u.scheme().eq_ignore_ascii_case("file"),
+    )
 }
 
 /// Truncate `s` to at most `max` bytes, never splitting a UTF-8 character.

@@ -360,8 +360,9 @@ async fn do_navigate(
     // testing is the intended workflow.
     let allow_file_access = ctx
         .get_session_page(session_id)
-        .map(|page| page.context.allow_file_access)
-        .unwrap_or(ctx.default_context.allow_file_access);
+        .map_or(ctx.default_context.allow_file_access, |page| {
+            page.context.allow_file_access
+        });
     if url_is_file_scheme(url) && !allow_file_access {
         return Err(
             "Page.navigate to file:// is disabled. Restart with `tinybrowser serve --allow-file-access` to enable.".to_string()
@@ -448,10 +449,10 @@ pub async fn handle(
             do_navigate(url, params, ctx, session_id).await
         }
         "reload" => {
-            let current_url = ctx
-                .get_session_page(session_id)
-                .map(|p| p.url_string())
-                .unwrap_or_else(|| "about:blank".to_string());
+            let current_url = ctx.get_session_page(session_id).map_or_else(
+                || "about:blank".to_string(),
+                tinybrowser_core::Page::url_string,
+            );
             let reload_params = json!({
                 "waitUntil": params.get("waitUntil").cloned().unwrap_or(json!("load"))
             });
@@ -559,8 +560,9 @@ pub async fn handle(
             // same live CSS viewport that responsive page code and paint use.
             let (width, height) = ctx
                 .get_session_page(session_id)
-                .map(|page| (page.viewport.0 as f64, page.viewport.1 as f64))
-                .unwrap_or((1280.0, 720.0));
+                .map_or((1280.0, 720.0), |page| {
+                    (f64::from(page.viewport.0), f64::from(page.viewport.1))
+                });
             let mut page_x = 0.0;
             let mut page_y = 0.0;
             let mut content_width = width;
@@ -643,7 +645,10 @@ pub async fn handle(
             }))
         }
         "navigateToHistoryEntry" => {
-            let entry_id = params.get("entryId").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let entry_id = params
+                .get("entryId")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize;
             let target_url = {
                 let page = ctx
                     .get_session_page_mut(session_id)
@@ -708,7 +713,7 @@ pub async fn handle(
         "screencastFrameAck" => Err(paint_unsupported("screencastFrameAck")),
         "captureScreenshot" => Err(paint_unsupported("captureScreenshot")),
         "captureSnapshot" => Err(paint_unsupported(method)),
-        _ => Err(format!("Unknown Page method: {}", method)),
+        _ => Err(format!("Unknown Page method: {method}")),
     }
 }
 
@@ -901,7 +906,7 @@ mod tests {
         // clients stay stuck on the pre-nav about:blank.
         let mut ctx = CdpContext::new();
         let page_id = ctx.create_page();
-        let session_id = format!("{}-session", page_id);
+        let session_id = format!("{page_id}-session");
         ctx.sessions.insert(session_id.clone(), page_id.clone());
 
         let params = json!({

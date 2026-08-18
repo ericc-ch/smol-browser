@@ -368,12 +368,11 @@ fn guarded<R: Default>(f: impl FnOnce() -> R) -> R {
 
 /// Fallible ops return a JS exception on panic instead of unwinding.
 fn guarded_result<T>(f: impl FnOnce() -> Result<T, rquickjs::Error>) -> Result<T, rquickjs::Error> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
-        Ok(result) => result,
-        Err(_) => {
-            tracing::error!("QuickJS op panicked; returning error");
-            Err(op_err("op panicked"))
-        }
+    if let Ok(result) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        result
+    } else {
+        tracing::error!("QuickJS op panicked; returning error");
+        Err(op_err("op panicked"))
     }
 }
 
@@ -501,7 +500,7 @@ impl QuickJsRuntime {
                 "warn" => tracing::warn!(target: "tinybrowser::console", "{}", msg),
                 "error" => tracing::error!(target: "tinybrowser::console", "{}", msg),
                 _ => tracing::info!(target: "tinybrowser::console", "{}", msg),
-            })
+            });
         });
 
         let s = self.state.clone();
@@ -511,14 +510,14 @@ impl QuickJsRuntime {
 
         let s = self.state.clone();
         set_op!("op_set_cookie", move |cookie_str: String| {
-            guarded(|| ops::op_set_cookie_inner(&s, &cookie_str))
+            guarded(|| ops::op_set_cookie_inner(&s, &cookie_str));
         });
 
         let s = self.state.clone();
         set_op!(
             "op_navigate",
             move |url: String, method: String, body: String| {
-                guarded(|| ops::op_navigate_inner(&s, &url, &method, &body))
+                guarded(|| ops::op_navigate_inner(&s, &url, &method, &body));
             }
         );
 
@@ -610,7 +609,7 @@ impl QuickJsRuntime {
 
         let s = self.state.clone();
         set_op!("op_binding_called", move |name: String, payload: String| {
-            guarded(|| ops::op_binding_called_inner(&s, &name, &payload))
+            guarded(|| ops::op_binding_called_inner(&s, &name, &payload));
         });
 
         let s = self.state.clone();
@@ -785,10 +784,10 @@ impl QuickJsRuntime {
         // Host stays off `window` after boot. The shim IIFE receives it as
         // `host` / local `Deno`; page script never sees `globalThis.Deno`.
         ctx.eval::<(), _>(
-            r#"
+            r"
             globalThis.__tbHost = { core: { ops: __tinybrowser_ops } };
             delete globalThis.__tinybrowser_ops;
-            "#,
+            ",
         )
         .catch(&ctx)
         .map_err(|e| e.to_string())?;
@@ -924,7 +923,7 @@ impl QuickJsRuntime {
                 .set("__tinybrowser_mod_p", promise)
                 .map_err(|e| e.to_string())?;
             ctx.eval::<(), _>(
-                r#"
+                r"
                 globalThis.__tinybrowser_mod_state = 0;
                 globalThis.__tinybrowser_mod_err = null;
                 globalThis.__tinybrowser_mod_p.then(
@@ -935,7 +934,7 @@ impl QuickJsRuntime {
                     }
                 );
                 delete globalThis.__tinybrowser_mod_p;
-                "#,
+                ",
             )
             .catch(&ctx)
             .map_err(|e| format!("eval: {e}"))?;
@@ -1061,15 +1060,11 @@ impl QuickJsRuntime {
             || trimmed.starts_with("while ")
             || trimmed.starts_with("return ");
         if is_multi_statement {
-            format!(
-                "(function() {{ try {{\n{}\n}} catch(e) {{ return null; }} }})()",
-                expression
-            )
+            format!("(function() {{ try {{\n{expression}\n}} catch(e) {{ return null; }} }})()")
         } else {
             let cleaned = trimmed.trim_end_matches(|c: char| c == ';' || c.is_whitespace());
             format!(
-                "(function() {{ try {{ return (\n{}\n); }} catch(e) {{ return null; }} }})()",
-                cleaned
+                "(function() {{ try {{ return (\n{cleaned}\n); }} catch(e) {{ return null; }} }})()"
             )
         }
     }
@@ -1211,18 +1206,18 @@ impl QuickJsRuntime {
             // and __tinybrowser_init then assigns timeOrigin. Drop the native
             // object so the shim's writable fallback is used. Do not edit the shim.
             ctx.eval::<(), _>(
-                r#"
+                r"
                 delete globalThis.performance;
                 try { delete globalThis.BroadcastChannel; } catch (e) {}
                 globalThis.BroadcastChannel = undefined;
-                "#,
+                ",
             )
             .catch(&ctx)
             .map_err(|e| format!("clear native globals: {e}"))?;
             // QuickJS-ng does not ship WebAssembly. Install a minimal instantiate
             // before the shim so its streaming fallback can use Response.arrayBuffer.
             ctx.eval::<(), _>(
-                r#"
+                r"
                 if (typeof WebAssembly === 'undefined') {
                   function Instance() {}
                   function Module() {}
@@ -1234,7 +1229,7 @@ impl QuickJsRuntime {
                     }
                   };
                 }
-                "#,
+                ",
             )
             .catch(&ctx)
             .map_err(|e| format!("wasm stub: {e}"))?;
@@ -1247,7 +1242,7 @@ impl QuickJsRuntime {
                 .unwrap_or_else(|| "Europe/Berlin".to_string());
             let tz_js = serde_json::to_string(&tz).unwrap_or_else(|_| "\"Europe/Berlin\"".into());
             ctx.eval::<(), _>(format!(
-                r#"
+                r"
                 if (typeof Intl === 'undefined' || typeof Intl.DateTimeFormat === 'undefined') {{
                   function DateTimeFormat() {{
                     if (!(this instanceof DateTimeFormat)) return new DateTimeFormat();
@@ -1257,7 +1252,7 @@ impl QuickJsRuntime {
                   }};
                   globalThis.Intl = {{ DateTimeFormat: DateTimeFormat }};
                 }}
-                "#
+                "
             ))
             .catch(&ctx)
             .map_err(|e| format!("intl timezone stub: {e}"))?;
@@ -1329,7 +1324,7 @@ impl QuickJsRuntime {
             // so assignment is a JS property the constructor never reads.
             // console.log in the shim already nulls the hook around .stack.
             ctx.eval::<(), _>(
-                r#"
+                r"
                 (function() {
                   var pst;
                   Object.defineProperty(Error, 'prepareStackTrace', {
@@ -1339,7 +1334,7 @@ impl QuickJsRuntime {
                     set: function(v) { pst = v; }
                   });
                 })();
-                "#,
+                ",
             )
             .catch(&ctx)
             .map_err(|e| format!("prepareStackTrace shadow: {e}"))?;
@@ -1369,7 +1364,7 @@ impl QuickJsRuntime {
         let timer = host.next_deadline();
         if host.has_fetch() {
             let soon = Instant::now() + Duration::from_millis(5);
-            Some(timer.map(|t| t.min(soon)).unwrap_or(soon))
+            Some(timer.map_or(soon, |t| t.min(soon)))
         } else {
             timer
         }
@@ -1539,7 +1534,7 @@ mod tests {
         let started = Instant::now();
         let value = rt
             .evaluate(
-                r#"(() => {
+                r"(() => {
                     const root = document.createElement('div');
                     let parent = root;
                     for (let i = 0; i < 5000; i++) {
@@ -1552,7 +1547,7 @@ mod tests {
                     let count = 0;
                     while (walker.nextNode()) count++;
                     return count;
-                })()"#,
+                })()",
             )
             .expect("eval");
         assert_eq!(value, serde_json::json!(5000));
@@ -1936,9 +1931,7 @@ mod tests {
             "(function(){ globalThis.__a = null; globalThis.__b = null; globalThis.__c = null; return true; })()"
         )
         .unwrap();
-        rt.evaluate(&format!(
-            "(function(){{ fetch('http://example.invalid/fulfill').then(function(r){{ return r.text(); }}).then(function(t){{ globalThis.__a = t; }}).catch(function(e){{ globalThis.__a = String(e); }}); return true; }})()"
-        ))
+        rt.evaluate(&"(function(){ fetch('http://example.invalid/fulfill').then(function(r){ return r.text(); }).then(function(t){ globalThis.__a = t; }).catch(function(e){ globalThis.__a = String(e); }); return true; })()".to_string())
         .unwrap();
         assert_eq!(
             pump_until(&mut rt, "globalThis.__a", 5_000),

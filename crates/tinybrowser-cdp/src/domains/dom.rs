@@ -9,10 +9,13 @@ use crate::dispatch::CdpContext;
 /// (returned by a prior `DOM.resolveNode`); without this fallback those
 /// requests silently default to node 0 and click the wrong element.
 fn resolve_node_id(page: &mut Page, params: &Value) -> Result<u64, String> {
-    if let Some(nid) = params.get("nodeId").and_then(|v| v.as_u64()) {
+    if let Some(nid) = params.get("nodeId").and_then(serde_json::Value::as_u64) {
         return Ok(nid);
     }
-    if let Some(nid) = params.get("backendNodeId").and_then(|v| v.as_u64()) {
+    if let Some(nid) = params
+        .get("backendNodeId")
+        .and_then(serde_json::Value::as_u64)
+    {
         return Ok(nid);
     }
     if let Some(oid) = params.get("objectId").and_then(|v| v.as_str()) {
@@ -22,7 +25,7 @@ fn resolve_node_id(page: &mut Page, params: &Value) -> Result<u64, String> {
             oid.replace('\'', "\\'")
         );
         let result = page.evaluate(&code);
-        let nid = result.as_f64().map(|n| n as i64).unwrap_or(-1);
+        let nid = result.as_f64().map_or(-1, |n| n as i64);
         if nid < 0 {
             return Err(format!("objectId {oid} could not be resolved to a node"));
         }
@@ -35,11 +38,11 @@ fn resolve_node_id(page: &mut Page, params: &Value) -> Result<u64, String> {
 /// DOM.setFileInputFiles without pulling in a dependency.
 fn encode_base64(input: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let b0 = u32::from(chunk[0]);
+        let b1 = u32::from(*chunk.get(1).unwrap_or(&0));
+        let b2 = u32::from(*chunk.get(2).unwrap_or(&0));
         let n = (b0 << 16) | (b1 << 8) | b2;
         out.push(T[((n >> 18) & 63) as usize] as char);
         out.push(T[((n >> 12) & 63) as usize] as char);
@@ -105,7 +108,10 @@ pub async fn handle(
         "enable" => Ok(json!({})),
         "getDocument" => {
             let page = ctx.get_session_page(session_id).ok_or("No page")?;
-            let depth = params.get("depth").and_then(|v| v.as_i64()).unwrap_or(2);
+            let depth = params
+                .get("depth")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(2);
             page.with_dom(|dom| {
                 let node = serialize_node(dom, dom.document(), depth as u32, 0);
                 json!({ "root": node })
@@ -123,8 +129,7 @@ pub async fn handle(
                     dom.query_selector(selector)
                         .ok()
                         .flatten()
-                        .map(|id| id.raw())
-                        .unwrap_or(0)
+                        .map_or(0, tinybrowser_dom::NodeId::raw)
                 })
                 .unwrap_or(0);
             Ok(json!({ "nodeId": result }))
@@ -139,7 +144,7 @@ pub async fn handle(
                 .with_dom(|dom| {
                     dom.query_selector_all(selector)
                         .ok()
-                        .map(|ids| ids.iter().map(|id| id.raw() as u64).collect::<Vec<_>>())
+                        .map(|ids| ids.iter().map(|id| id.raw()).collect::<Vec<_>>())
                         .unwrap_or_default()
                 })
                 .unwrap_or_default();
@@ -149,8 +154,12 @@ pub async fn handle(
             let page = ctx.get_session_page(session_id).ok_or("No page")?;
             let node_id = params
                 .get("nodeId")
-                .and_then(|v| v.as_u64())
-                .or_else(|| params.get("backendNodeId").and_then(|v| v.as_u64()))
+                .and_then(serde_json::Value::as_u64)
+                .or_else(|| {
+                    params
+                        .get("backendNodeId")
+                        .and_then(serde_json::Value::as_u64)
+                })
                 .ok_or("nodeId required")?;
             let html = page
                 .with_dom(|dom| dom.outer_html(NodeId::new(node_id)))
@@ -159,22 +168,27 @@ pub async fn handle(
         }
         "describeNode" => {
             let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
-            let depth = params.get("depth").and_then(|v| v.as_i64()).unwrap_or(0);
+            let depth = params
+                .get("depth")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
 
             let node_id = if let Some(nid) = params
                 .get("nodeId")
-                .and_then(|v| v.as_u64())
-                .or_else(|| params.get("backendNodeId").and_then(|v| v.as_u64()))
-            {
+                .and_then(serde_json::Value::as_u64)
+                .or_else(|| {
+                    params
+                        .get("backendNodeId")
+                        .and_then(serde_json::Value::as_u64)
+                }) {
                 nid
             } else if let Some(oid) = params.get("objectId").and_then(|v| v.as_str()) {
                 let escaped_oid = oid.replace('\\', "\\\\").replace('\'', "\\'");
                 let code = format!(
-                    "(function() {{ var o = globalThis.__tinybrowser_objects['{}']; if (!o) return -1; return (typeof o._nid === 'number') ? o._nid : -1; }})()",
-                    escaped_oid
+                    "(function() {{ var o = globalThis.__tinybrowser_objects['{escaped_oid}']; if (!o) return -1; return (typeof o._nid === 'number') ? o._nid : -1; }})()"
                 );
                 let result = page.evaluate(&code);
-                result.as_f64().map(|n| n as u64).unwrap_or(0)
+                result.as_f64().map_or(0, |n| n as u64)
             } else {
                 return Err("nodeId or objectId required".to_string());
             };
@@ -188,17 +202,19 @@ pub async fn handle(
             let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
             let node_id = if let Some(nid) = params
                 .get("nodeId")
-                .and_then(|v| v.as_u64())
-                .or_else(|| params.get("backendNodeId").and_then(|v| v.as_u64()))
-            {
+                .and_then(serde_json::Value::as_u64)
+                .or_else(|| {
+                    params
+                        .get("backendNodeId")
+                        .and_then(serde_json::Value::as_u64)
+                }) {
                 nid
             } else if let Some(oid) = params.get("objectId").and_then(|v| v.as_str()) {
                 let code = format!(
-                    "(function() {{ var o = globalThis.__tinybrowser_objects['{}']; return (o && typeof o._nid === 'number') ? o._nid : -1; }})()",
-                    oid
+                    "(function() {{ var o = globalThis.__tinybrowser_objects['{oid}']; return (o && typeof o._nid === 'number') ? o._nid : -1; }})()"
                 );
                 let result = page.evaluate(&code);
-                result.as_f64().map(|n| n as u64).unwrap_or(0)
+                result.as_f64().map_or(0, |n| n as u64)
             } else {
                 return Err("nodeId or objectId required".to_string());
             };
@@ -210,7 +226,7 @@ pub async fn handle(
             // is dead — `globalThis.Deno` is gone (stealth) — so the produced
             // object had no `_nid` and a later `scrollIntoViewIfNeeded` /
             // `describeNode` round-trip via `objectId` failed to resolve.
-            let js_code = format!("globalThis._wrap && globalThis._wrap({})", node_id);
+            let js_code = format!("globalThis._wrap && globalThis._wrap({node_id})");
 
             let info = if let Some(js) = &mut page.js {
                 match js.store_object_with_meta(&js_code) {
@@ -236,7 +252,7 @@ pub async fn handle(
                     "subtype": "node",
                     "className": if info.class_name.is_empty() { "HTMLElement".to_string() } else { info.class_name },
                     "description": info.description,
-                    "objectId": info.object_id.unwrap_or_else(|| format!("node-{}", node_id)),
+                    "objectId": info.object_id.unwrap_or_else(|| format!("node-{node_id}")),
                 }
             }))
         }
@@ -250,9 +266,8 @@ pub async fn handle(
             let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
             let node_id = resolve_node_id(page, params)?;
             let code = format!(
-                "(function() {{ var el = globalThis._wrap && globalThis._wrap({0}); \
-                 if (el && typeof el.focus === 'function') {{ el.focus(); return true; }} return false; }})()",
-                node_id
+                "(function() {{ var el = globalThis._wrap && globalThis._wrap({node_id}); \
+                 if (el && typeof el.focus === 'function') {{ el.focus(); return true; }} return false; }})()"
             );
             let _ = page.evaluate(&code);
             Ok(json!({}))
@@ -263,10 +278,9 @@ pub async fn handle(
             // tinybrowser has no layout viewport to move, but the JS shim records
             // this element for the hit testing used by subsequent input events.
             let code = format!(
-                "(function() {{ var el = globalThis._wrap && globalThis._wrap({0}); \
+                "(function() {{ var el = globalThis._wrap && globalThis._wrap({node_id}); \
                  if (!el || typeof el.scrollIntoView !== 'function') return false; \
-                 el.scrollIntoView(); return true; }})()",
-                node_id
+                 el.scrollIntoView(); return true; }})()"
             );
             let did_scroll = page.evaluate(&code).as_bool().unwrap_or(false);
             if !did_scroll {
@@ -297,7 +311,7 @@ pub async fn handle(
             let mut specs = Vec::with_capacity(paths.len());
             for p in &paths {
                 let bytes = std::fs::read(p)
-                    .map_err(|e| format!("setFileInputFiles: cannot read '{}': {}", p, e))?;
+                    .map_err(|e| format!("setFileInputFiles: cannot read '{p}': {e}"))?;
                 let name = std::path::Path::new(p)
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -310,9 +324,8 @@ pub async fn handle(
 
             let specs_json = serde_json::to_string(&specs).unwrap_or_else(|_| "[]".to_string());
             let code = format!(
-                "(function() {{ var el = globalThis._wrap && globalThis._wrap({0}); \
-                 if (el && globalThis.__tinybrowser_setInputFiles) {{ globalThis.__tinybrowser_setInputFiles(el, {1}); return true; }} return false; }})()",
-                node_id, specs_json
+                "(function() {{ var el = globalThis._wrap && globalThis._wrap({node_id}); \
+                 if (el && globalThis.__tinybrowser_setInputFiles) {{ globalThis.__tinybrowser_setInputFiles(el, {specs_json}); return true; }} return false; }})()"
             );
             let _ = page.evaluate(&code);
             Ok(json!({}))
@@ -325,17 +338,16 @@ pub async fn handle(
             };
             let code = format!(
                 "(function() {{\
-                    var el = globalThis._wrap && globalThis._wrap({0});\
+                    var el = globalThis._wrap && globalThis._wrap({node_id});\
                     if (!el || typeof el.getBoundingClientRect !== 'function') return null;\
                     var r = el.getBoundingClientRect();\
                     return [r.left, r.top, r.right, r.top, r.right, r.bottom, r.left, r.bottom,\
                             r.width, r.height];\
-                }})()",
-                node_id
+                }})()"
             );
             let val = page.evaluate(&code);
             let (quad, w, h) = if let Some(arr) = val.as_array() {
-                let nums: Vec<f64> = arr.iter().filter_map(|v| v.as_f64()).collect();
+                let nums: Vec<f64> = arr.iter().filter_map(serde_json::Value::as_f64).collect();
                 if nums.len() >= 10 {
                     let q: Vec<Value> = nums[..8].iter().map(|n| json!(n)).collect();
                     (q, nums[8], nums[9])
@@ -373,9 +385,9 @@ pub async fn handle(
             };
             Ok(json!({
                 "model": {
-                    "content": quad.clone(),
-                    "padding": quad.clone(),
-                    "border": quad.clone(),
+                    "content": quad,
+                    "padding": quad,
+                    "border": quad,
                     "margin": quad,
                     "width": w, "height": h,
                 }
@@ -389,16 +401,15 @@ pub async fn handle(
             };
             let code = format!(
                 "(function() {{\
-                    var el = globalThis._wrap && globalThis._wrap({0});\
+                    var el = globalThis._wrap && globalThis._wrap({node_id});\
                     if (!el || typeof el.getBoundingClientRect !== 'function') return null;\
                     var r = el.getBoundingClientRect();\
                     return [r.left, r.top, r.right, r.top, r.right, r.bottom, r.left, r.bottom];\
-                }})()",
-                node_id
+                }})()"
             );
             let val = page.evaluate(&code);
             let quad = if let Some(arr) = val.as_array() {
-                let nums: Vec<f64> = arr.iter().filter_map(|v| v.as_f64()).collect();
+                let nums: Vec<f64> = arr.iter().filter_map(serde_json::Value::as_f64).collect();
                 if nums.len() == 8 {
                     nums.iter().map(|n| json!(n)).collect::<Vec<_>>()
                 } else {
@@ -427,7 +438,7 @@ pub async fn handle(
             };
             Ok(json!({ "quads": [quad] }))
         }
-        _ => Err(format!("Unknown DOM method: {}", method)),
+        _ => Err(format!("Unknown DOM method: {method}")),
     }
 }
 
@@ -559,35 +570,32 @@ fn serialize_node(dom: &DomTree, node_id: NodeId, max_depth: u32, current_depth:
             }
         };
 
-        match next_child {
-            Some(cid) => {
-                let child_depth = stack.last().unwrap().depth + 1;
-                match node_value(dom, cid) {
-                    Some((cval, cchildren)) => {
-                        let cexpand = child_depth < max_depth && !cchildren.is_empty();
-                        stack.push(Frame {
-                            value: cval,
-                            children: cchildren,
-                            next: 0,
-                            built: Vec::new(),
-                            depth: child_depth,
-                            expand: cexpand,
-                        });
-                    }
-                    // Missing child: match the old recursive behavior of emitting null.
-                    None => stack.last_mut().unwrap().built.push(json!(null)),
+        if let Some(cid) = next_child {
+            let child_depth = stack.last().unwrap().depth + 1;
+            match node_value(dom, cid) {
+                Some((cval, cchildren)) => {
+                    let cexpand = child_depth < max_depth && !cchildren.is_empty();
+                    stack.push(Frame {
+                        value: cval,
+                        children: cchildren,
+                        next: 0,
+                        built: Vec::new(),
+                        depth: child_depth,
+                        expand: cexpand,
+                    });
                 }
+                // Missing child: match the old recursive behavior of emitting null.
+                None => stack.last_mut().unwrap().built.push(json!(null)),
             }
-            None => {
-                // This node's children are all built; finalize and fold into parent.
-                let mut frame = stack.pop().unwrap();
-                if !frame.built.is_empty() {
-                    frame.value["children"] = json!(frame.built);
-                }
-                match stack.last_mut() {
-                    Some(parent) => parent.built.push(frame.value),
-                    None => return frame.value,
-                }
+        } else {
+            // This node's children are all built; finalize and fold into parent.
+            let mut frame = stack.pop().unwrap();
+            if !frame.built.is_empty() {
+                frame.value["children"] = json!(frame.built);
+            }
+            match stack.last_mut() {
+                Some(parent) => parent.built.push(frame.value),
+                None => return frame.value,
             }
         }
     }

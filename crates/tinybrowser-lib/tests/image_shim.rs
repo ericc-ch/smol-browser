@@ -42,7 +42,7 @@ fn spawn_server(html: &'static str) -> String {
             let _ = s.shutdown(std::net::Shutdown::Both);
         }
     });
-    format!("http://{}", addr)
+    format!("http://{addr}")
 }
 
 #[tokio::test]

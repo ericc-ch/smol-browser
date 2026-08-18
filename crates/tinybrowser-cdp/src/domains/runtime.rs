@@ -60,30 +60,27 @@ pub async fn handle(
             // a context appears. Returning "No page" here breaks the standard
             // puppeteer connect/newPage flow. If there's no session, succeed
             // silently — the next Target.attachToTarget will set things up.
-            match ctx.get_session_page(session_id) {
-                Some(page) => {
-                    let event = crate::types::CdpEvent {
-                        method: "Runtime.executionContextCreated".to_string(),
-                        params: json!({
-                            "context": {
-                                "id": 1,
-                                "origin": page.url_string(),
-                                "name": "",
-                                "uniqueId": format!("ctx-{}", page.id),
-                                "auxData": {
-                                    "isDefault": true,
-                                    "type": "default",
-                                    "frameId": page.frame_id,
-                                }
+            if let Some(page) = ctx.get_session_page(session_id) {
+                let event = crate::types::CdpEvent {
+                    method: "Runtime.executionContextCreated".to_string(),
+                    params: json!({
+                        "context": {
+                            "id": 1,
+                            "origin": page.url_string(),
+                            "name": "",
+                            "uniqueId": format!("ctx-{}", page.id),
+                            "auxData": {
+                                "isDefault": true,
+                                "type": "default",
+                                "frameId": page.frame_id,
                             }
-                        }),
-                        session_id: session_id.clone(),
-                    };
-                    ctx.pending_events.push(event);
-                }
-                None => {
-                    // No session attached yet — that's fine. Just ack.
-                }
+                        }
+                    }),
+                    session_id: session_id.clone(),
+                };
+                ctx.pending_events.push(event);
+            } else {
+                // No session attached yet — that's fine. Just ack.
             }
             Ok(json!({}))
         }
@@ -94,14 +91,14 @@ pub async fn handle(
                 .ok_or("expression required")?;
             let return_by_value = params
                 .get("returnByValue")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
 
             validate_context_id(params, "contextId", ctx, "evaluate")?;
 
             let await_promise = params
                 .get("awaitPromise")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
 
             // CDP `timeout` field (milliseconds). Default to Chrome's
@@ -110,7 +107,7 @@ pub async fn handle(
             // session.
             let timeout_ms = params
                 .get("timeout")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(30_000);
 
             let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
@@ -142,17 +139,17 @@ pub async fn handle(
                 .unwrap_or("() => undefined");
             let return_by_value = params
                 .get("returnByValue")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             let await_promise = params
                 .get("awaitPromise")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             let object_id = params.get("objectId").and_then(|v| v.as_str());
             let arguments = params
                 .get("arguments")
                 .and_then(|v| v.as_array())
-                .map(|a| a.to_vec())
+                .cloned()
                 .unwrap_or_default();
 
             // #51: validate executionContextId the same way Runtime.evaluate
@@ -168,7 +165,7 @@ pub async fn handle(
             // requested browser timer fires.
             let timeout_ms = params
                 .get("timeout")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(30_000);
 
             let page = ctx.get_session_page_mut(session_id).ok_or("No page")?;
@@ -222,7 +219,7 @@ pub async fn handle(
                 let escaped_oid = oid.replace('\\', "\\\\").replace('\'', "\\'");
                 let code = format!(
                     "(function() {{\
-                        var obj = globalThis.__tinybrowser_objects['{oid}'];\
+                        var obj = globalThis.__tinybrowser_objects['{escaped_oid}'];\
                         if (!obj || typeof obj !== 'object') return [];\
                         var keys = Object.keys(obj);\
                         return keys.map(function(k) {{\
@@ -231,7 +228,7 @@ pub async fn handle(
                             var item = {{ name: k, type: t }};\
                             if (v === null) {{ item.value = null; return item; }}\
                             if (t !== 'object' && t !== 'function') {{ item.value = v; return item; }}\
-                            var childOid = '{oid}::' + k;\
+                            var childOid = '{escaped_oid}::' + k;\
                             globalThis.__tinybrowser_objects[childOid] = v;\
                             item.childOid = childOid;\
                             if (typeof v.nodeType === 'number') {{\
@@ -249,7 +246,6 @@ pub async fn handle(
                             return item;\
                         }});\
                     }})()",
-                    oid = escaped_oid,
                 );
                 let result = page.evaluate(&code);
                 if let serde_json::Value::Array(props) = result {
@@ -354,12 +350,11 @@ pub async fn handle(
                             Deno.core.ops.op_binding_called('{name}', payload);\
                         }} catch (e) {{ /* swallow: binding must not throw into page */ }}\
                     }};",
-                    name = name,
                 );
                 // Re-install on every navigation: globalThis is wiped on
                 // each new document, and puppeteer registers bindings
                 // once-per-page rather than once-per-document.
-                let key = format!("__tinybrowser_binding__{}", name);
+                let key = format!("__tinybrowser_binding__{name}");
                 ctx.preload_scripts.retain(|(k, _)| k != &key);
                 ctx.preload_scripts.push((key, shim.clone()));
                 // Install on the current page so the binding is usable
@@ -373,10 +368,10 @@ pub async fn handle(
         "removeBinding" => {
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             if !name.is_empty() {
-                let key = format!("__tinybrowser_binding__{}", name);
+                let key = format!("__tinybrowser_binding__{name}");
                 ctx.preload_scripts.retain(|(k, _)| k != &key);
                 if let Some(page) = ctx.get_session_page_mut(session_id) {
-                    page.evaluate(&format!("delete globalThis['{}'];", name));
+                    page.evaluate(&format!("delete globalThis['{name}'];"));
                 }
             }
             Ok(json!({}))
@@ -384,7 +379,7 @@ pub async fn handle(
         "runIfWaitingForDebugger" => Ok(json!({})),
         "getExceptionDetails" => Ok(json!({ "exceptionDetails": null })),
         "discardConsoleEntries" => Ok(json!({})),
-        _ => Err(format!("Unknown Runtime method: {}", method)),
+        _ => Err(format!("Unknown Runtime method: {method}")),
     }
 }
 
@@ -398,11 +393,11 @@ fn validate_context_id(
     ctx: &crate::dispatch::CdpContext,
     method: &str,
 ) -> Result<(), String> {
-    let Some(id) = params.get(field).and_then(|v| v.as_i64()) else {
+    let Some(id) = params.get(field).and_then(serde_json::Value::as_i64) else {
         return Ok(());
     };
     if !ctx.valid_context_ids.contains(&id) {
-        return Err(format!("Cannot find context with specified id: {}", id));
+        return Err(format!("Cannot find context with specified id: {id}"));
     }
     tracing::debug!(
         target: "tinybrowser_cdp::runtime",

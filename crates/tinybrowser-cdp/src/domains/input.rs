@@ -14,18 +14,17 @@ fn insert_text_js(escaped_text: &str) -> String {
             var v = t.value || '';\
             var s = t.selectionStart, e = t.selectionEnd;\
             if (s == null) {{\
-                globalThis.__tinybrowser_setFieldValue(t, 'value', v + '{text}');\
+                globalThis.__tinybrowser_setFieldValue(t, 'value', v + '{escaped_text}');\
             }} else {{\
                 s = Math.max(0, Math.min(s, v.length));\
                 e = (e == null) ? s : Math.max(0, Math.min(e, v.length));\
                 var lo = Math.min(s, e), hi = Math.max(s, e);\
-                globalThis.__tinybrowser_setFieldValue(t, 'value', v.slice(0, lo) + '{text}' + v.slice(hi));\
-                var caret = lo + ('{text}').length;\
+                globalThis.__tinybrowser_setFieldValue(t, 'value', v.slice(0, lo) + '{escaped_text}' + v.slice(hi));\
+                var caret = lo + ('{escaped_text}').length;\
                 t.setSelectionRange(caret, caret);\
             }}\
             t.dispatchEvent(globalThis.__tinybrowser_markTrusted(new Event('input', {{bubbles:true}})));\
         }})()",
-        text = escaped_text,
     )
 }
 
@@ -95,8 +94,14 @@ pub async fn handle(
     match method {
         "dispatchMouseEvent" => {
             let event_type = params.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            let x = params.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let x = params
+                .get("x")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
+            let y = params
+                .get("y")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0);
             let button = params
                 .get("button")
                 .and_then(|v| v.as_str())
@@ -104,15 +109,15 @@ pub async fn handle(
             let button_code = mouse_button_code(button);
             let buttons = params
                 .get("buttons")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or_else(|| mouse_button_mask(button));
             let click_count = params
                 .get("clickCount")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(1);
             let modifiers = params
                 .get("modifiers")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
             let (alt_key, ctrl_key, meta_key, shift_key) = modifier_flags(modifiers);
 
@@ -127,15 +132,6 @@ pub async fn handle(
                             var evt = globalThis.__tinybrowser_markTrusted(new MouseEvent('mousedown', {{bubbles:true,cancelable:true,view:globalThis,clientX:{x},clientY:{y},button:{button_code},buttons:{buttons},detail:{click_count},altKey:{alt_key},ctrlKey:{ctrl_key},metaKey:{meta_key},shiftKey:{shift_key}}}));\
                             target.dispatchEvent(evt);\
                         }})()",
-                        x = x,
-                        y = y,
-                        button_code = button_code,
-                        buttons = buttons,
-                        click_count = click_count,
-                        alt_key = alt_key,
-                        ctrl_key = ctrl_key,
-                        meta_key = meta_key,
-                        shift_key = shift_key,
                     );
                     page.evaluate(&code);
                 }
@@ -206,14 +202,6 @@ pub async fn handle(
                                 else {{ clickTarget.selectionStart = 0; clickTarget.selectionEnd = len; }}\
                             }}\
                         }})()",
-                        x = x,
-                        y = y,
-                        button_code = button_code,
-                        click_count = click_count,
-                        alt_key = alt_key,
-                        ctrl_key = ctrl_key,
-                        meta_key = meta_key,
-                        shift_key = shift_key,
                     );
                     page.evaluate(&code);
                     page.process_pending_navigation()
@@ -221,8 +209,14 @@ pub async fn handle(
                         .map_err(|e| e.to_string())?;
                 }
             } else if event_type == "mouseWheel" {
-                let delta_x = params.get("deltaX").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let delta_y = params.get("deltaY").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let delta_x = params
+                    .get("deltaX")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0);
+                let delta_y = params
+                    .get("deltaY")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0);
                 if let Some(page) = ctx.get_session_page_mut(session_id) {
                     let code = format!(
                         "(function() {{\
@@ -258,14 +252,6 @@ pub async fn handle(
                                 }}, 0);\
                             }} else if (scrollTarget && typeof scrollTarget.scrollBy === 'function') scrollTarget.scrollBy(dx, dy);\
                         }})()",
-                        x = x,
-                        y = y,
-                        delta_x = delta_x,
-                        delta_y = delta_y,
-                        alt_key = alt_key,
-                        ctrl_key = ctrl_key,
-                        meta_key = meta_key,
-                        shift_key = shift_key,
                     );
                     page.evaluate(&code);
                 }
@@ -340,13 +326,11 @@ pub async fn handle(
                         );
                         page.evaluate(&js);
                     }
-                    "char" => {
-                        if !text.is_empty() {
-                            let escaped_text = text.replace('\\', "\\\\").replace('\'', "\\'");
-                            page.evaluate(&insert_text_js(&escaped_text));
-                            // Pump event loop so Angular change detection picks up the input
-                            page.settle(50).await;
-                        }
+                    "char" if !text.is_empty() => {
+                        let escaped_text = text.replace('\\', "\\\\").replace('\'', "\\'");
+                        page.evaluate(&insert_text_js(&escaped_text));
+                        // Pump event loop so Angular change detection picks up the input
+                        page.settle(50).await;
                     }
                     _ => {}
                 }
@@ -356,7 +340,7 @@ pub async fn handle(
         }
         "dispatchTouchEvent" => Err(crate::util::cdp_unimplemented("Input.dispatchTouchEvent")),
         "setIgnoreInputEvents" => Err(crate::util::cdp_unimplemented("Input.setIgnoreInputEvents")),
-        _ => Err(format!("Unknown Input method: {}", method)),
+        _ => Err(format!("Unknown Input method: {method}")),
     }
 }
 

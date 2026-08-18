@@ -25,9 +25,9 @@ struct SpecifierMap {
 impl ImportMap {
     pub(crate) fn parse(input: &str, base_url: &str) -> Result<Self, String> {
         let base = Url::parse(base_url)
-            .map_err(|e| format!("Invalid import map base URL {}: {}", base_url, e))?;
+            .map_err(|e| format!("Invalid import map base URL {base_url}: {e}"))?;
         let parsed: serde_json::Value =
-            serde_json::from_str(input).map_err(|e| format!("Invalid import map JSON: {}", e))?;
+            serde_json::from_str(input).map_err(|e| format!("Invalid import map JSON: {e}"))?;
         let object = parsed
             .as_object()
             .ok_or_else(|| "Import map top level must be an object".to_string())?;
@@ -55,10 +55,7 @@ impl ImportMap {
                     continue;
                 };
                 let scope_imports = scope_imports.as_object().ok_or_else(|| {
-                    format!(
-                        "Import map scope \"{}\" must contain an object",
-                        scope_prefix
-                    )
+                    format!("Import map scope \"{scope_prefix}\" must contain an object")
                 })?;
                 scopes.push((
                     normalized_scope.to_string(),
@@ -122,8 +119,7 @@ impl ImportMap {
         let as_url = resolve_url_like(specifier, referrer);
         let normalized = as_url
             .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_else(|| specifier.to_string());
+            .map_or_else(|| specifier.to_string(), ToString::to_string);
         let serialized_referrer = referrer.to_string();
 
         for (scope_prefix, scope_imports) in &self.scopes {
@@ -145,8 +141,7 @@ impl ImportMap {
                 Ok(resolved)
             }
             None => Err(format!(
-                "Bare module specifier \"{}\" was not remapped by the import map",
-                specifier
+                "Bare module specifier \"{specifier}\" was not remapped by the import map"
             )),
         }
     }
@@ -209,8 +204,7 @@ impl SpecifierMap {
         if let Some(address) = self.entries.get(normalized) {
             return address.clone().map(Some).ok_or_else(|| {
                 format!(
-                    "Module specifier \"{}\" is blocked by import map entry \"{}\"",
-                    normalized, normalized
+                    "Module specifier \"{normalized}\" is blocked by import map entry \"{normalized}\""
                 )
             });
         }
@@ -219,32 +213,29 @@ impl SpecifierMap {
             return Ok(None);
         }
 
-        for key in self
+        if let Some(key) = self
             .prefixes
             .iter()
-            .filter(|key| normalized.starts_with(key.as_str()))
+            .find(|key| normalized.starts_with(key.as_str()))
         {
             let address = self
                 .entries
                 .get(key)
-                .ok_or_else(|| format!("Import map prefix \"{}\" has no matching address", key))?;
+                .ok_or_else(|| format!("Import map prefix \"{key}\" has no matching address"))?;
             let address = address.as_ref().ok_or_else(|| {
                 format!(
-                    "Module specifier \"{}\" is blocked by import map prefix \"{}\"",
-                    normalized, key
+                    "Module specifier \"{normalized}\" is blocked by import map prefix \"{key}\""
                 )
             })?;
             let after_prefix = &normalized[key.len()..];
             let resolved = address.join(after_prefix).map_err(|e| {
                 format!(
-                    "Module specifier \"{}\" could not resolve through import map prefix \"{}\": {}",
-                    normalized, key, e
+                    "Module specifier \"{normalized}\" could not resolve through import map prefix \"{key}\": {e}"
                 )
             })?;
             if !resolved.as_str().starts_with(address.as_str()) {
                 return Err(format!(
-                    "Module specifier \"{}\" backtracks above import map prefix \"{}\"",
-                    normalized, key
+                    "Module specifier \"{normalized}\" backtracks above import map prefix \"{key}\""
                 ));
             }
             return Ok(Some(resolved));
@@ -257,11 +248,7 @@ fn normalize_key(key: &str, base: &Url) -> Option<String> {
     if key.is_empty() {
         return None;
     }
-    Some(
-        resolve_url_like(key, base)
-            .map(|url| url.to_string())
-            .unwrap_or_else(|| key.to_string()),
-    )
+    Some(resolve_url_like(key, base).map_or_else(|| key.to_string(), |url| url.to_string()))
 }
 
 fn resolve_url_like(specifier: &str, base: &Url) -> Option<Url> {

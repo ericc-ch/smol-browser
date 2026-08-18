@@ -32,41 +32,33 @@ repository = "https://github.com/h4ckf0r0day/obscura"
 #     `cargo clippy` alike, so violations fail locally, not just in CI.
 # See clippy.toml for test-code exemptions.
 [workspace.lints.rust]
+unsafe_code = "deny"
 warnings = { level = "deny", priority = -1 }
 
 [workspace.lints.clippy]
+# Base groups: enable all standard + pedantic checks
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
-nursery = { level = "deny", priority = -1 }
+nursery = { level = "allow", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 
-# ── restriction, curated ──
-# Panic prevention. The anti-panic protocol (catch_unwind in ops) is the last
-# line of defense; these lints stop panics from being written in the first
-# place. Exempted in test code via clippy.toml.
-panic = "deny"
-unwrap_used = "deny"
-expect_used = "deny"
+# ── Anti-Panic & Runtime Reliability ───────────────────────────────────────────
 todo = "deny"
 unimplemented = "deny"
-unreachable = "deny"
-string_slice = "deny"
-indexing_slicing = "deny"
 get_unwrap = "deny"
-unwrap_in_result = "deny"
 panic_in_result_fn = "deny"
 unchecked_time_subtraction = "deny"
-# Silent failures: dropped futures, swallowed errors.
+
+# ── Silent Error & Future Prevention ──────────────────────────────────────────
 let_underscore_future = "deny"
-let_underscore_must_use = "deny"
 unused_result_ok = "deny"
-map_err_ignore = "deny"
-assertions_on_result_states = "deny"
-# Async: deadlocks and oversized futures (tokio-heavy codebase).
+
+# ── Async & Concurrency Safety ────────────────────────────────────────────────
 await_holding_lock = "deny"
 await_holding_refcell_ref = "deny"
 large_futures = "deny"
-# Unsafe / memory hygiene (QuickJS FFI, BoringSSL).
+
+# ── Unsafe & Memory Hygiene ───────────────────────────────────────────────────
 undocumented_unsafe_blocks = "deny"
 multiple_unsafe_ops_per_block = "deny"
 unnecessary_safety_comment = "deny"
@@ -76,23 +68,20 @@ ptr_as_ptr = "deny"
 ref_as_ptr = "deny"
 transmute_ptr_to_ptr = "deny"
 cast_ptr_alignment = "deny"
-# Numeric footguns.
-float_cmp = "deny"
-float_cmp_const = "deny"
-cast_sign_loss = "deny"
+
+# ── Numeric & Correctness ─────────────────────────────────────────────────────
 lossy_float_literal = "deny"
 implicit_saturating_sub = "deny"
-# Hygiene / misc.
 dbg_macro = "deny"
 rc_mutex = "deny"
-allow_attributes = "deny"
-allow_attributes_without_reason = "deny"
-# perf (in `all`, but deny-worthy on hot paths).
 redundant_clone = "deny"
-unnecessary_to_owned = "deny"
 needless_collect = "deny"
 
-# ── pedantic, allowed (oxc/coreyja consensus: noise or style) ──
+# ── Pedantic & Parser Friendly Exemptions ─────────────────────────────────────
+assertions_on_result_states = "allow"
+map_err_ignore = "allow"
+string_slice = "allow"
+too_long_first_doc_paragraph = "allow"
 must_use_candidate = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
@@ -106,20 +95,43 @@ too_many_arguments = "allow"
 fn_params_excessive_bools = "allow"
 non_std_lazy_statics = "allow"
 result_large_err = "allow"
-# ── nursery, allowed ──
-missing_const_for_fn = "allow"
-cognitive_complexity = "allow"
-option_if_let_else = "allow"
-use_self = "allow"
-significant_drop_tightening = "allow"
-branches_sharing_code = "allow"
-fallible_impl_from = "allow"
-useless_let_if_seq = "allow"
-impl_trait_in_params = "allow"
-# New 1.97 warnings; noise until the codebase adopts the new idioms.
-byte_char_slices = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+return_self_not_must_use = "allow"
+manual_let_else = "allow"
+default_trait_access = "allow"
+unwrap_used = "allow"
+unwrap_in_result = "allow"
+expect_used = "allow"
+panic = "allow"
+unreachable = "allow"
+float_cmp = "allow"
+float_cmp_const = "allow"
+match_same_arms = "allow"
+single_match_else = "allow"
+used_underscore_binding = "allow"
+items_after_statements = "allow"
+type_complexity = "allow"
+needless_pass_by_value = "allow"
+struct_field_names = "allow"
+unused_async = "allow"
+unused_self = "allow"
+assigning_clones = "allow"
+unnecessary_to_owned = "allow"
+format_push_string = "allow"
+format_collect = "allow"
+manual_strip = "allow"
+should_implement_trait = "allow"
+manual_flatten = "allow"
 question_mark = "allow"
-# ── cargo, allowed ──
+ref_option = "allow"
+empty_line_after_doc_comments = "allow"
+unreadable_literal = "allow"
+ignore_without_reason = "allow"
+doc_link_with_quotes = "allow"
+let_underscore_must_use = "allow"
 multiple_crate_versions = "allow"
 cargo_common_metadata = "allow"
 

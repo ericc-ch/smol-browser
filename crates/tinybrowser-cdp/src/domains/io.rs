@@ -181,7 +181,7 @@ pub async fn handle(method: &str, params: &Value, ctx: &mut CdpContext) -> Resul
             ctx.io_streams.remove(handle);
             Ok(json!({}))
         }
-        _ => Err(format!("Unknown IO method: {}", method)),
+        _ => Err(format!("Unknown IO method: {method}")),
     }
 }
 

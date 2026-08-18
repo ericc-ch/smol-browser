@@ -101,7 +101,7 @@ async fn setup() -> (CdpContext, String) {
 
 async fn probe(ctx: &mut CdpContext, sid: &str, body: &str) -> Value {
     let expr = format!(
-        r#"(() => {{
+        r"(() => {{
             const el = document.getElementById('box');
             let fired = 0;
             el.addEventListener('scroll', () => {{ fired++; }});
@@ -109,7 +109,7 @@ async fn probe(ctx: &mut CdpContext, sid: &str, body: &str) -> Value {
             return new Promise(r => setTimeout(() => r(JSON.stringify({{
                 fired, top: el.scrollTop, left: el.scrollLeft,
             }})), 0));
-        }})()"#
+        }})()"
     );
     let v = eval(ctx, 2, &expr, sid).await;
     serde_json::from_str::<Value>(v["result"]["value"].as_str().unwrap()).unwrap()
@@ -178,7 +178,7 @@ async fn scroll_driven_lazy_loader_advances() {
     let v = eval(
         &mut ctx,
         2,
-        r#"(() => {
+        r"(() => {
             const el = document.getElementById('box');
             let batches = 0;
             el.addEventListener('scroll', () => {
@@ -193,7 +193,7 @@ async fn scroll_driven_lazy_loader_advances() {
                     batches, rows: el.querySelectorAll('p').length,
                 })), 0);
             }, 0));
-        })()"#,
+        })()",
         &sid,
     )
     .await;

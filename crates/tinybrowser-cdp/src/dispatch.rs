@@ -68,6 +68,12 @@ pub struct CdpContext {
     pub js_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
+impl Default for CdpContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CdpContext {
     pub fn new() -> Self {
         Self::new_with_options(None)
@@ -172,7 +178,7 @@ impl CdpContext {
             Some(id) => self
                 .browser_context(id)
                 .cloned()
-                .ok_or_else(|| format!("Browser context not found: {}", id))?,
+                .ok_or_else(|| format!("Browser context not found: {id}"))?,
             None => self.default_context.clone(),
         };
         self.page_counter += 1;
@@ -220,7 +226,7 @@ impl CdpContext {
             return Err("The default browser context cannot be disposed".to_string());
         }
         if self.browser_contexts.remove(id).is_none() {
-            return Err(format!("Browser context not found: {}", id));
+            return Err(format!("Browser context not found: {id}"));
         }
 
         let page_ids: Vec<String> = self
@@ -389,7 +395,7 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
         None
     } else {
         ctx.get_session_page(&req.session_id)
-            .and_then(|p| p.isolate_handle())
+            .and_then(tinybrowser_core::Page::isolate_handle)
             .map(|h| {
                 tinybrowser_js::cdp_watchdog::arm(
                     h,
@@ -432,7 +438,7 @@ pub async fn dispatch(req: &CdpRequest, ctx: &mut CdpContext) -> CdpResponse {
         | "Profiler" | "HeapProfiler" | "Overlay" | "Audits" => {
             Err(crate::util::cdp_unimplemented(&req.method))
         }
-        _ => Err(format!("Unknown domain: {}", domain)),
+        _ => Err(format!("Unknown domain: {domain}")),
     };
 
     // Stop the per-command watchdog. If it fired (the handler held JS past the
