@@ -13,7 +13,7 @@ use crate::cache::{
     SharedFetchOutcome,
 };
 use crate::callbacks::CallbackRegistry;
-use crate::cookies::CookieJar;
+use crate::cookies::{Cookie, CookieJar, CookieQuery, ParseAction, ParseOpts};
 use crate::cors::{
     cors_required, is_cors_simple_method, is_cors_unsafe_request_header, redirect_taints_origin,
     request_fetch_site, request_referrer, serialized_request_origin, validate_cors_response,
@@ -339,7 +339,11 @@ impl HttpClient {
         }) {
             return None;
         }
-        if request.sends_credentials_to(url) && !self.cookie_jar.get_cookie_header(url).is_empty() {
+        if request.sends_credentials_to(url)
+            && !self
+                .cookie_jar
+                .cookies_for(url, CookieQuery { include_http_only: true })
+                .is_empty() {
             return None;
         }
         Some(ResourceCacheKey {
@@ -579,7 +583,8 @@ impl HttpClient {
             }
 
             let cookie_header = if request.sends_credentials_to(&current_url) {
-                self.cookie_jar.get_cookie_header(&current_url)
+                self.cookie_jar
+                    .cookies_for(&current_url, CookieQuery { include_http_only: true })
             } else {
                 String::new()
             };
@@ -612,7 +617,11 @@ impl HttpClient {
             if request.sends_credentials_to(&current_url) {
                 for val in resp.headers().get_all("set-cookie") {
                     if let Ok(s) = val.to_str() {
-                        self.cookie_jar.set_cookie(s, &current_url);
+                        match Cookie::parse(s, &current_url, ParseOpts { allow_http_only: true }) {
+                            Ok(ParseAction::Store(c)) => { let _ = self.cookie_jar.store(c); }
+                            Ok(ParseAction::Remove(k)) => { let _ = self.cookie_jar.remove(&k); }
+                            Err(_) => {}
+                        }
                     }
                 }
             }
@@ -740,7 +749,9 @@ impl Default for HttpClient {
 mod tests {
     use super::HttpClient;
     use crate::callbacks::CallbackRegistry;
-    use crate::cookies::CookieJar;
+    use crate::cookies::{Cookie, CookieJar, CookieQuery, ParseAction, ParseOpts};
+    fn set_cookie(jar: &CookieJar, s: &str, url: &url::Url) { match Cookie::parse(s, url, ParseOpts { allow_http_only: true }).unwrap() { ParseAction::Store(c) => { jar.store(c).unwrap(); }, ParseAction::Remove(k) => { jar.remove(&k); }, } }
+    fn get_header(jar: &CookieJar, url: &url::Url) -> String { jar.cookies_for(url, CookieQuery { include_http_only: true }) }
     use crate::types::{NetError, RequestCredentials, RequestMode, ResourceRequest, ResourceType};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -803,7 +814,7 @@ mod tests {
         .await;
         let initiator = Url::parse("http://127.0.0.1:1/page").unwrap();
         let jar = Arc::new(CookieJar::new());
-        jar.set_cookie("seed=1; Path=/", &target);
+        set_cookie(&jar, "seed=1; Path=/", &target);
         let client = HttpClient::with_full_options(jar.clone(), None, true);
 
         let response = client
@@ -820,7 +831,7 @@ mod tests {
         assert!(request.contains("sec-fetch-mode: cors\r\n"));
         assert!(request.contains("sec-fetch-dest: font\r\n"));
         assert!(!request.contains("cookie:"));
-        assert_eq!(jar.get_cookie_header(&target), "seed=1");
+        assert_eq!(get_header(&jar, &target), "seed=1");
     }
 
     #[tokio::test]
@@ -833,7 +844,7 @@ mod tests {
         let initiator = Url::parse("http://127.0.0.1:1/page").unwrap();
         let importing_module = target.join("/parent.js").unwrap();
         let jar = Arc::new(CookieJar::new());
-        jar.set_cookie("seed=1; Path=/", &target);
+        set_cookie(&jar, "seed=1; Path=/", &target);
         let client = HttpClient::with_full_options(jar.clone(), None, true);
 
         let response = client
@@ -851,7 +862,7 @@ mod tests {
         assert!(request.contains("sec-fetch-dest: script\r\n"));
         assert!(request.contains(&format!("referer: {importing_module}\r\n")));
         assert!(!request.contains("cookie:"));
-        assert_eq!(jar.get_cookie_header(&target), "seed=1");
+        assert_eq!(get_header(&jar, &target), "seed=1");
     }
 
     #[tokio::test]
@@ -867,7 +878,7 @@ mod tests {
         );
         let (target, mut received) = http_fixture(vec![wildcard, exact]).await;
         let jar = Arc::new(CookieJar::new());
-        jar.set_cookie("seed=1; Path=/", &target);
+        set_cookie(&jar, "seed=1; Path=/", &target);
         let client = HttpClient::with_full_options(jar.clone(), None, true);
         let mut request = ResourceRequest::subresource(ResourceType::Image, &initiator);
         request.mode = RequestMode::Cors;
@@ -887,7 +898,7 @@ mod tests {
         let second = received.recv().await.unwrap().to_ascii_lowercase();
         assert!(first.contains("cookie: seed=1\r\n"));
         assert!(second.contains("cookie: seed=1\r\n"));
-        let cookies = jar.get_cookie_header(&target);
+        let cookies = get_header(&jar, &target);
         assert!(cookies.contains("seed=1"));
         assert!(cookies.contains("accepted=1"));
     }
@@ -898,7 +909,7 @@ mod tests {
         let mut initiator = target.clone();
         initiator.set_path("/page");
         let jar = Arc::new(CookieJar::new());
-        jar.set_cookie("same=1; Path=/", &target);
+        set_cookie(&jar, "same=1; Path=/", &target);
         let client = HttpClient::with_full_options(jar, None, true);
         client
             .fetch_resource_with_callbacks(

@@ -7,8 +7,9 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use tinybrowser_dom::tree::{AttachShadowError, ShadowRootMode};
 use tinybrowser_dom::{DomTree, NodeData, NodeId};
 use tinybrowser_net::{
-    validate_url, CallbackRegistry, CookieJar, HttpClient, NetError, PrivateNetworkPolicy,
-    RequestCredentials, RequestMode, ResourceRequest,
+    validate_url, CallbackRegistry, Cookie, CookieJar, CookieQuery, HttpClient, NetError,
+    ParseAction, ParseOpts, PrivateNetworkPolicy, RequestCredentials, RequestMode,
+    ResourceRequest,
 };
 use tokio::sync::Mutex;
 
@@ -1799,7 +1800,7 @@ pub(crate) fn op_get_cookies_inner(shared: &SharedState) -> String {
         Ok(u) => u,
         Err(_) => return String::new(),
     };
-    jar.get_js_visible_cookies(&url)
+    jar.cookies_for(&url, CookieQuery { include_http_only: false })
 }
 pub(crate) fn op_set_cookie_inner(shared: &SharedState, cookie_str: &str) {
     let gs = shared.borrow();
@@ -1811,7 +1812,11 @@ pub(crate) fn op_set_cookie_inner(shared: &SharedState, cookie_str: &str) {
         Ok(u) => u,
         Err(_) => return,
     };
-    jar.set_cookie_from_js(cookie_str, &url);
+    match Cookie::parse(cookie_str, &url, ParseOpts { allow_http_only: false }) {
+        Ok(ParseAction::Store(c)) => { let _ = jar.store(c); }
+        Ok(ParseAction::Remove(k)) => { let _ = jar.remove(&k); }
+        Err(_) => {}
+    }
 }
 pub(crate) fn op_navigate_inner(shared: &SharedState, url: &str, method: &str, body: &str) {
     let mut gs = shared.borrow_mut();

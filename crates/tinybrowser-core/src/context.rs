@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tinybrowser_net::{CookieJar, HttpClient, RobotsCache};
+use tinybrowser_net::{cookies::file as cookie_file, CookieJar, HttpClient, RobotsCache};
 
 pub struct BrowserContext {
     pub id: String,
@@ -85,7 +85,7 @@ impl BrowserContext {
         if let Some(ref dir) = storage_dir {
             let cookie_path = dir.join("cookies.json");
             if cookie_path.exists() {
-                match cookie_jar.load_from_file(&cookie_path) {
+                match cookie_file::load(&cookie_jar, &cookie_path) {
                     Ok(n) if n > 0 => {
                         tracing::info!("Loaded {} cookies from {}", n, cookie_path.display());
                     }
@@ -195,7 +195,7 @@ impl BrowserContext {
         if let Some(ref dir) = self.storage_dir {
             let _ = std::fs::create_dir_all(dir);
             let cookie_path = dir.join("cookies.json");
-            if let Err(e) = self.cookie_jar.save_to_file(&cookie_path) {
+            if let Err(e) = cookie_file::save(&self.cookie_jar, &cookie_path) {
                 tracing::warn!("Failed to save cookies to {}: {}", cookie_path.display(), e);
             } else {
                 tracing::info!("Saved cookies to {}", cookie_path.display());

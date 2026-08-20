@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tinybrowser_net::CookieJar;
+use tinybrowser_net::{cookies::file as cookie_file, Cookie as NetCookie, CookieJar, CookieQuery, ParseAction, ParseOpts};
 
 /// A cookie as exposed to the Rust API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,20 +46,24 @@ impl CookieStore {
     /// Example: `store.set("session=abc123; Domain=example.com; Path=/; HttpOnly")?;`
     pub fn set(&self, set_cookie_str: &str, url: &str) -> Result<(), crate::error::Error> {
         let parsed = url::Url::parse(url).map_err(|e| crate::error::Error::Internal(e.into()))?;
-        self.jar.set_cookie(set_cookie_str, &parsed);
+        match NetCookie::parse(set_cookie_str, &parsed, ParseOpts { allow_http_only: true }) {
+            Ok(ParseAction::Store(c)) => { let _ = self.jar.store(c); }
+            Ok(ParseAction::Remove(k)) => { let _ = self.jar.remove(&k); }
+            Err(e) => return Err(crate::error::Error::Internal(e.into())),
+        }
         Ok(())
     }
 
     /// Get all cookies as a serializable list.
     pub fn get_all(&self) -> Vec<Cookie> {
         self.jar
-            .get_all_cookies()
+            .all()
             .into_iter()
             .map(|c| Cookie {
-                name: c.name,
+                name: c.name.0,
                 value: c.value,
-                domain: c.domain,
-                path: c.path,
+                domain: c.domain.0,
+                path: c.path.0,
                 secure: c.secure,
                 http_only: c.http_only,
             })
@@ -69,7 +73,7 @@ impl CookieStore {
     /// Get cookies for a specific URL.
     pub fn get_for_url(&self, url: &str) -> Result<Vec<Cookie>, crate::error::Error> {
         let parsed = url::Url::parse(url).map_err(|e| crate::error::Error::Internal(e.into()))?;
-        let header = self.jar.get_cookie_header(&parsed);
+        let header = self.jar.cookies_for(&parsed, CookieQuery { include_http_only: true });
         Ok(header
             .split("; ")
             .filter(|s| !s.is_empty())
@@ -89,15 +93,13 @@ impl CookieStore {
 
     /// Save cookies to a file (JSON format).
     pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), crate::error::Error> {
-        self.jar
-            .save_to_file(path)
+        cookie_file::save(&self.jar, path)
             .map_err(|e| crate::error::Error::Internal(e.into()))
     }
 
     /// Load cookies from a file.
     pub fn load_from_file(&self, path: &std::path::Path) -> Result<usize, crate::error::Error> {
-        self.jar
-            .load_from_file(path)
+        cookie_file::load(&self.jar, path)
             .map_err(|e| crate::error::Error::Internal(e.into()))
     }
 }

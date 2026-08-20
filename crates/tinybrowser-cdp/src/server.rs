@@ -297,7 +297,12 @@ fn run_connection(
     tokio::task::spawn_local(async move {
         let _slot = SlotGuard(slot);
         let default_context = Arc::new(context_template.isolated_copy("default".to_string(), true));
-        let initial_cookies = default_context.cookie_jar.get_all_cookies();
+        let initial_cookies: Vec<tinybrowser_net::CookieInfo> = default_context
+            .cookie_jar
+            .all()
+            .into_iter()
+            .map(Into::into)
+            .collect();
         let persisted_context = default_context.clone();
         let tokio_stream = match TcpStream::from_std(std_stream) {
             Ok(s) => s,
@@ -322,7 +327,12 @@ fn run_connection(
             merge_cookie_delta(
                 &persistence_context.cookie_jar,
                 &initial_cookies,
-                &persisted_context.cookie_jar.get_all_cookies(),
+                &persisted_context
+                    .cookie_jar
+                    .all()
+                    .into_iter()
+                    .map(Into::into)
+                    .collect::<Vec<_>>(),
             );
             persistence_context.save_cookies();
         }
@@ -364,7 +374,11 @@ fn merge_cookie_delta(
 
     for (key, cookie) in &initial {
         if !current.contains_key(key) {
-            destination.delete_cookies_filtered(&cookie.name, &cookie.domain, Some(&cookie.path));
+            let _ = destination.remove(&tinybrowser_net::CookieKey {
+                name: tinybrowser_net::CookieName(cookie.name.clone()),
+                domain: tinybrowser_net::Domain(cookie.domain.clone()),
+                path: Some(tinybrowser_net::CookiePath(cookie.path.clone())),
+            });
         }
     }
 
@@ -375,7 +389,11 @@ fn merge_cookie_delta(
             _ => Some((*cookie).clone()),
         })
         .collect();
-    destination.set_cookies_from_cdp(changed);
+    for info in changed {
+        if let Ok(c) = tinybrowser_net::Cookie::try_from(info) {
+            let _ = destination.store(c);
+        }
+    }
 }
 
 /// Turn away a connection that arrived while the server was at its limit.

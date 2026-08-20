@@ -12,6 +12,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = "0.1"
 encoding_rs = "0.8"
+httpdate = "1"
 tempfile = "3"
 futures-util = "0.3"
 # wreq and wreq-util are pre-release crates whose API changes between rc builds

@@ -16,7 +16,10 @@ pub use client::{
     HttpClient, STEALTH_NAVIGATOR_PLATFORM, STEALTH_UA_PLATFORM, STEALTH_UA_PLATFORM_VERSION,
     STEALTH_USER_AGENT,
 };
-pub use cookies::{default_cookie_path, CookieInfo, CookieJar};
+pub use cookies::{
+    default_cookie_path, Cookie, CookieInfo, CookieJar, CookieKey, CookieName, CookiePath,
+    CookieQuery, Domain, ParseAction, ParseError, ParseOpts, SameSite, UnixSecs,
+};
 pub use encoding::{
     decode_html, decode_text, url_encode_query, DecodedHtml, TextDecoder, TextDecoderOptions,
 };
