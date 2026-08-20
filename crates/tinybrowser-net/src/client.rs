@@ -20,7 +20,9 @@ use crate::cors::{
     validate_request_mode,
 };
 use crate::interceptor::{InterceptAction, RequestInterceptor};
-use crate::ssrf::{custom_cert_store_requested, fetch_file_url, validate_url};
+use crate::ssrf::{
+    custom_cert_store_requested, fetch_file_url, validate_url, PrivateNetworkPolicy,
+};
 use crate::types::{
     response_too_large, NetError, RequestInfo, RequestMode, ResourceRequest, ResourceType, Response,
 };
@@ -477,7 +479,7 @@ impl HttpClient {
         callbacks: Option<&CallbackRegistry>,
         request: ResourceRequest,
     ) -> Result<Response, NetError> {
-        validate_url(url, self.allow_private_network)?;
+        validate_url(url, PrivateNetworkPolicy::from(self.allow_private_network))?;
         validate_request_mode(&request, url)?;
 
         if url.scheme() == "file" {
@@ -634,7 +636,10 @@ impl HttpClient {
                     let next_url = current_url
                         .join(location_str)
                         .map_err(|e| NetError::Network(format!("Invalid redirect URL: {e}")))?;
-                    validate_url(&next_url, self.allow_private_network)?;
+                    validate_url(
+                        &next_url,
+                        PrivateNetworkPolicy::from(self.allow_private_network),
+                    )?;
                     validate_request_mode(&request, &next_url)?;
                     redirect_tainted |= redirect_taints_origin(&request, &current_url, &next_url);
                     redirects.push(current_url.clone());

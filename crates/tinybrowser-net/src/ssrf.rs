@@ -61,8 +61,30 @@ pub(crate) fn custom_cert_store_requested(
     cert_file.is_some_and(|v| !v.is_empty()) || cert_dir.is_some_and(|v| !v.is_empty())
 }
 
-pub fn validate_url(url: &Url, allow_private_network: bool) -> Result<(), NetError> {
-    let allow_private_network = allow_private_network || env_allows_private_network();
+/// Explicit policy for private-network access. Using an enum instead of a
+/// bare `bool` makes call sites self-documenting: `Allow` vs `Deny` rather
+/// than `true`/`false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivateNetworkPolicy {
+    Allow,
+    Deny,
+}
+
+impl From<bool> for PrivateNetworkPolicy {
+    fn from(allow: bool) -> Self {
+        if allow { Self::Allow } else { Self::Deny }
+    }
+}
+
+impl PrivateNetworkPolicy {
+    pub fn allows_private_network(self) -> bool {
+        matches!(self, Self::Allow)
+    }
+}
+
+pub fn validate_url(url: &Url, policy: PrivateNetworkPolicy) -> Result<(), NetError> {
+    let allow_private_network =
+        policy.allows_private_network() || env_allows_private_network();
     let scheme = url.scheme();
     if scheme != "http" && scheme != "https" && scheme != "file" {
         return Err(NetError::Ssrf(format!(
@@ -212,14 +234,28 @@ mod tests {
     #[test]
     fn validate_url_blocks_unspecified_and_allows_public() {
         assert!(matches!(
-            validate_url(&Url::parse("http://0.0.0.0:8080/").unwrap(), false),
+            validate_url(
+                &Url::parse("http://0.0.0.0:8080/").unwrap(),
+                super::PrivateNetworkPolicy::Deny
+            ),
             Err(crate::types::NetError::Ssrf(_))
         ));
         assert!(matches!(
-            validate_url(&Url::parse("http://127.0.0.1/").unwrap(), false),
+            validate_url(
+                &Url::parse("http://127.0.0.1/").unwrap(),
+                super::PrivateNetworkPolicy::Deny
+            ),
             Err(crate::types::NetError::Ssrf(_))
         ));
-        assert!(validate_url(&Url::parse("http://example.com/").unwrap(), false).is_ok());
-        assert!(validate_url(&Url::parse("http://127.0.0.1/").unwrap(), true).is_ok());
+        assert!(validate_url(
+            &Url::parse("http://example.com/").unwrap(),
+            super::PrivateNetworkPolicy::Deny
+        )
+        .is_ok());
+        assert!(validate_url(
+            &Url::parse("http://127.0.0.1/").unwrap(),
+            super::PrivateNetworkPolicy::Allow
+        )
+        .is_ok());
     }
 }

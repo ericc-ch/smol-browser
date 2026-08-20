@@ -7,8 +7,8 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use tinybrowser_dom::tree::{AttachShadowError, ShadowRootMode};
 use tinybrowser_dom::{DomTree, NodeData, NodeId};
 use tinybrowser_net::{
-    validate_url, CallbackRegistry, CookieJar, HttpClient, NetError, RequestCredentials,
-    RequestMode, ResourceRequest,
+    validate_url, CallbackRegistry, CookieJar, HttpClient, NetError, PrivateNetworkPolicy,
+    RequestCredentials, RequestMode, ResourceRequest,
 };
 use tokio::sync::Mutex;
 
@@ -1451,7 +1451,10 @@ pub(crate) fn start_fetch(
         .as_ref()
         .is_some_and(|client| client.allow_private_network);
     if let Ok(parsed_url) = url::Url::parse(&url) {
-        if let Err(e) = validate_url(&parsed_url, allow_private_network) {
+        if let Err(e) = validate_url(
+            &parsed_url,
+            PrivateNetworkPolicy::from(allow_private_network),
+        ) {
             return FetchStart::Immediate(FetchOutcome::blocked(&url, Some(e.to_string())));
         }
     }
@@ -1631,7 +1634,9 @@ pub(crate) async fn run_fetch_job(job: FetchJob) -> Result<FetchOutcome, String>
     // bypass validate_url entirely.
     let url = if let Some(new_url) = override_url {
         if let Ok(parsed) = url::Url::parse(&new_url) {
-            if let Err(reason) = validate_url(&parsed, allow_private_network) {
+            if let Err(reason) =
+                validate_url(&parsed, PrivateNetworkPolicy::from(allow_private_network))
+            {
                 return Ok(json_outcome(serde_json::json!({
                     "status": 0,
                     "body": "",
@@ -2357,7 +2362,11 @@ mod tests {
     #[test]
     fn fetch_url_validation_honors_per_context_private_network_opt_in() {
         let loopback = url::Url::parse("http://127.0.0.1:8080/resource").unwrap();
-        assert!(tinybrowser_net::validate_url(&loopback, true).is_ok());
+        assert!(tinybrowser_net::validate_url(
+            &loopback,
+            tinybrowser_net::PrivateNetworkPolicy::Allow
+        )
+        .is_ok());
     }
 
     #[tokio::test(flavor = "current_thread")]

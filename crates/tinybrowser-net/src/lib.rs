@@ -21,7 +21,9 @@ pub use encoding::{
     decode_html, decode_text, url_encode_query, DecodedHtml, TextDecoder, TextDecoderOptions,
 };
 pub use robots::RobotsCache;
-pub use ssrf::{env_allows_private_network, is_forbidden_ip, validate_url};
+pub use ssrf::{
+    env_allows_private_network, is_forbidden_ip, validate_url, PrivateNetworkPolicy,
+};
 pub use types::{
     NetError, RequestCredentials, RequestInfo, RequestMode, ResourceRequest, ResourceType, Response,
 };
