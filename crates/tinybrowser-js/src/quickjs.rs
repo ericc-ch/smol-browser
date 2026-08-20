@@ -773,6 +773,8 @@ impl QuickJsRuntime {
             guarded(|| ops::url_encode_query(&query, &label, special))
         });
 
+        crate::text_codec::register_text_codec(&ctx).map_err(|e| e.to_string())?;
+
         // Any op the shim probes that is not registered here (the whole
         // render family) falls back to the no-op stub, so bootstrap.js
         // boots unmodified on no-render builds.

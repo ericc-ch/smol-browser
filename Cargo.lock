@@ -2218,6 +2218,7 @@ dependencies = [
  "cbc",
  "ctr",
  "deno_error",
+ "encoding_rs",
  "getrandom 0.2.17",
  "hkdf",
  "hmac",

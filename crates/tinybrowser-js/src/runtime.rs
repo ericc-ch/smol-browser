@@ -7929,6 +7929,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_text_encoding_wpt_matrix() {
+        let mut rt = setup_runtime("<div></div>");
+        // Table-driven WPT-style matrix: 20 rows covering utf-8/gbk/big5/shift_jis/euc-* × fatal/BOM/RangeError
+        let cases: &[(&str, &str, &str)] = &[
+            // utf-8 basics
+            ("new TextDecoder().decode(new Uint8Array([65,66,67]))", "\"ABC\"", "utf-8 default"),
+            ("new TextDecoder().decode(new Uint8Array([65, 66, 67]).subarray(1, 2))", "\"B\"", "typed array view"),
+            ("new TextDecoder().decode(new DataView(new Uint8Array([65,66,67]).buffer))", "\"ABC\"", "DataView"),
+            ("new TextDecoder().decode(new Uint8Array([65,66,67]).buffer)", "\"ABC\"", "ArrayBuffer"),
+            ("new TextDecoder().decode()", "\"\"", "empty"),
+            // BOM handling
+            ("new TextDecoder().decode(new Uint8Array([0xEF,0xBB,0xBF,65]))", "\"A\"", "BOM stripped by default"),
+            ("new TextDecoder('utf-8', {ignoreBOM:true}).decode(new Uint8Array([0xEF,0xBB,0xBF,65])).charCodeAt(0) === 0xFEFF", "true", "ignoreBOM true"),
+            // fatal
+            ("(function(){ try { new TextDecoder('utf-8', {fatal:true}).decode(new Uint8Array([0xFF])); return 'no-throw'; } catch(e){ return e.name; }})()", "\"TypeError\"", "fatal throws"),
+            ("new TextDecoder('utf-8').decode(new Uint8Array([0xFF])).charCodeAt(0) === 0xFFFD", "true", "non-fatal replacement"),
+            // bad label
+            ("(function(){ try { new TextDecoder('bad-label'); return 'no-throw'; } catch(e){ return e.name; }})()", "\"RangeError\"", "bad label"),
+            // legacy encodings
+            ("new TextDecoder('gbk').decode(new Uint8Array([0xC4, 0xE3, 0xBA, 0xC3]))", "\"你好\"", "gbk hello"),
+            ("new TextDecoder('gb2312').decode(new Uint8Array([0xC4, 0xE3]))", "\"你\"", "gbk alias"),
+            ("new TextDecoder('big5').decode(new Uint8Array([0xA4,0x40]))", "\"一\"", "big5"),
+            ("new TextDecoder('shift_jis').decode(new Uint8Array([0x82,0xA0]))", "\"あ\"", "shift_jis"),
+            ("new TextDecoder('euc-jp').decode(new Uint8Array([0xA4,0xA2]))", "\"あ\"", "euc-jp"),
+            ("new TextDecoder('euc-kr').decode(new Uint8Array([0xB0,0xA1]))", "\"가\"", "euc-kr"),
+            // TextEncoder
+            ("JSON.stringify(Array.from(new TextEncoder().encode('ABC')))", "\"[65,66,67]\"", "TextEncoder encode"),
+            ("new TextEncoder().encoding", "\"utf-8\"", "TextEncoder encoding"),
+            ("(function(){ const e=new TextEncoder(); const d=new Uint8Array(10); const r=e.encodeInto('hello', d); return r.read===5 && r.written===5; })()", "true", "encodeInto full"),
+            ("(function(){ const e=new TextEncoder(); const d=new Uint8Array(2); const r=e.encodeInto('hello', d); return r.read===2 && r.written===2; })()", "true", "encodeInto truncated"),
+        ];
+        for (expr, expected_json, name) in cases {
+            let got = rt.evaluate(expr).unwrap().to_string();
+            assert_eq!(&got, expected_json, "case {name}: {expr}");
+        }
+        // Also verify native toString
+        let native = rt.evaluate("TextDecoder.toString().includes('[native code]')").unwrap();
+        assert_eq!(native, serde_json::Value::Bool(true), "TextDecoder should be native");
+    }
+
     /// Regression test for #285: DDoS-Guard's challenge calls
     /// `t.insertAdjacentText(...)` and dies with `TypeError: ... is not a
     /// function` because `Element.prototype.insertAdjacentText` was missing.

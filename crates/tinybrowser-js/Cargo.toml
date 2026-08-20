@@ -31,6 +31,7 @@ pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 hkdf = "0.12"
 # CSPRNG for getRandomValues / randomUUID (replaces Math.random).
 getrandom = "0.2"
+encoding_rs = "0.8"
 # QuickJS-ng via the safe Rust wrapper. `loader` is the ES-module resolver/loader hook.
 rquickjs = { version = "0.12.2", features = ["loader", "macro", "classes"] }
 
