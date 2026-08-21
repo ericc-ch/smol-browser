@@ -30,5 +30,6 @@
 ## Contributing
 
 * [Architecture overview](Architecture-overview.md)
+* [Minimum binary size](Binary-size.md)
 * [Adding a CDP method or Web API](Adding-a-CDP-method-or-Web-API.md)
 * [Testing and debugging](Testing-and-debugging.md)

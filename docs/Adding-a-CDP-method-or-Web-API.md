@@ -140,7 +140,7 @@ cargo build --release --features render
 
 ## Tips
 
-- Keep the JS shim thin. All side effects go through ops.
+- Keep the JS shim thin. All side effects go through ops. Prefer one host op plus JS over a new `#[rquickjs::methods]` export; native trampolines cost `.text`. See [Minimum binary size](Binary-size.md).
 - Use `Promise.resolve` to keep async-shaped APIs callable from sync ops.
 - Match the spec: Web API names and shapes are checked by Puppeteer / Playwright wrappers.
 - DOM mutations go through `op_dom`, not new ops.
